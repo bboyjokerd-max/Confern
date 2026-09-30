@@ -67,6 +67,9 @@ internal sealed class Options
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
           --watchdog-seconds <N>    override guard #3 visible timeout (default 30)
+          --assume-explorer-foreground
+                                    diagnostic: arm without the explorer-foreground
+                                    check, so acceptance runs need not steal focus
           --log <path>              evidence log path
           --trigger-key <0xNN|NAME> trigger virtual-key (default 0x20 / VK_SPACE)
           --cycle-test <N>          show/hide the hit layer N times and exit
@@ -88,6 +91,14 @@ internal sealed class Options
     /// </summary>
     public int WatchdogSeconds = 30;
 
+    /// <summary>
+    /// 診斷專用：略過「左鍵按下時前景必須是 explorer」的判定。
+    /// 存在的理由＝自動化驗收若必須先把 explorer 弄到前景，就得去最小化使用者的視窗，
+    /// 讓測試本身的穩定性取決於桌面上剛好有什麼；代價是停用零侵入的第一道保證，
+    /// 因此一律寫進證據、永不預設。
+    /// </summary>
+    public bool AssumeExplorerForeground;
+
     public static Options Parse(string[] args)
     {
         var o = new Options();
@@ -100,6 +111,7 @@ internal sealed class Options
                 case "--version" or "-v": o.ShowVersion = true; break;
                 case "--dump-monitors": o.DumpMonitors = true; break;
                 case "--raise": o.ForceRaiseHitLayer = true; break;
+                case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
                 case "--quiet": o.Quiet = true; break;
                 case "--log":
                     if (++i < args.Length) o.LogPath = args[i];
@@ -147,7 +159,8 @@ internal static class App
         using var evidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
         evidence.Line($"Sidecar {Program.VersionText()} starting: trigger=VK 0x{opt.TriggerKey:X2} " +
                       $"dumpMonitors={opt.DumpMonitors} raise={opt.ForceRaiseHitLayer} " +
-                      $"cycleTest={opt.CycleTest} log={evidence.Path}");
+                      $"cycleTest={opt.CycleTest} assumeExplorerForeground={opt.AssumeExplorerForeground} " +
+                      $"log={evidence.Path}");
 
         try
         {
@@ -185,7 +198,7 @@ internal static class App
 
         using var hit = new HitLayer(evidence, monitors, Native.OverlayAlpha);
         using var guard = new ReleaseGuard(evidence, hit, opt.WatchdogSeconds * 1000);
-        var detector = new DragDetector(evidence, opt.TriggerKey);
+        var detector = new DragDetector(evidence, opt.TriggerKey, opt.AssumeExplorerForeground);
 
         hit.FilesDropped += (index, paths) =>
         {

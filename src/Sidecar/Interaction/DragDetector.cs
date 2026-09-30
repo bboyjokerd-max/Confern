@@ -13,6 +13,7 @@ internal sealed class DragDetector
     private readonly Evidence _evidence;
     private readonly int _thresholdX;
     private readonly int _thresholdY;
+    private readonly bool _assumeExplorerForeground;
 
     private DetectorState _state = DetectorState.Idle;
     private Native.POINT _armedAt;
@@ -28,13 +29,21 @@ internal sealed class DragDetector
     public bool IsDisabled { get; private set; }
     public DetectorState State => _state;
 
-    public DragDetector(Evidence evidence, uint triggerKey)
+    public DragDetector(Evidence evidence, uint triggerKey, bool assumeExplorerForeground = false)
     {
         _evidence = evidence;
         TriggerKey = triggerKey;
+        _assumeExplorerForeground = assumeExplorerForeground;
         _thresholdX = Math.Max(2, Native.GetSystemMetrics(Native.SM_CXDRAG));
         _thresholdY = Math.Max(2, Native.GetSystemMetrics(Native.SM_CYDRAG));
         _evidence.Line($"detector ready threshold=({_thresholdX},{_thresholdY}) trigger=0x{triggerKey:X2}");
+        if (assumeExplorerForeground)
+        {
+            // 診斷用：讓自動化驗收不必為了「前景必須是 explorer」去最小化使用者的視窗。
+            // 這會停用「非觸發拖曳零侵入」的第一道保證，因此一律留下痕跡、永不預設開啟。
+            _evidence.Line("detector WARNING: foreground check DISABLED (--assume-explorer-foreground); " +
+                           "zero-interference precondition is NOT being verified in this run");
+        }
     }
 
     /// <summary>緊急停用（保險 #5）：此後不再進入 Armed／Capturing，直到重啟。</summary>
@@ -61,7 +70,7 @@ internal sealed class DragDetector
         switch (msg)
         {
             case Native.WM_LBUTTONDOWN:
-                if (!IsDisabled && IsExplorerForeground())
+                if (!IsDisabled && (_assumeExplorerForeground || IsExplorerForeground()))
                 {
                     _armedAt = pt;
                     SetState(DetectorState.Armed);
