@@ -67,6 +67,17 @@
 `WM_DROPFILES`？若不再送，放手當下的「檔案清單權威」必須改成 OLE 這條。兩條路都會收層，
 所以不會有收不了層的失效模式；但**檔案清單的權威必須唯一**（M1d 的檔案操作會依賴它）。
 
+### 3.6 酬載之後的路徑（**注入式**驗證，明確不含 OLE 管線）
+
+以 `--wheel-payload` 把假酬載直接餵進「真實 `DragEnter` 之後」的處理常式（同一份 `ShowWheelFromPayload`）。
+**它不證明 OLE 管線可用**（那要 S8）；它證明的是拿到酬載之後的行為：
+
+| 輸入 | 扇區 | 預覽 | 延遲 |
+|------|------|------|------|
+| `C:\Temp\holiday.jpg` | `PNG,WEBP,BMP,TIF`（**JPG 已排除**） | `holiday.png` → 選取後 `holiday.webp` → `holiday.bmp` | 15.8 ms |
+| `C:\Temp\holiday.heic` | 5 個（HEIC 不在清單內） | `holiday.png` → `holiday.jpg` | 17.3 ms |
+| 兩張 `.jpg` | `PNG,WEBP,BMP,TIF` | `2 個檔案`（不隨選取改變） | — |
+
 ## 4. 本切片發現並修正的缺陷
 
 | # | 缺陷 | 影響 | 處置 |
@@ -76,6 +87,8 @@
 | 3 | `Marshal.Copy` 沒有 `IntPtr→IntPtr` 多載（計畫裡的程式碼不合法，CS1503） | 建置失敗 | 改走中繼緩衝區逐列複製；計畫內的程式碼一併更正 |
 | 4 | PowerShell **逗號優先序高於加號**：`@($x + 1, $y + 2)` → `$x + (1,$y) + 2` | 跑者取樣段拋 `op_Addition on Object[]`，且 PS 5.1 不給行號 | 每個元素獨立加括號 |
 | 5 | 方法名 `GeometrySelfTest` 與同類別欄位同名；且執行邏輯掛在 `App` 而非 `Options` | CS1955／CS0117 | 改名 `RunGeometrySelfTest` 並以 `App.` 呼叫 |
+| 6 | **原格式出現在自己的輸出扇區裡**（來源 `JPG` 時扇區仍含 `JPG`），違反規格 §4.3 | 使用者會看到「JPG → JPG」這種荒謬選項 | `StubFormatCatalog.TargetsFor` 改為排除來源；並在介面上寫明「排除來源是 `IFormatCatalog` 的契約，M1c 不得推回 UI」。**示範資料（來源 HEIC）永遠踩不到這個缺陷**——只有餵真實酬載才會浮現 |
+| 7 | COM 可見的公開簽章用到 internal 型別（`Native.POINT`、`Evidence`） | CS0051 ×7 | 另立 `OleInterop.OlePoint`（版面相同）；`DropTarget` 改注入 `Action<string>` 記錄器，不再依賴 `Evidence` |
 
 ## 5. 事故（自我揭露）
 

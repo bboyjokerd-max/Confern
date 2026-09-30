@@ -25,7 +25,18 @@ internal sealed class StubFormatCatalog : IFormatCatalog
         return ext.TrimStart('.').ToUpperInvariant();
     }
 
-    public IReadOnlyList<string> TargetsFor(string? sourceFormat) => DefaultTargets;
+    /// <summary>
+    /// 規格 §4.3：扇區＝所有可輸出格式**排除來源**。這條不變式屬本介面的契約，
+    /// 因此實作（含本假目錄）都必須自己遵守——M1c 不得把責任推回 UI。
+    /// </summary>
+    public IReadOnlyList<string> TargetsFor(string? sourceFormat)
+    {
+        if (string.IsNullOrEmpty(sourceFormat)) return DefaultTargets;
+        var list = new List<string>(DefaultTargets.Length);
+        foreach (string f in DefaultTargets)
+            if (!string.Equals(f, sourceFormat, StringComparison.OrdinalIgnoreCase)) list.Add(f);
+        return list;
+    }
 
     public string ExtensionOf(string targetFormat) => targetFormat.ToLowerInvariant();
 }

@@ -94,6 +94,8 @@ internal sealed class Options
           --wheel-geometry-selftest check the wheel geometry against known angles and exit
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
+          --wheel-payload <p1;p2;...>
+                                    inject a payload into the post-DragEnter path (diagnostic) and exit
           --quiet                   do not echo events to the console
         """;
 
@@ -131,6 +133,12 @@ internal sealed class Options
     public bool GeometrySelfTest;
     public int WheelSimulateCycles;
 
+    /// <summary>
+    /// 診斷用：把假的酬載直接餵進「真實 DragEnter 之後」的處理路徑（分號分隔的路徑清單）。
+    /// 它**不**驗證 OLE 管線本身（那需要真實拖曳），只驗證拿到酬載之後的行為。
+    /// </summary>
+    public string? WheelPayload;
+
     public static Options Parse(string[] args)
     {
         var o = new Options();
@@ -157,6 +165,9 @@ internal sealed class Options
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int wp)) { o.WheelPreviews = wp; i++; }
                     break;
                 case "--wheel-geometry-selftest": o.GeometrySelfTest = true; break;
+                case "--wheel-payload":
+                    if (i + 1 < args.Length) { o.WheelPayload = args[i + 1]; i++; }
+                    break;
                 case "--wheel-simulate-cycles":
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int sc)) { o.WheelSimulateCycles = sc; i++; }
                     break;
@@ -298,6 +309,22 @@ internal static class App
 
         if (opt.WheelSimulateCycles > 0)
             return WheelSimulateCycle(hit, guard, evidence, presenter, catalog, opt.WheelSimulateCycles);
+
+        if (opt.WheelPayload != null)
+        {
+            string[] injected = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            evidence.Line($"*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): {injected.Length} path(s) ***");
+            ShowWheelFromPayload(presenter, catalog, evidence, injected);
+
+            // 規格 §4.3：選中項下方顯示輸出檔名 → 換扇區時預覽必須跟著換。
+            for (int step = 1; step <= 2; step++)
+            {
+                int idx = presenter.SelectNext(1);
+                evidence.Line($"payload select#{step}: index={idx} target={presenter.SelectedTarget} " +
+                              $"preview={presenter.CurrentPreview ?? "-"}");
+            }
+            return 0;
+        }
 
         using var hooks = new Hooks();
         if (opt.ForceRaiseHitLayer)

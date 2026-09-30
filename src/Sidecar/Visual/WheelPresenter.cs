@@ -41,6 +41,9 @@ internal sealed class WheelPresenter
     public int Selected => _selected;
     public string? SelectedTarget => _targets.Count > 0 ? _targets[_selected] : null;
 
+    /// <summary>目前這一格會顯示的預覽文字（與 <c>Compose</c> 用的是同一個來源）。</summary>
+    public string? CurrentPreview => _notice ?? _preview?.Invoke(_selected);
+
     public WheelPresenter(Evidence evidence, VisualLayer layer)
     {
         _evidence = evidence;
