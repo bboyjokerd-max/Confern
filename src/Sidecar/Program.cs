@@ -1,3 +1,7 @@
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Reflection;
 
 namespace Sidecar;
@@ -73,6 +77,7 @@ internal sealed class Options
           --log <path>              evidence log path
           --trigger-key <0xNN|NAME> trigger virtual-key (default 0x20 / VK_SPACE)
           --cycle-test <N>          show/hide the hit layer N times and exit
+          --wheel-demo <X> <Y>      raise both layers and paint the T1 demo bitmap at (X,Y)
           --quiet                   do not echo events to the console
         """;
 
@@ -99,6 +104,10 @@ internal sealed class Options
     /// </summary>
     public bool AssumeExplorerForeground;
 
+    /// <summary>診斷用：把視覺層（T1 示範圖）顯示在指定螢幕座標，用來驗證兩層堆疊的穿透。</summary>
+    public int? WheelDemoX;
+    public int? WheelDemoY;
+
     public static Options Parse(string[] args)
     {
         var o = new Options();
@@ -112,6 +121,13 @@ internal sealed class Options
                 case "--dump-monitors": o.DumpMonitors = true; break;
                 case "--raise": o.ForceRaiseHitLayer = true; break;
                 case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
+                case "--wheel-demo":
+                    if (i + 2 < args.Length &&
+                        int.TryParse(args[i + 1], out int wx) && int.TryParse(args[i + 2], out int wy))
+                    {
+                        o.WheelDemoX = wx; o.WheelDemoY = wy; i += 2;
+                    }
+                    break;
                 case "--quiet": o.Quiet = true; break;
                 case "--log":
                     if (++i < args.Length) o.LogPath = args[i];
@@ -213,6 +229,9 @@ internal static class App
 
         if (opt.CycleTest > 0) return CycleTest(hit, evidence, opt.CycleTest);
 
+        if (opt.WheelDemoX.HasValue)
+            return WheelDemo(hit, guard, evidence, opt.WheelDemoX.Value, opt.WheelDemoY!.Value);
+
         using var hooks = new Hooks();
         if (opt.ForceRaiseHitLayer)
         {
@@ -244,6 +263,78 @@ internal static class App
         (Native.GetAsyncKeyState((int)Native.VK_CONTROL) & 0x8000) != 0 &&
         (Native.GetAsyncKeyState((int)Native.VK_MENU) & 0x8000) != 0 &&
         (Native.GetAsyncKeyState((int)Native.VK_SHIFT) & 0x8000) != 0;
+
+    /// <summary>
+    /// T1 生死線 2（診斷用）：同時升起命中層與視覺層，證明「視覺層存在時拖放仍穿透到命中層」。
+    /// 兩層都必須是可見的——`WindowFromPoint` 只會回可見視窗，隱藏起來驗不出穿透。
+    /// </summary>
+    private static int WheelDemo(HitLayer hit, ReleaseGuard guard, Evidence evidence, int x, int y)
+    {
+        evidence.Line($"--wheel-demo: hooks NOT installed; demo at ({x},{y})");
+        guard.OnCaptured();                       // 升起命中層，並用真正的保險 #3 計時
+
+        using var visual = new VisualLayer(evidence);
+        var sw = Stopwatch.StartNew();
+        using var bmp = PaintDemoBitmap(DemoBitmapSize);
+        visual.Show(x, y, bmp);
+        sw.Stop();
+
+        evidence.Line($"visual demo shown at ({x},{y}) size={bmp.Width}x{bmp.Height} " +
+                      $"in {sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+        return RunMessageLoop(evidence);
+    }
+
+    /// <summary>示範圖尺寸＝輪盤直徑 + 邊距（T3 會由 WheelPresenter 依實際版面決定）。</summary>
+    private const int DemoBitmapSize = 260;
+
+    /// <summary>
+    /// T1 的示範點陣圖：4 個扇區 + 中心文字。目的不是外觀，而是**一次驗證 GDI+ 寫進 alpha 通道
+    /// 與文字反鋸齒都正確**（傳統 GDI 不會寫 alpha；GDI+ 的 ClearType 會把 alpha 弄壞，故用 AntiAlias）。
+    /// </summary>
+    private static Bitmap PaintDemoBitmap(int size)
+    {
+        var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.CompositingMode = CompositingMode.SourceOver;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+        g.Clear(Color.Transparent);
+
+        float c = size / 2f;
+        float r = c - 6f;
+        var colors = new[]
+        {
+            Color.FromArgb(235, 33, 150, 243), Color.FromArgb(235, 76, 175, 80),
+            Color.FromArgb(235, 255, 152, 0),  Color.FromArgb(235, 156, 39, 176)
+        };
+        var labels = new[] { "PNG", "JPG", "WEBP", "BMP" };
+        float sweep = 360f / colors.Length;
+
+        for (int i = 0; i < colors.Length; i++)
+        {
+            using var brush = new SolidBrush(colors[i]);
+            g.FillPie(brush, c - r, c - r, r * 2, r * 2, -90f + i * sweep, sweep - 1.5f);
+        }
+
+        // 扇區標籤：放在各扇區中間角、半徑 0.68r 處
+        using var fg = new SolidBrush(Color.White);
+        using var font = new Font("Segoe UI", 9f, FontStyle.Bold, GraphicsUnit.Point);
+        using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        for (int i = 0; i < labels.Length; i++)
+        {
+            double mid = (-90.0 + (i + 0.5) * sweep) * Math.PI / 180.0;
+            float lx = c + (float)(Math.Cos(mid) * r * 0.68);
+            float ly = c + (float)(Math.Sin(mid) * r * 0.68);
+            g.DrawString(labels[i], font, fg, new RectangleF(lx - 34, ly - 11, 68, 22), sf);
+        }
+
+        using var centerBrush = new SolidBrush(Color.FromArgb(242, 24, 26, 32));
+        g.FillEllipse(centerBrush, c - 52, c - 52, 104, 104);
+        using var font2 = new Font("Segoe UI", 12f, FontStyle.Bold, GraphicsUnit.Point);
+        g.DrawString("HEIC → PNG", font2, fg, new RectangleF(c - 50, c - 12, 100, 24), sf);
+
+        return bmp;
+    }
 
     /// <summary>程式化收層循環：N 次升起／收起後以**作業系統狀態**斷言全部隱藏。</summary>
     private static int CycleTest(HitLayer hit, Evidence evidence, int cycles)

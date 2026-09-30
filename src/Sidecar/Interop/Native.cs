@@ -220,4 +220,52 @@ internal static class Native
         HideReasonManual => "manual",
         _ => $"unknown({code})"
     };
+
+    // ================= M1b：視覺層繪製（per-pixel alpha） =================
+    // 命中層與視覺層用的是同一個位元（0x20），但契約**相反**：
+    //   命中層  **絕不可**設（設了 WindowFromPoint 會跳過它，拖放全部失效）
+    //   視覺層  **必須**設（設了拖放才會穿透它、落到下面的命中層）
+    // 刻意保留兩個名稱：避免有人把其中一邊的斷言複製到另一邊。
+    public const int WS_EX_TRANSPARENT = 0x00000020;
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE { public int cx; public int cy; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BLENDFUNCTION
+    { public byte BlendOp; public byte BlendFlags; public byte SourceConstantAlpha; public byte AlphaFormat; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public int biSize; public int biWidth; public int biHeight;
+        public short biPlanes; public short biBitCount;
+        public int biCompression; public int biSizeImage;
+        public int biXPelsPerMeter; public int biYPelsPerMeter;
+        public int biClrUsed; public int biClrImportant;
+    }
+
+    public const uint ULW_ALPHA = 0x02;
+    public const byte AC_SRC_OVER = 0x00;
+    public const byte AC_SRC_ALPHA = 0x01;
+    public const int BI_RGB = 0;
+    public const uint DIB_RGB_COLORS = 0;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, ref POINT pptDst,
+        ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+
+    [DllImport("gdi32.dll", SetLastError = true)] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll", SetLastError = true)]
+    public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER pbmi, uint usage,
+        out IntPtr ppvBits, IntPtr hSection, uint offset);
+    [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
+    [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hdc);
+
+    /// <summary>命中測試查詢：**會**跳過 WS_EX_TRANSPARENT 的視窗，因此正好可以證明穿透成立。</summary>
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
 }

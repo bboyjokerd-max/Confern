@@ -15,5 +15,13 @@
     <Version>0.1.0</Version>
     <!-- 預設會把 git revision 併成 0.1.0+<sha>；對外顯示版本不要夾帶 commit -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!--
+      M1b 只用 GDI+（System.Drawing）把輪盤畫進 32bpp ARGB 點陣圖，再交給 UpdateLayeredWindow。
+      為什麼不是 System.Drawing.Common 的 PackageReference：本機沒有 NuGet 全域快取，
+      新增套件會讓離線建置失敗；Microsoft.WindowsDesktop.App.Ref 目標套件已在本機，
+      UseWindowsForms 可離線解析（tools/dragsim 已在用）。本專案**不使用任何 WinForms 型別**，
+      也不呼叫 ApplicationConfiguration.Initialize()（DPI 感知由 app.manifest 的 PerMonitorV2 決定）。
+    -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 </Project>
