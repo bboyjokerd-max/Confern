@@ -15,6 +15,11 @@
       "source": "docs/aegis/specs/2026-09-30-sidecar-drag-convert-design.md",
       "banner": "tools/obsidian/02-banner.md",
       "dest": "02 設計規格 - 權威.md"
+    },
+    {
+      "source": "docs/aegis/plans/2026-09-30-m05-feasibility.md",
+      "banner": "tools/obsidian/03-banner.md",
+      "dest": "03 實作計畫 - M0.5 生死線.md"
     }
   ]
 }
