@@ -3,7 +3,7 @@
 # Sections:
 #   S6  two-layer stack: the visual layer must be click-through (automatic, NON-INVASIVE)
 #   S7  wheel show/hide visibility + wheel rectangle                          (automatic)
-#   S8  synthetic OLE drag: wheel appears while dragging                      (NEEDS THE MOUSE)
+#   S8  a REAL drag must produce DragEnter -> wheel in <=100 ms      (NEEDS A HUMAN, not input)
 #
 # NOTE: keep this file ASCII-only. PowerShell 5.1 mis-decodes BOM-less UTF-8 script
 # literals, so any non-ASCII text here corrupts string parsing.
@@ -24,7 +24,9 @@ param(
   [int]$PadPx = 24,
   [int]$DemoW = 304,
   [int]$DemoH = 330,
-  [string]$LogDir = "$env:TEMP\sidecar-verify"
+  [string]$LogDir = "$env:TEMP\sidecar-verify",
+  # S8 is human-guided: it prints instructions, waits this long, then inspects the log.
+  [int]$S8WindowSeconds = 90
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,6 +101,29 @@ function Test-Log([string[]]$l, [string]$p) { return [bool]($l | Select-String -
 # Select-String is CASE-INSENSITIVE by default, so "FAIL" also matches "failed=0" in the
 # app's own summary line. Any check about the presence of a FAIL line must use this one.
 function Test-LogCase([string[]]$l, [string]$p) { return [bool]($l | Select-String -Pattern $p -CaseSensitive -Quiet) }
+# Count matching lines, case-sensitively: the log strings below are written by the app
+# verbatim, and "-CaseSensitive" keeps a near-miss from counting as a hit.
+function Count-Log([string[]]$l, [string]$p) { return @($l | Select-String -Pattern $p -CaseSensitive).Count }
+
+# Milliseconds between the first line matching $from and the next line matching $to.
+# Both timestamps come from Evidence.Line's "HH:mm:ss.fff" prefix. Returns -1 when either
+# line is missing, so "the human did nothing" can never read as "0 ms -> PASS".
+function Measure-LogGapMs([string[]]$l, [string]$from, [string]$to) {
+  $start = -1
+  for ($i = 0; $i -lt $l.Count; $i++) { if ($l[$i] -cmatch $from) { $start = $i; break } }
+  if ($start -lt 0) { return -1 }
+  for ($j = $start; $j -lt $l.Count; $j++) {
+    if ($l[$j] -cmatch $to) {
+      $a = [regex]::Match($l[$start], '^(\d{2}:\d{2}:\d{2}\.\d{3})')
+      $b = [regex]::Match($l[$j], '^(\d{2}:\d{2}:\d{2}\.\d{3})')
+      if (-not $a.Success -or -not $b.Success) { return -1 }
+      $ta = [datetime]::ParseExact($a.Groups[1].Value, 'HH:mm:ss.fff', $null)
+      $tb = [datetime]::ParseExact($b.Groups[1].Value, 'HH:mm:ss.fff', $null)
+      return [int]($tb - $ta).TotalMilliseconds
+    }
+  }
+  return -1
+}
 
 function Stop-AllSidecar {
   Get-Process Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -346,11 +371,98 @@ function Invoke-S7 {
   Check "S7.36 no visual layer window survives the runs" ($left.Count -eq 0)
 }
 
+# ------------------------------------------------------------------ S8 (human-guided)
+# S8 needs a REAL drag, and a synthetic one CANNOT stand in: M05 already proved that a
+# scripted DoDragDrop never produces DragEnter (a control WinForms window received nothing
+# either -- residual R4). So this section prints instructions, waits, then inspects the log.
+# It NEVER moves the pointer itself: nothing in here injects input.
+function Invoke-S8([int]$Window) {
+  Write-Host ""
+  Write-Host "=== S8 HUMAN: a real trigger-held drag -> DragEnter -> wheel in <=100 ms ==="
+  Stop-AllSidecar
+
+  $root = (Get-Item -LiteralPath $Exe).Directory
+  while ($root -ne $null -and -not (Test-Path -LiteralPath (Join-Path $root.FullName 'docs\aegis'))) {
+    $root = $root.Parent
+  }
+  $src = if ($root) { Join-Path $root.FullName 'docs\aegis\work\2026-09-30-m1b-wheel\wheel-frame.png' } else { '' }
+  if (-not $src -or -not (Test-Path -LiteralPath $src)) {
+    Inconclusive "S8 needs the sample PNG under <repo>\docs\aegis\work\2026-09-30-m1b-wheel\ (not found)"
+    return
+  }
+  # A deterministic sample: exact file name, exact expected source format, and a hash we
+  # can compare afterwards (dragging must be a read-only operation).
+  $sample = Join-Path $env:TEMP 's8-sample.png'
+  Copy-Item -LiteralPath $src -Destination $sample -Force
+  $before = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash
+
+  $log = Join-Path $LogDir 'm1b-s8.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
+  Start-Sleep -Milliseconds 1500
+  $proc.Refresh()
+  if ($proc.HasExited) { Check "S8.0 app is alive and idle before the gesture" $false; return }
+
+  Write-Host "      the runner does NOT touch the pointer. Please do this:"
+  Write-Host "        1. paste this folder into Explorer's address bar and press Enter:"
+  Write-Host "             $env:TEMP"
+  Write-Host "        2. select the file   s8-sample.png"
+  Write-Host "        3. HOLD the trigger key (space) BEFORE starting the drag"
+  Write-Host "        4. drag it out of Explorer, keep the button held"
+  Write-Host "        5. move the cursor over a wheel sector (selection should follow)"
+  Write-Host "        6. release the mouse button over that sector"
+  Write-Host "        7. release the trigger key"
+  Write-Host "      waiting $Window seconds ..."
+  Start-Sleep -Seconds $Window
+
+  $lines = Get-LogLines $log
+  $enters = Count-Log $lines 'OLE DragEnter:'
+  Check "S8.1 a real DragEnter was observed (count=$enters)" ($enters -ge 1)
+  # The injected diagnostic writes its own marker, so it can never satisfy the checks below.
+  Check "S8.2 no injected-payload marker in this log" ((Count-Log $lines '\*\*\* INJECTED') -eq 0)
+  Check "S8.3 a DragEnter carried exactly one file" ((Count-Log $lines 'OLE DragEnter:.*files=1') -ge 1)
+  Check "S8.4 the payload path is the sample that was dragged" ((Count-Log $lines ([regex]::Escape($sample))) -ge 1)
+  Check "S8.5 the source format is real PNG, not a placeholder" ((Count-Log $lines 'wheel from OLE payload:.*source=PNG') -ge 1)
+  # NOT vacuous on purpose: "PNG is not in the sector list" is trivially true when no wheel
+  # ever appeared, so this also requires that a wheel was actually shown from a payload.
+  Check "S8.6 source format excluded from the sectors" `
+        (((Count-Log $lines 'wheel from OLE payload:') -ge 1) -and
+         (-not (Test-Log $lines 'targets=\[[^\]]*\bPNG\b')))
+  Check "S8.7 the preview is derived from the real file name" ((Count-Log $lines 'preview=s8-sample\.') -ge 1)
+
+  $gap = Measure-LogGapMs $lines 'OLE DragEnter:' 'wheel shown'
+  if ($gap -ge 0) {
+    Check "S8.8 DragEnter -> wheel shown in <=100 ms (measured $gap ms)" ($gap -le 100)
+  } else {
+    Check "S8.8 DragEnter -> wheel shown latency measurable" $false
+  }
+
+  Check "S8.9 hovering a sector moved the selection" ((Count-Log $lines 'wheel hover selection') -ge 1)
+  Check "S8.10 the drop hid both layers" (((Count-Log $lines 'hit layer HIDDEN') -ge 1) -and
+                                          ((Count-Log $lines 'visual layer HIDDEN') -ge 1))
+
+  $after = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash
+  Check "S8.11 the dragged file is byte-identical afterwards" ($before -eq $after)
+
+  $proc.Refresh()
+  if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  Start-Sleep -Milliseconds 500
+  $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
+  Check "S8.12 no visual layer window survives" ($left.Count -eq 0)
+
+  # Observation only, NOT asserted: which path delivered the file list? M1d needs one
+  # authority, and the answer is decided from these counts rather than guessed here.
+  Write-Host "      OBSERVED: DragEnter x$enters, IDropTarget DROP x$(Count-Log $lines 'OLE DROP RECEIVED'), WM_DROPFILES x$(Count-Log $lines '\*\*\* DROP RECEIVED')"
+  Write-Host "      (file-list authority for M1d is decided from these counts; not asserted here)"
+}
+
 # ------------------------------------------------------------------ drive
 # -Section accepts a comma-separated list. Unknown names and "nothing ran" are hard errors.
 $knownSections = @('S6', 'S7', 'S8')
 $sections = switch ($Section) {
-  # "All" deliberately excludes S8: that one injects real mouse input and must be asked for.
+  # "All" deliberately excludes S8: it needs a human to perform a real drag, so it must be
+  # asked for explicitly (-Section S8). Its checks FAIL loudly when nobody does the gesture.
   'All' { @('S6', 'S7') }
   default { @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
 }
@@ -368,6 +480,7 @@ foreach ($s in $sections) {
   switch ($s) {
     'S6' { Invoke-S6 }
     'S7' { Invoke-S7 }
+    'S8' { Invoke-S8 $S8WindowSeconds }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

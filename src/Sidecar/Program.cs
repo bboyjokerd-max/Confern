@@ -442,6 +442,9 @@ internal static class App
         Native.GetCursorPos(out Native.POINT p);
 
         PayloadVerdict verdict = catalog.Classify(paths);
+        // 真實拖曳的檔案清單必須留證據（M1d 的批次輸出要用它；也讓「讀到什麼」可回溯）。
+        // 格式與 WM_DROPFILES 路徑一致，S8 才能斷言「這一批就是被拖的那個檔」。
+        foreach (string path in paths) evidence.Line($"    payload file: {path}");
         string? notice = verdict.Status switch
         {
             PayloadStatus.Mixed => "混合選取，請選同類別",       // 規格 §4.3 的原文
