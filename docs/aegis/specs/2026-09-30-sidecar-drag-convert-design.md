@@ -182,6 +182,14 @@ WHEEL ──(Esc)──▶ CANCELLED ──▶ IDLE（收層 + drop 保底語意
 
 **滑鼠操作**：輪盤扇區可直接點擊（因為接收層本身可命中）；放手即執行當前選項。
 
+`⚠️ 依賴缺口（2026-09-30 M1b 實作時發現）`：本節的「觸發時機＝收到第一個 `DragEnter` 後 ≤ 100 ms 顯示」，
+以及中心的 `原格式 → 目標格式` 與檔名預覽，都需要**拖曳進行中**的酬載；那只有 OLE
+`IDropTarget::DragEnter／DragOver` 拿得到 `CF_HDROP`。M1a 走的是 `DragAcceptFiles` + `WM_DROPFILES`，
+**只有放手當下才有檔案清單**。因此 M1b 先把輪盤本身做完（幾何、繪製、鍵盤、生命週期），
+顯示時原格式是**未知佔位符**（並如實寫進證據）；**酬載接線列為 M1b-T7**，
+完成後 A1 才能以真實拖曳驗收。輪盤的「出現時機」在 T7 之前由 `DragDetector` 的 Capturing 狀態驅動
+（觸發鍵按著 + 移動超過拖曳門檻），語意等價但觸發源不同。
+
 ### 4.4 多檔
 
 - 全部同類別 → 套用同一選項，逐檔輸出。
@@ -306,10 +314,11 @@ WHEEL ──(Esc)──▶ CANCELLED ──▶ IDLE（收層 + drop 保底語意
 ### 9.1 行程與模組
 
 ```
-[UI / HUD 行程]  .NET 8 + WPF（常駐，無主視窗）
+[UI / HUD 行程]  .NET 8（WinExe，無主視窗；繪製＝原始 Win32 + GDI+，見 D10）
   ├─ HookService        低階滑鼠/鍵盤 hook（唯一全域鉤子擁有者）
   ├─ DragDetector       狀態機 §4.2（唯一狀態權威）
   ├─ CaptureLayer       全螢幕接收層（每螢幕一層，唯一建立/銷毀者）
+  ├─ VisualLayer        視覺層（per-pixel alpha、WS_EX_TRANSPARENT、點擊穿透；唯一建立者）
   ├─ WheelPresenter     輪盤 UI（唯一繪製者）
   ├─ NamingPolicy       衝突命名（唯一命名規則權威）
   ├─ SettingsStore      設定持久化
@@ -317,9 +326,18 @@ WHEEL ──(Esc)──▶ CANCELLED ──▶ IDLE（收層 + drop 保底語意
         │  具名管道（版本化 JSON 訊息）
 [Worker 行程]（可多實例，工作隔離）
   ├─ JobQueue           並行上限、取消、逾時
-  ├─ CodecRegistry      格式 → 編解碼器（擴充點，§9.4）
+  ├─ CodecRegistry      格式 → 編解碼器（擴充點，§9.4；M1b 先凍結 `IFormatCatalog` 查詢介面）
   └─ FileWriter         原子寫入、暫存清理
 ```
+
+**視覺層與命中層的契約（M1a／M1b 實證，兩者不可交換）**
+
+| | 命中層 `CaptureLayer` | 視覺層 `VisualLayer` |
+|---|---|---|
+| `WS_EX_TRANSPARENT`（0x20） | **絕不可設**（設了 `WindowFromPoint` 會跳過它 → 拖放全失效） | **必須設**（拖放才會穿透它、落到下面的命中層） |
+| alpha | `1/255`（不可見，仍被命中） | per-pixel alpha（`ULW_ALPHA`） |
+| 職責 | 接 OLE 拖放、被命中 | 畫輪盤／鬼影／文字 |
+| 誰收層 | `ReleaseGuard` 決定 → 接收層執行；視覺層只是**跟著收**（`HitLayer.Hidden` 通知） | 不自行決定 |
 
 **邊界契約**
 
@@ -440,6 +458,7 @@ WHEEL ──(Esc)──▶ CANCELLED ──▶ IDLE（收層 + drop 保底語意
 | D7 | HEIC **僅輸入、不輸出**，且不散布編解碼器 | HEVC 專利與散布紅線 | 需法務確認後可改 |
 | D8 | 混合選取 **拒絕** | 照抄標的產品的正確決策：不存在共同可用的操作集 | — |
 | D9 | PDF → DOCX **永久不做** | 投報率極差 | 需使用者重新拍板 |
+| D10 | UI 繪製用**原始 Win32 `UpdateLayeredWindow` + GDI+**，不是 WPF（2026-09-30 追加） | WPF 需要自己的 `Dispatcher` 訊息幫浦，而本行程已有一個原始 Win32 `GetMessage` 迴圈；整合是實質風險。為 220 px 輪盤引入 WPF 對「<100 ms 首次顯示／<80 MB 常駐」兩個預算都不利；本機又**沒有 NuGet 全域快取**，新增相依會讓離線建置失敗，而 `Microsoft.WindowsDesktop.App.Ref` 已在本機（`UseWindowsForms` 可離線解析 GDI+）。實測首次顯示 14–18 ms。**WPF 保留給 M1f 的設定頁**（表單才真的需要它） | 若未來需要複雜動畫或表單化 UI，可重新評估 |
 
 ---
 
