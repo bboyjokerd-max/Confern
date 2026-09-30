@@ -52,6 +52,15 @@ internal static class Program
             return App.RunGeometrySelfTest(opt);
         }
 
+        // M1c：編解碼能力探測同樣不需要視窗，而且必須能在「單一實例守衛」之前跑
+        // （否則已有一個 Sidecar 在跑時，診斷會被守衛擋掉）。
+        if (opt.Codecs)
+        {
+            Native.AttachParentConsole();
+            using var probeEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunCodecProbe(probeEvidence, opt.CodecProbeFiles);
+        }
+
         // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
         // 因此這裡不留下任何需要清理的檔案鎖。
         using var mutex = new Mutex(initiallyOwned: true, @"Local\Sidecar.SingleInstance", out bool isFirst);
@@ -94,6 +103,8 @@ internal sealed class Options
           --wheel-geometry-selftest check the wheel geometry against known angles and exit
           --wheel-hover-selftest
                                     feed each sector's own mid-angle point into the hover mapping and exit
+          --codecs                  probe which formats this machine can really encode/decode, then exit
+          --codec-probe <path>      also decode this real file (repeatable) and report the outcome
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
@@ -134,6 +145,9 @@ internal sealed class Options
     public int WheelPreviews = 1;
     public bool GeometrySelfTest;
     public bool WheelHoverSelfTest;
+    public bool Codecs;
+    /// <summary>--codec-probe 指定的真實檔案（可重複），用來量測解碼能力。</summary>
+    public List<string> CodecProbeFiles = new();
     public int WheelSimulateCycles;
 
     /// <summary>
@@ -169,6 +183,10 @@ internal sealed class Options
                     break;
                 case "--wheel-geometry-selftest": o.GeometrySelfTest = true; break;
                 case "--wheel-hover-selftest": o.WheelHoverSelfTest = true; break;
+                case "--codecs": o.Codecs = true; break;
+                case "--codec-probe":
+                    if (i + 1 < args.Length) { o.CodecProbeFiles.Add(args[i + 1]); i++; }
+                    break;
                 case "--wheel-payload":
                     if (i + 1 < args.Length) { o.WheelPayload = args[i + 1]; i++; }
                     break;
@@ -479,6 +497,62 @@ internal static class App
         evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
         guard.OnUserResolved("enter");
         return true;
+    }
+
+    /// <summary>
+    /// M1c C1：把「這台機器上到底能做什麼」量出來並印清楚。
+    /// 每一項都要說明是怎麼量到的——探測本身出錯會悄悄少掉扇區，那比多一個扇區更危險。
+    /// </summary>
+    internal static int RunCodecProbe(Evidence evidence, IReadOnlyList<string> probeFiles)
+    {
+        int failed = 0;
+        void Report(string text, bool ok)
+        {
+            if (!ok) failed++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  {text}");
+        }
+
+        var registry = new CodecRegistry();
+        foreach (CodecCapability c in registry.Capabilities)
+            evidence.Line($"codec {c.Format}: decode={c.Decode.ToString().ToLowerInvariant()} " +
+                          $"encode={(c.CanEncode ? "yes" : "no")} :: {c.Evidence}");
+
+        // 這五個是 Windows 內建的 WIC 編碼器：在這台機器上失敗就是真的失敗，不是儀器的問題
+        string[] builtin = { "PNG", "JPG", "BMP", "TIF", "GIF" };
+        foreach (string format in builtin)
+        {
+            CodecCapability? c = registry.Capability(format);
+            Report($"codec {format} encode+decode round-trip",
+                   c is { CanEncode: true, Decode: DecodeSupport.Yes });
+        }
+
+        // 可輸出的集合必須**正好**是量到的那些。多一個就是假承諾（選了會失敗）；
+        // 少一個代表探測本身有問題。日後真的打包 libwebp 時，這行必須連同能力一起改。
+        IReadOnlyList<string> encodable = registry.EncodableFormats;
+        bool exact = encodable.Count == builtin.Length && builtin.All(encodable.Contains);
+        Report($"encodable set is exactly the measured WIC set [{string.Join(",", encodable)}]", exact);
+
+        // 儀器誠實性：探測必須能**回報失敗**。用一個保證不存在的路徑當反向對照——
+        // 「永遠回報 Ok」的探測器比沒有探測器更危險（它會讓每個扇區都看起來可用）。
+        string missing = Path.Combine(Path.GetTempPath(), $"sidecar-missing-{Guid.NewGuid():N}.png");
+        DecodeOutcome missingOutcome = registry.ProbeDecode(missing);
+        Report($"decode probe reports a missing file as Unreadable (got {missingOutcome.Status})",
+               missingOutcome.Status == DecodeStatus.Unreadable);
+
+        // 真實檔案的解碼探測（測量，不是斷言）：HEIC 能不能解、WebP 能不能解，只有量了才知道
+        foreach (string file in probeFiles)
+        {
+            DecodeOutcome outcome = registry.ProbeDecode(file);
+            evidence.Line($"decode probe: status={outcome.Status} format={outcome.Format} " +
+                          $"file={file} :: {outcome.Detail}");
+        }
+
+        evidence.Line($"codec probe summary: decodable=[{string.Join(",", registry.DecodableFormats)}] " +
+                      $"encodable=[{string.Join(",", encodable)}] " +
+                      $"inputs=[{string.Join(",", registry.InputFormats)}] " +
+                      $"heifExtension={CodecRegistry.HeifExtensionState()}");
+        evidence.Line($"codec probe done: failed={failed}");
+        return failed == 0 ? 0 : 7;
     }
 
     /// <summary>

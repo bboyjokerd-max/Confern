@@ -23,5 +23,22 @@
       也不呼叫 ApplicationConfiguration.Initialize()（DPI 感知由 app.manifest 的 PerMonitorV2 決定）。
     -->
     <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      M1c 的編解碼層（規格 §6.1／§6.2 兩張表都寫「自建（WIC）」）用 System.Windows.Media.Imaging，
+      也就是 WPF 對 WIC 的包裝。為什麼非 WIC 不可：**GDI+ 用不到 WIC 編解碼器**，而系統的 HEIF
+      擴充註冊的是 WIC codec，所以 HEIC 輸入只有走 WIC 才可能成立。
+      這不推翻 D10：D10 否決 WPF 的理由是「輪盤需要自己的 Dispatcher 幫浦對抗現有 GetMessage 迴圈」，
+      輪盤仍然由 GDI+ 繪製；WIC 影像 API 不需要 Dispatcher（跨執行緒一律 Freeze()）。
+      同樣不新增任何 PackageReference：UseWPF 由本機的 Microsoft.WindowsDesktop.App.Ref 解析。
+    -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
+  <ItemGroup>
+    <!--
+      實測：一旦 UseWPF=true，SDK 提供的隱式 using 集合就換成 WPF 那一套，**System.IO 會消失**
+      （Evidence.cs 立刻以 CS0246 StreamWriter 失敗）。補回來而不是逐檔加 using——
+      這樣「原本能編譯的檔案」不會因為換 SDK 模式而需要零星修改。
+    -->
+    <Using Include="System.IO" />
+  </ItemGroup>
 </Project>

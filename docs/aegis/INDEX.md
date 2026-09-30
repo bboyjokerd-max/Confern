@@ -21,3 +21,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json | M1a 拖曳生命週期與五層硬保險 todo checkpoint draft |
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/drift-check-draft.json | M1a 拖曳生命週期與五層硬保險 drift check draft |
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/resume-state-hint.json | 2026-09-30-m1a-lifecycle resume state hint |
+| 2026-10-01 | plan | docs/aegis/plans/2026-10-01-m1c-formats.md | M1c format knowledge and codec plan |
+| 2026-10-01 | work | docs/aegis/work/2026-10-01-m1c-formats/90-evidence.md | M1c 格式知識與編解碼 evidence (C1 codec capability probe) |
