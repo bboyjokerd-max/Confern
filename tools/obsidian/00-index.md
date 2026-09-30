@@ -68,8 +68,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\User\Desktop\專�
 |---|---|
 | M0.5 生死線 | **GO**（真實 Explorer 拖曳命中，`alpha=1/255`） |
 | M1a 生命週期與五層硬保險 | **已驗收**（自動化 45/45；A7 與 A2 位置多樣性待人工手勢） |
-| M1b 輪盤（渲染層） | **機制完成並已驗證**（S6 13/13、S7 36/36、`All` 49/49、hover 映射 9/9、模擬迴圈 15/15；**端到端 A1／A6／A7 與 S8 真實拖曳待人工配合**） |
-| M1c 格式知識與編解碼 | 未開始（純函式庫層，**不需要滑鼠**） |
+| M1b 輪盤（渲染層） | **機制完成並已驗證**（S6 13/13、S7 36/36、`All` 49/49、hover 映射 9/9、模擬迴圈 15/15；**端到端 A1／A6／A7 與 S8 真實拖曳待人工配合**）。M1c 之後 S7 新增一條跨儀器檢查 → `All` **50/50** |
+| M1c 格式知識與編解碼 | **已驗收**（`tools/verify-m1c.ps1` **S9 17/17**；`CodecRegistry` 能力探測、`FormatCatalog` 取代 stub、HEIC／WebP 逐檔探測、§7.1 錯誤映射）。**量測推翻了兩個預設值**：WIC 其實解得出 WebP；「找不到解碼器」是 `NotSupportedException` 而非 `0x88982F50` |
 | M1d 放手語意與檔案契約 | 未開始 |
 | M1e Worker 行程與 IPC | 未開始 |
 | M1f 設定、錯誤 UI、批次 | 未開始 |

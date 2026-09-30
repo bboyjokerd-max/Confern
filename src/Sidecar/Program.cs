@@ -314,7 +314,9 @@ internal static class App
 
         // 視覺層同樣**預先建立**：規格 §9.3 要求輪盤首次顯示 < 100 ms，不可在拖曳中才建視窗。
         using var visual = new VisualLayer(evidence);
-        var catalog = new StubFormatCatalog();
+        // 格式能力探測也要**預先做**：第一次使用 WPF/WIC 會載入 PresentationCore，
+        // 若等到酬載進來才做，那筆成本會直接落在「酬載 → 顯示」的 100 ms 預算上。
+        var catalog = BuildCatalog(evidence);
         var presenter = new WheelPresenter(evidence, visual);
 
         // 兩層由**同一個權威**廣播收起。先前是「命中層先收、視覺層跟著收（hit.Hidden）」，
@@ -411,10 +413,14 @@ internal static class App
 
         using var visual = new VisualLayer(evidence);
         var presenter = new WheelPresenter(evidence, visual);
-        string[] targets = opt.WheelTargets.Length > 0 ? opt.WheelTargets : new[] { "PNG", "JPG", "WEBP", "BMP" };
+        var catalog = BuildCatalog(evidence);
+        // 示範用的目標清單同樣來自**實測能力**（而且原格式自動排除）——
+        // 示範畫面一樣不可以承諾做不到的事。
+        string[] targets = opt.WheelTargets.Length > 0
+            ? opt.WheelTargets
+            : catalog.TargetsFor(opt.WheelSource).ToArray();
 
         var sw = Stopwatch.StartNew();
-        var catalog = new StubFormatCatalog();
         presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected,
                        PreviewFactory(targets, catalog, new[] { $"holiday.{opt.WheelSource.ToLowerInvariant()}" },
                                       opt.WheelPreviews));
@@ -430,6 +436,22 @@ internal static class App
             return 0;
         }
         return RunMessageLoop(evidence);
+    }
+
+    /// <summary>
+    /// 建立格式目錄，並把**實測能力與探測成本**寫進證據檔。
+    /// 成本必須看得見：它若悄悄變大，就會吃掉規格 §9.3 的「首次顯示 &lt; 100 ms」預算，
+    /// 而那種退化在事後只看延遲數字是查不出原因的。
+    /// </summary>
+    private static FormatCatalog BuildCatalog(Evidence evidence)
+    {
+        var sw = Stopwatch.StartNew();
+        var catalog = new FormatCatalog(new CodecRegistry());
+        sw.Stop();
+        evidence.Line($"codec catalog ready in {sw.Elapsed.TotalMilliseconds:F1} ms; " +
+                      $"encodable=[{string.Join(",", catalog.Codecs.EncodableFormats)}] " +
+                      $"heifExtension={CodecRegistry.HeifExtensionState()}");
+        return catalog;
     }
 
     /// <summary>
@@ -512,7 +534,12 @@ internal static class App
             evidence.Line($"{(ok ? "PASS" : "FAIL")}  {text}");
         }
 
+        // 成本必須看得見：它若悄悄變大，就會吃掉規格 §9.3 的「首次顯示 < 100 ms」預算。
+        var probeWatch = Stopwatch.StartNew();
         var registry = new CodecRegistry();
+        probeWatch.Stop();
+        evidence.Line($"codec probe cost: {probeWatch.Elapsed.TotalMilliseconds:F1} ms " +
+                      "(builtin encoders exercised + capability table)");
         foreach (CodecCapability c in registry.Capabilities)
             evidence.Line($"codec {c.Format}: decode={c.Decode.ToString().ToLowerInvariant()} " +
                           $"encode={(c.CanEncode ? "yes" : "no")} :: {c.Evidence}");

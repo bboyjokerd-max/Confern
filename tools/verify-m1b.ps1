@@ -142,6 +142,34 @@ function Get-PayloadRun([string]$payload, [string]$tag) {
   return [pscustomobject]@{ Exit = $proc.ExitCode; Lines = (Get-LogLines $log) }
 }
 
+# M1c: the sector list is a MEASURED capability set, not a constant. S7 must therefore not
+# hardcode it -- it cross-checks the wheel against what --codecs measured on this machine.
+# Returns the encodable list as a CSV string ("PNG,JPG,BMP,TIF,GIF") or $null when the probe
+# itself failed (in which case the caller reports INCONCLUSIVE instead of passing vacuously).
+function Get-MeasuredEncodableCsv {
+  $log = Join-Path $LogDir 'm1c-codecs.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @('--codecs', '--quiet', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  $m = [regex]::Match(($lines -join "`n"), 'encodable=\[([^\]]*)\]')
+  if (-not $m.Success) { return $null }
+  return $m.Groups[1].Value
+}
+
+# The sector list a run actually showed, as a CSV string, or $null when no wheel was shown.
+function Get-ShownTargetsCsv([string[]]$lines) {
+  foreach ($l in $lines) {
+    $m = [regex]::Match($l, 'targets=\[([^\]]*)\]')
+    if ($m.Success) { return $m.Groups[1].Value }
+  }
+  return $null
+}
+
+function Remove-FromCsv([string]$csv, [string]$item) {
+  if ($null -eq $csv) { return $null }
+  return ((@($csv -split ',' | Where-Object { $_ -ne '' -and $_ -ne $item })) -join ',')
+}
+
 # ------------------------------------------------------------------ S6
 function Invoke-S6 {
   Write-Host ""
@@ -320,13 +348,32 @@ function Invoke-S7 {
   Check "S7.13 simulate cycles: 3 cycles, 0 failed" (Test-Log $lines 'simulate cycle done: 3 cycles; failed=0')
 
   # ---- payload path: INJECTED, not a real drag (see the note at the top of S7) ----
+  $measured = Get-MeasuredEncodableCsv
+  if ($null -eq $measured) { Inconclusive "M1c --codecs probe produced no encodable set" }
+  else { Write-Host "  (measured encodable on this machine: [$measured])" }
+
   $r = Get-PayloadRun 'C:\Temp\holiday.jpg' 'single'
   Check "S7.14 single-image payload run exits 0" ($r.Exit -eq 0)
   Check "S7.15 payload source format is JPG" (Test-Log $r.Lines 'source=JPG')
   # spec 4.3: the source format must NOT appear among the output sectors
   Check "S7.16 source format excluded from the sectors" (-not (Test-Log $r.Lines 'targets=\[[^\]]*\bJPG\b'))
+  # M1c: sectors must equal the MEASURED capability set minus the source (cross-instrument check)
+  $shown = Get-ShownTargetsCsv $r.Lines
+  if ($null -eq $measured) { Inconclusive "sectors vs measured capability set (probe unavailable)" }
+  elseif ($null -eq $shown) { Check "S7.16b sectors equal the measured capability set minus the source" $false }
+  else {
+    Check "S7.16b sectors equal measured [$measured] minus source ($shown)" ($shown -eq (Remove-FromCsv $measured 'JPG'))
+  }
   Check "S7.17 preview shows the output file name" (Test-Log $r.Lines 'preview=holiday\.png')
-  Check "S7.18 preview follows the selection" (Test-Log $r.Lines 'payload select#1: index=1 target=WEBP')
+  # The ring advances in order, so select#1 must land on the SECOND sector -- whatever it is.
+  # (Hardcoding "WEBP" here recorded one day's implementation instead of the contract.)
+  $shownList = @()
+  if ($null -ne $shown) { $shownList = @($shown -split ',' | Where-Object { $_ -ne '' }) }
+  if ($shownList.Count -lt 2) { Inconclusive "second sector unknown (no sector list)" }
+  else {
+    Check "S7.18 selection advances to the second sector ($($shownList[1]))" `
+      (Test-Log $r.Lines ("payload select#1: index=1 target=" + [regex]::Escape($shownList[1])))
+  }
   Check "S7.19 verdict is Ready" (Test-Log $r.Lines 'status=Ready')
   Check "S7.20 Enter commits and the wheel goes away" (Test-Log $r.Lines 'committed=True wheelVisibleAfter=False')
   $m = [regex]::Match(($r.Lines -join "`n"), 'latency=([0-9.]+) ms')
