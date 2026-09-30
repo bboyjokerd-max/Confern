@@ -22,7 +22,9 @@ internal sealed class VisualLayer : IDisposable
 
     private readonly Evidence _evidence;
     private readonly IntPtr _hwnd;
-    private bool _visible;
+
+    /// <summary>hwnd → 實例（靜態 WndProc 分派用）。</summary>
+    private static readonly Dictionary<IntPtr, VisualLayer> Instances = new();    private bool _visible;
     private int _frames;
 
     public IntPtr Handle => _hwnd;
@@ -51,6 +53,8 @@ internal sealed class VisualLayer : IDisposable
 
         if (_hwnd == IntPtr.Zero)
             throw new InvalidOperationException($"visual layer creation failed: {Marshal.GetLastWin32Error()}");
+
+        Instances[_hwnd] = this;      // 靜態 WndProc 需要由 hwnd 找回實例
 
         // 建立時就斷言兩個必要位元，避免「畫得出來但拖放全死」這種最糟的失敗模式
         int ex = Native.GetWindowLongW(_hwnd, Native.GwlExStyle);
@@ -144,12 +148,32 @@ internal sealed class VisualLayer : IDisposable
         _visible = false;
     }
 
-    /// <summary>視覺層是純輸出視窗，不接收任何自訂訊息；未知訊息一律交回系統。</summary>
-    private static IntPtr StaticWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam) =>
-        Native.DefWindowProcW(hWnd, msg, wParam, lParam);
+    /// <summary>
+    /// 由 <see cref="ReleaseGuard"/> 要求收層。與命中層一樣走視窗訊息，讓實際的 ShowWindow
+    /// 發生在 UI 執行緒（guard 的定時器是在執行緒池執行緒上觸發的）。
+    /// </summary>
+    public void RequestHide(int reason) =>
+        Native.PostMessageW(_hwnd, Native.WM_APP_FORCE_HIDE, new IntPtr(reason), IntPtr.Zero);
+
+    /// <summary>
+    /// 視覺層只處理「收層」這一則自訂訊息，其餘一律交回系統。
+    /// **收層的決定權不在這裡**：guard 決定，這裡只執行。
+    /// </summary>
+    private static IntPtr StaticWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (msg == Native.WM_APP_FORCE_HIDE && Instances.TryGetValue(hWnd, out VisualLayer? layer))
+        {
+            Native.ShowWindow(hWnd, Native.SW_HIDE);
+            layer._visible = false;
+            layer._evidence.Line($"visual layer HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
+            return IntPtr.Zero;
+        }
+        return Native.DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
 
     public void Dispose()
     {
+        Instances.Remove(_hwnd);
         Native.DestroyWindow(_hwnd);
         _evidence.Line($"visual layer disposed; frames={_frames}");
     }

@@ -105,6 +105,18 @@ function Stop-AllSidecar {
   Start-Sleep -Milliseconds 500
 }
 
+# Run one injected-payload diagnostic and hand back its exit code and log lines.
+# NOTE: the notice text is Chinese, so it cannot be asserted from this ASCII-only file.
+# The checks therefore assert the *status* plus "some notice is present" (no "notice=-").
+function Get-PayloadRun([string]$payload, [string]$tag) {
+  Stop-AllSidecar
+  $log = Join-Path $LogDir "m1b-s7-$tag.log"
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-payload', $payload, '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+  return [pscustomobject]@{ Exit = $proc.ExitCode; Lines = (Get-LogLines $log) }
+}
+
 # ------------------------------------------------------------------ S6
 function Invoke-S6 {
   Write-Host ""
@@ -283,37 +295,41 @@ function Invoke-S7 {
   Check "S7.13 simulate cycles: 3 cycles, 0 failed" (Test-Log $lines 'simulate cycle done: 3 cycles; failed=0')
 
   # ---- payload path: INJECTED, not a real drag (see the note at the top of S7) ----
-  Stop-AllSidecar
-  $log = Join-Path $LogDir 'm1b-s7-payload.log'
-  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
-  $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--wheel-payload', 'C:\Temp\holiday.jpg', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
-  $lines = Get-LogLines $log
-  Check "S7.14 payload run exits 0" ($proc.ExitCode -eq 0)
-  Check "S7.15 payload source format is JPG" (Test-Log $lines 'source=JPG')
+  $r = Get-PayloadRun 'C:\Temp\holiday.jpg' 'single'
+  Check "S7.14 single-image payload run exits 0" ($r.Exit -eq 0)
+  Check "S7.15 payload source format is JPG" (Test-Log $r.Lines 'source=JPG')
   # spec 4.3: the source format must NOT appear among the output sectors
-  Check "S7.16 source format excluded from the sectors" (-not (Test-Log $lines 'targets=\[[^\]]*\bJPG\b'))
-  Check "S7.17 preview shows the output file name" (Test-Log $lines 'preview=holiday\.png')
-  Check "S7.18 preview follows the selection" (Test-Log $lines 'payload select#1: index=1 target=WEBP')
-  $m = [regex]::Match(($lines -join "`n"), 'latency=([0-9.]+) ms')
+  Check "S7.16 source format excluded from the sectors" (-not (Test-Log $r.Lines 'targets=\[[^\]]*\bJPG\b'))
+  Check "S7.17 preview shows the output file name" (Test-Log $r.Lines 'preview=holiday\.png')
+  Check "S7.18 preview follows the selection" (Test-Log $r.Lines 'payload select#1: index=1 target=WEBP')
+  Check "S7.19 verdict is Ready" (Test-Log $r.Lines 'status=Ready')
+  Check "S7.20 Enter commits and the wheel goes away" (Test-Log $r.Lines 'committed=True wheelVisibleAfter=False')
+  $m = [regex]::Match(($r.Lines -join "`n"), 'latency=([0-9.]+) ms')
   if ($m.Success) {
-    Check "S7.19 payload -> show latency < 100 ms (was $($m.Groups[1].Value) ms)" ([double]$m.Groups[1].Value -lt 100)
+    Check "S7.21 payload -> show latency < 100 ms (was $($m.Groups[1].Value) ms)" ([double]$m.Groups[1].Value -lt 100)
   } else { Inconclusive "payload latency line not found" }
 
-  # ---- multi-file payload: the preview must become a count ----
-  Stop-AllSidecar
-  $log = Join-Path $LogDir 'm1b-s7-multi.log'
-  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
-  $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--wheel-payload', 'C:\Temp\a.jpg;C:\Temp\b.jpg',
-    '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
-  $lines = Get-LogLines $log
-  Check "S7.20 multi-file payload exits 0" ($proc.ExitCode -eq 0)
-  Check "S7.21 multi-file preview shows a count, not one name" (Test-Log $lines 'preview=2 \S')
+  # ---- same-category batch stays convertible (spec 4.4) ----
+  $r = Get-PayloadRun 'C:\Temp\a.jpg;C:\Temp\b.png' 'samecat'
+  Check "S7.22 same-category batch exits 0" ($r.Exit -eq 0)
+  Check "S7.23 same-category batch is Ready, not Mixed" (Test-Log $r.Lines 'status=Ready')
+  Check "S7.24 multi-file preview shows a count, not one name" (Test-Log $r.Lines 'preview=2 \S')
+
+  # ---- mixed selection must be REFUSED (spec 4.3) ----
+  $r = Get-PayloadRun 'C:\Temp\a.jpg;C:\Temp\doc.pdf' 'mixed'
+  Check "S7.25 different categories -> Mixed" (Test-Log $r.Lines 'status=Mixed')
+  Check "S7.26 Mixed shows a notice" (-not (Test-Log $r.Lines 'notice=-'))
+  Check "S7.27 Mixed leaves no selectable target" (Test-Log $r.Lines 'targets=0')
+  Check "S7.28 Mixed: Enter refused and the wheel stays" (Test-Log $r.Lines 'committed=False wheelVisibleAfter=True')
+
+  # ---- a single unsupported file is a DIFFERENT message than mixed (spec 4.3) ----
+  $r = Get-PayloadRun 'C:\Temp\doc.pdf' 'unsupported'
+  Check "S7.29 single non-image -> Unsupported" (Test-Log $r.Lines 'status=Unsupported')
+  Check "S7.30 Unsupported: Enter refused and the wheel stays" (Test-Log $r.Lines 'committed=False wheelVisibleAfter=True')
 
   Stop-AllSidecar
   $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
-  Check "S7.22 no visual layer window survives the runs" ($left.Count -eq 0)
+  Check "S7.31 no visual layer window survives the runs" ($left.Count -eq 0)
 }
 
 # ------------------------------------------------------------------ drive

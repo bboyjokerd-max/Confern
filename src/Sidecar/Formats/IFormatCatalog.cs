@@ -12,6 +12,12 @@ internal interface IFormatCatalog
     /// <summary>由來源檔案清單判定「原格式」；無法判定時回 <c>null</c>。</summary>
     string? SourceFormat(IReadOnlyList<string> paths);
 
+    /// <summary>
+    /// 把整批檔案分類（規格 §4.3 混合選取拒絕、§4.4 同類別批次＝一組選項）。
+    /// **判斷類別屬於格式知識，因此是本介面的責任——UI 不得自己看副檔名。**
+    /// </summary>
+    PayloadVerdict Classify(IReadOnlyList<string> paths);
+
     /// <summary>可輸出的目標格式（**已排除原格式**，規格 §4.3：原格式不出現）。</summary>
     IReadOnlyList<string> TargetsFor(string? sourceFormat);
 

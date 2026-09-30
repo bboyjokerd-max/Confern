@@ -25,6 +25,13 @@ internal sealed class ReleaseGuard : IDisposable
     private readonly System.Timers.Timer _grace;
     private readonly System.Timers.Timer _watchdog;
 
+    /// <summary>
+    /// 其他覆蓋層（視覺層）。**決定權仍然只在本類別**：這裡註冊的是「誰要被收」，
+    /// 不是「誰可以收」。之所以需要它：先前只看命中層，所以「命中層沒升起、但視覺層已顯示」
+    /// 的情況沒有任何一條路徑收得掉（卡住的覆蓋層），連 watchdog 也救不了。
+    /// </summary>
+    private readonly List<(Func<bool> IsVisible, Action<int> RequestHide)> _overlays = new();
+
     public bool CaptureDisabled { get; private set; }
     public int VisibleTimeoutMs { get; }
     public bool IsArmed => _watchdog.Enabled;
@@ -41,6 +48,12 @@ internal sealed class ReleaseGuard : IDisposable
         _watchdog = new System.Timers.Timer(VisibleTimeoutMs) { AutoReset = false };
         _watchdog.Elapsed += (_, _) => HideNow(Native.HideReasonWatchdog);
     }
+
+    /// <summary>
+    /// 把一個覆蓋層納入收層廣播。**這不會新增第二個權威**——只有本類別會呼叫它。
+    /// </summary>
+    public void AddOverlay(Func<bool> isVisible, Action<int> requestHide) =>
+        _overlays.Add((isVisible, requestHide));
 
     /// <summary>捕捉開始：升起接收層並重置保險。</summary>
     public void OnCaptured()
@@ -109,8 +122,16 @@ internal sealed class ReleaseGuard : IDisposable
     private void HideNow(int reasonCode)
     {
         StopTimers();
-        if (!_hit.IsVisible) return;          // 以作業系統真實狀態判斷
+        if (!_hit.IsVisible && !AnyOverlayVisible()) return;   // 以作業系統真實狀態判斷
         _hit.RequestHideAll(reasonCode);
+        foreach ((Func<bool> _, Action<int> requestHide) in _overlays) requestHide(reasonCode);
+    }
+
+    private bool AnyOverlayVisible()
+    {
+        foreach ((Func<bool> isVisible, Action<int> _) in _overlays)
+            if (isVisible()) return true;
+        return false;
     }
 
     public void Dispose() => StopTimers();

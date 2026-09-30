@@ -44,6 +44,12 @@ internal sealed class WheelPresenter
     /// <summary>目前這一格會顯示的預覽文字（與 <c>Compose</c> 用的是同一個來源）。</summary>
     public string? CurrentPreview => _notice ?? _preview?.Invoke(_selected);
 
+    /// <summary>非空代表目前是**拒絕狀態**（例如混合選取）：顯示訊息、沒有可執行的選項。</summary>
+    public string? Notice => _notice;
+
+    /// <summary>規格 §4.3：拒絕狀態下 Enter 不執行，只允許 Esc。</summary>
+    public bool CanCommit => _notice == null && _targets.Count > 0;
+
     public WheelPresenter(Evidence evidence, VisualLayer layer)
     {
         _evidence = evidence;

@@ -295,8 +295,9 @@ internal static class App
         var catalog = new StubFormatCatalog();
         var presenter = new WheelPresenter(evidence, visual);
 
-        // 兩層在同一瞬間收起：guard 決定、接收層執行，視覺層只是跟著收（通知，不是決定權）。
-        hit.Hidden += _ => presenter.Hide();
+        // 兩層由**同一個權威**廣播收起。先前是「命中層先收、視覺層跟著收（hit.Hidden）」，
+        // 那個順序在命中層沒升起時永遠不會發生 —— 輪盤就會卡在畫面上（最壞的失效模式）。
+        guard.AddOverlay(() => visual.IsVisible, visual.RequestHide);
 
         // 拖曳途中拿到酬載（規格 §4.3）→ 這才是輪盤顯示真實原格式的路徑。
         hit.PayloadObserved += (_, paths) => ShowWheelFromPayload(presenter, catalog, evidence, paths);
@@ -314,7 +315,15 @@ internal static class App
         {
             string[] injected = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
             evidence.Line($"*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): {injected.Length} path(s) ***");
+            // 依生產順序模擬：先捕捉（升起接收層），酬載才可能到達。
+            guard.OnCaptured();
             ShowWheelFromPayload(presenter, catalog, evidence, injected);
+
+            // 拒絕狀態（混合選取／不支援）下 Enter 必須不執行，而且輪盤要留在畫面上等 Esc。
+            if (opt.WheelDump != null) presenter.DumpTo(opt.WheelDump);
+            bool committed = CommitWheel(presenter, guard, evidence);
+            if (committed) PumpUntil(() => !presenter.IsVisible, 500);
+            evidence.Line($"payload enter attempt: committed={committed} wheelVisibleAfter={presenter.IsVisible}");
 
             // 規格 §4.3：選中項下方顯示輸出檔名 → 換扇區時預覽必須跟著換。
             for (int step = 1; step <= 2; step++)
@@ -420,12 +429,42 @@ internal static class App
     {
         var sw = Stopwatch.StartNew();
         Native.GetCursorPos(out Native.POINT p);
-        string? source = catalog.SourceFormat(paths);
-        IReadOnlyList<string> targets = catalog.TargetsFor(source);
-        presenter.Show(p.X, p.Y, source ?? "?", targets, 0, PreviewFactory(targets, catalog, paths, 1));
+
+        PayloadVerdict verdict = catalog.Classify(paths);
+        string? notice = verdict.Status switch
+        {
+            PayloadStatus.Mixed => "混合選取，請選同類別",       // 規格 §4.3 的原文
+            PayloadStatus.Unsupported => "不支援的格式",
+            _ => null
+        };
+
+        IReadOnlyList<string> targets = notice == null
+            ? catalog.TargetsFor(verdict.SourceFormat)
+            : Array.Empty<string>();
+        if (notice == null && targets.Count == 0) notice = "沒有可轉換的目標格式";
+
+        presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", targets, 0,
+                       PreviewFactory(targets, catalog, paths, 1), notice);
         sw.Stop();
-        evidence.Line($"wheel from OLE payload: files={paths.Length} source={source ?? "UNKNOWN"} " +
-                      $"latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+        evidence.Line($"wheel from OLE payload: files={paths.Length} status={verdict.Status} " +
+                      $"source={verdict.SourceFormat ?? "UNKNOWN"} targets={targets.Count} " +
+                      $"notice={(notice ?? "-")} latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+    }
+
+    /// <summary>
+    /// Enter：只有「有選項且不在拒絕狀態」才執行（規格 §4.3：混合選取要拒絕、只允許 Esc）。
+    /// </summary>
+    private static bool CommitWheel(WheelPresenter presenter, ReleaseGuard guard, Evidence evidence)
+    {
+        if (!presenter.CanCommit)
+        {
+            evidence.Line($"ENTER refused: notice={(presenter.Notice ?? "-")} " +
+                          $"target={(presenter.SelectedTarget ?? "-")} (spec 4.3)");
+            return false;
+        }
+        evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
+        guard.OnUserResolved("enter");
+        return true;
     }
 
     /// <summary>
@@ -454,8 +493,7 @@ internal static class App
                 return true;
             case Native.VK_RETURN:
                 // M1b 只記錄意圖，不轉檔；真正的執行在 M1d 之後
-                evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
-                guard.OnUserResolved("enter");
+                CommitWheel(presenter, guard, evidence);
                 return true;
             case Native.VK_ESCAPE:
                 // 規格 §4.3：Esc 立即收起；§4.2.3 的保底語意在 M1d 實作
