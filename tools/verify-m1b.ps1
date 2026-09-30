@@ -96,6 +96,9 @@ function Inconclusive([string]$reason) {
 }
 function Get-LogLines([string]$p) { if (Test-Path -LiteralPath $p) { return @(Get-Content -LiteralPath $p -Encoding UTF8) } else { return @() } }
 function Test-Log([string[]]$l, [string]$p) { return [bool]($l | Select-String -Pattern $p -Quiet) }
+# Select-String is CASE-INSENSITIVE by default, so "FAIL" also matches "failed=0" in the
+# app's own summary line. Any check about the presence of a FAIL line must use this one.
+function Test-LogCase([string[]]$l, [string]$p) { return [bool]($l | Select-String -Pattern $p -CaseSensitive -Quiet) }
 
 function Stop-AllSidecar {
   Get-Process Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -194,11 +197,131 @@ function Invoke-S6 {
   Check "S6.13 no visual layer window survives the process" ($left.Count -eq 0)
 }
 
+# ------------------------------------------------------------------ S7
+# Wheel show/hide, window rectangle, flip-edge and the post-DragEnter path.
+# All NON-INVASIVE: no synthetic input is injected, so this is safe to run while the
+# user is working. What it does NOT prove: that the real OLE drag pipeline delivers
+# the payload (that is S8) - S7 feeds the payload in by hand and says so out loud.
+function Invoke-S7 {
+  Write-Host ""
+  Write-Host "=== S7 wheel rectangle, flip-edge, wiring and payload path (non-invasive) ==="
+
+  # ---- geometry self-test ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-geom.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-geometry-selftest', '--quiet', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  Check "S7.1 geometry self-test exits 0" ($proc.ExitCode -eq 0)
+  Check "S7.2 geometry self-test has no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
+
+  # ---- wheel frame dump (one-shot: shows, dumps and exits) ----
+  $dump = Join-Path $LogDir 'm1b-s7-frame.png'
+  if (Test-Path -LiteralPath $dump) { Remove-Item -LiteralPath $dump -Force }
+  $null = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-demo', "$DemoX", "$DemoY", '--wheel-dump', $dump, '--quiet',
+    '--log', (Join-Path $LogDir 'm1b-s7-dump.log')) -PassThru -Wait
+  Check "S7.7 wheel frame dumped" ((Test-Path -LiteralPath $dump) -and ((Get-Item -LiteralPath $dump).Length -gt 8000))
+
+  # ---- wheel rectangle at the demo cursor (this run must STAY alive: it is what we probe) ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-rect.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-demo', "$DemoX", "$DemoY",
+    '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
+  Start-Sleep -Milliseconds 1800
+  $proc.Refresh()
+  if ($proc.HasExited) { Check "S7.3 app alive during the rectangle run" $false; return }
+  $pid32 = [uint32]$proc.Id
+  $vis = @([P2]::WindowsOfClass('SidecarVisualLayer', $pid32))
+  Check "S7.3 exactly one visual layer window" ($vis.Count -eq 1)
+
+  $pat = 'hwnd=0x([0-9A-F]+) (-?\d+),(-?\d+),(\d+)x(\d+) visible=(True|False) exstyle=0x([0-9A-F]+)'
+  $rectOk = $false
+  if ($vis.Count -eq 1 -and $vis[0] -match $pat) {
+    $rectOk = $true
+    $vx = [int]$Matches[2]; $vy = [int]$Matches[3]; $vw = [int]$Matches[4]; $vh = [int]$Matches[5]
+    Check "S7.4 visual layer is visible" ($Matches[6] -eq 'True')
+    Check "S7.5 wheel window anchored at cursor - PadPx" (($vx -eq ($DemoX - $PadPx)) -and ($vy -eq ($DemoY - $PadPx)))
+    Check "S7.6 wheel bitmap size" (($vw -eq $DemoW) -and ($vh -eq $DemoH))
+  } else { Check "S7.4 visual layer rectangle readable" $false }
+
+  Check "S7.8 demo run logged the wheel show" (Test-Log (Get-LogLines $log) 'wheel shown cursor=')
+
+  # ---- flip-edge: the wheel must move to the other side near the work-area edge (spec 4.3) ----
+  Stop-AllSidecar
+  Add-Type -AssemblyName System.Windows.Forms
+  $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $edgeX = $wa.Right - 4
+  $edgeY = $wa.Top + 300
+  $log = Join-Path $LogDir 'm1b-s7-flip.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-demo', "$edgeX", "$edgeY", '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
+  Start-Sleep -Milliseconds 1800
+  $proc.Refresh()
+  if ($proc.HasExited) { Check "S7.9 app alive during the flip run" $false; return }
+  $vis = @([P2]::WindowsOfClass('SidecarVisualLayer', [uint32]$proc.Id))
+  if ($vis.Count -eq 1 -and $vis[0] -match $pat) {
+    $fx = [int]$Matches[2]; $fw = [int]$Matches[4]
+    # Without a flip the origin would be cursor - PadPx; a flip puts it far to the left.
+    Check "S7.9 near the right edge the wheel flips" ($fx -lt ($edgeX - $PadPx - 100))
+    Check "S7.10 flipped wheel stays inside the work area" (($fx -ge $wa.Left) -and (($fx + $fw) -le $wa.Right))
+  } else { Check "S7.9 flip run: visual layer rectangle readable" $false }
+
+  # ---- wiring: capture -> show -> ring select -> Esc -> both layers hide ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-cycles.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-simulate-cycles', '3', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  Check "S7.11 simulate cycles exit 0" ($proc.ExitCode -eq 0)
+  Check "S7.12 simulate cycles: no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
+  Check "S7.13 simulate cycles: 3 cycles, 0 failed" (Test-Log $lines 'simulate cycle done: 3 cycles; failed=0')
+
+  # ---- payload path: INJECTED, not a real drag (see the note at the top of S7) ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-payload.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-payload', 'C:\Temp\holiday.jpg', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  Check "S7.14 payload run exits 0" ($proc.ExitCode -eq 0)
+  Check "S7.15 payload source format is JPG" (Test-Log $lines 'source=JPG')
+  # spec 4.3: the source format must NOT appear among the output sectors
+  Check "S7.16 source format excluded from the sectors" (-not (Test-Log $lines 'targets=\[[^\]]*\bJPG\b'))
+  Check "S7.17 preview shows the output file name" (Test-Log $lines 'preview=holiday\.png')
+  Check "S7.18 preview follows the selection" (Test-Log $lines 'payload select#1: index=1 target=WEBP')
+  $m = [regex]::Match(($lines -join "`n"), 'latency=([0-9.]+) ms')
+  if ($m.Success) {
+    Check "S7.19 payload -> show latency < 100 ms (was $($m.Groups[1].Value) ms)" ([double]$m.Groups[1].Value -lt 100)
+  } else { Inconclusive "payload latency line not found" }
+
+  # ---- multi-file payload: the preview must become a count ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-multi.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-payload', 'C:\Temp\a.jpg;C:\Temp\b.jpg',
+    '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  Check "S7.20 multi-file payload exits 0" ($proc.ExitCode -eq 0)
+  Check "S7.21 multi-file preview shows a count, not one name" (Test-Log $lines 'preview=2 \S')
+
+  Stop-AllSidecar
+  $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
+  Check "S7.22 no visual layer window survives the runs" ($left.Count -eq 0)
+}
+
 # ------------------------------------------------------------------ drive
 # -Section accepts a comma-separated list. Unknown names and "nothing ran" are hard errors.
 $knownSections = @('S6', 'S7', 'S8')
 $sections = switch ($Section) {
-  'All' { @('S6') }
+  # "All" deliberately excludes S8: that one injects real mouse input and must be asked for.
+  'All' { @('S6', 'S7') }
   default { @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
 }
 $unknown = @($sections | Where-Object { $knownSections -notcontains $_ })
@@ -214,6 +337,7 @@ Write-Host "verify-m1b: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 foreach ($s in $sections) {
   switch ($s) {
     'S6' { Invoke-S6 }
+    'S7' { Invoke-S7 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
