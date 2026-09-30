@@ -30,6 +30,11 @@
       "source": "docs/aegis/plans/2026-09-30-m1-roadmap.md",
       "banner": "tools/obsidian/05-banner.md",
       "dest": "05 M1 切片路線圖.md"
+    },
+    {
+      "source": "docs/aegis/plans/2026-09-30-m1a-lifecycle.md",
+      "banner": "tools/obsidian/06-banner.md",
+      "dest": "06 實作計畫 - M1a 生命週期.md"
     }
   ]
 }
