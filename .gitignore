@@ -1,0 +1,18 @@
+# 建置產物
+bin/
+obj/
+*.user
+.vs/
+
+# 暫存與日誌（規格 §5 的原子寫入暫存檔）
+*.tmp-*
+*.log
+
+# 依賴
+node_modules/
+packages/
+
+# 敏感／本機檔案
+*.pfx
+*.snk
+secrets.json
