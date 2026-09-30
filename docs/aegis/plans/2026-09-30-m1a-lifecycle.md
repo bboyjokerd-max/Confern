@@ -135,7 +135,8 @@ Change Necessity:
 | 建立 | `tools/verify-m1a.ps1` | 半自動驗收跑者（ASCII-only） |
 | 建立 | `docs/aegis/work/2026-09-30-m1a/90-evidence.md` | 驗收證據 |
 | 修改 | `docs/aegis/plans/2026-09-30-m1-roadmap.md` | 寫入邊界修訂與 Q6 |
-| **刪除** | `src/M05/`、`tools/dragsim/`、`tools/run-m05-experiment.ps1` | 退休邊界（T6） |
+| **刪除** | `src/M05/`、`tools/run-m05-experiment.ps1` | 退休邊界（T6） |
+| **保留並整頓** | `tools/dragsim/` | T5 的 spike 推翻 M0.5 結論後改列驗收資產（見 90-evidence §7） |
 
 ## Existence Check
 
@@ -145,7 +146,7 @@ Existence Check
 - Existing owner / reuse candidate: src/M05（拋棄式原型）
 - Why existing surface is insufficient: 原型是實驗設計（單一虛擬螢幕視窗、實驗旗標、無保險 #5、無多螢幕）；把它改成產品會把實驗債帶進產品
 - Creation proof: M0.5 已驗證機制；本計畫把機制以產品契約重寫
-- Entropy / retirement impact: 本切片完成時**刪除** src/M05 與 tools/dragsim（同一 PR）；不保留相容層
+- Entropy / retirement impact: 本切片完成時**刪除** src/M05 與 tools/run-m05-experiment.ps1（同一 PR）；不保留相容層。`tools/dragsim` 例外保留——T5 spike 證明它是可用的驗收資產，不是拋棄式原型
 - Decision: add-with-proof
 ```
 
@@ -155,7 +156,7 @@ Existence Check
 - **正規 owner**：`Native`＝唯一 P/Invoke 來源；`ReleaseGuard`＝**唯一**收層權威（M05 把收層邏輯散在 Program 的三個 timer 與事件處理常式中，這是原型債，本切片集中）；`HitLayer`＝視窗生命週期唯一擁有者；`MonitorLayout`＝唯一座標來源。
 - **責任重疊**：M05 的 `Program.cs` 同時做組裝與保養邏輯 → 本切片把後者移出。
 - **更高層 owner／契約**：五層保險本質是「單一釋放不變式」，因此由一個 owner 持有並以 `OnCaptured／OnReleaseRequested／OnDrop／OnKillSwitch` 四個入口收斂；`Program` 只負責接線。
-- **退休／否證**：M05／dragsim 在本切片結束時刪除。
+- **退休／否證**：M05 在本切片結束時刪除；dragsim 經 T5 驗證後保留（結論反轉，見 T5 結果註記）。
 - **Verdict**：通過。
 
 ## Plan Pressure Test
@@ -289,7 +290,7 @@ internal sealed class Options
     public int CycleTest;
     public bool Quiet;
 
-    public static Options Parse(string[] args) { /* --version --dump-monitors --raise --log --trigger-key --cycle-test --quiet */ }
+    public static Options Parse(string[] args) { /* --version --dump-monitors --raise --log --trigger-key --cycle-test --quiet --watchdog-seconds --assume-explorer-foreground */ }
 }
 ```
 
@@ -627,7 +628,12 @@ dotnet run --project src/Sidecar -c Release        # 背景工作啟動
 
 **Files**：`tools/verify-m1a.ps1`
 
-**Why**：M0.5 證明了合成拖曳不可用，但**只有拖曳手勢**需要人。其餘（啟動、螢幕、樣式、50 循環、緊急熱鍵、殺行程、非管理員）都能自動斷言。把「手勢」與「判定」分開，人工只負責動手。
+**Why**：M0.5 認為合成拖曳不可用，但**只有拖曳手勢**需要人。其餘（啟動、螢幕、樣式、50 循環、緊急熱鍵、殺行程、非管理員）都能自動斷言。把「手勢」與「判定」分開，人工只負責動手。
+
+> **結果（T5 執行後修正）**：M0.5 的前提是錯的。T5 的有界 spike 證明合成 OLE 拖曳**可用**
+> （`DoDragDrop` 必須在同執行緒的 `WM_LBUTTONDOWN` 處理常式內同步呼叫），因此跑者升級為
+> **`tools/verify-m1a.ps1`：43+ 項全自動檢查**，其中 S4 以真實拖放命中接收層。人工區段
+> （`-Section S4m`）只保留 A7 與 A2 的位置多樣性。詳見 `90-evidence.md` §7。
 
 **Steps**
 
@@ -657,7 +663,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 -Projec
 
 ### T6 — 驗收、證據歸檔與原型退休
 
-**Files**：`docs/aegis/work/2026-09-30-m1a/90-evidence.md`、刪除 `src/M05`、`tools/dragsim`、`tools/run-m05-experiment.ps1`、修改路線圖
+**Files**：`docs/aegis/work/2026-09-30-m1a-lifecycle/90-evidence.md`、刪除 `src/M05`、`tools/run-m05-experiment.ps1`、修改路線圖
 
 **Steps**
 
@@ -672,7 +678,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 -Projec
 | A14 | 非管理員帳號通過 | ✅（manifest `asInvoker` + 以當前一般使用者執行） |
 | A1／A3／A4／A5／A8–A12 | — | M1b／M1c／M1d／M1f |
 
-2. **刪除原型**：`git rm -r src/M05 tools/dragsim`、`git rm tools/run-m05-experiment.ps1`（Existence Check 的退休承諾）。刪除後 `dotnet build` 必須仍成功，且 `verify-m1a.ps1` 不得引用任何 M05 路徑。
+2. **刪除原型**：`git rm -r src/M05`、`git rm tools/run-m05-experiment.ps1`（Existence Check 的退休承諾）。**`tools/dragsim` 不刪**——T5 spike 已證明它是可用的合成拖曳器，且 `verify-m1a.ps1` 的 S4 依賴它。刪除後 `dotnet build` 必須仍成功，且 `verify-m1a.ps1` 不得引用任何 M05 路徑。
 3. 把「路線圖邊界修訂」與 Q6 寫回 `2026-09-30-m1-roadmap.md`。
 
 **Verification**
@@ -694,7 +700,7 @@ Execution Readiness View:
 - Approved Behavior: 觸發鍵預設空白鍵且可設定（Q1）；放手語意移至 M1d（本切片放手＝記錄＋收層）；非管理員（A14）
 - Owner / Contract Constraints: Native＝唯一 P/Invoke；ReleaseGuard＝唯一收層權威；HitLayer＝視窗唯一擁有者；MonitorLayout＝唯一座標來源
 - Compatibility Boundary: 不裝 shell 擴充、不寫 HKLM、非管理員、被拖曳檔案唯讀、非觸發拖曳位元級等價
-- Retirement Boundary: 本切片結束時刪除 src/M05 與 tools/dragsim；產品碼不得沿用原型命名空間與實驗旗標
+- Retirement Boundary: 本切片結束時刪除 src/M05 與 tools/run-m05-experiment.ps1（dragsim 保留為驗收資產）；產品碼不得沿用原型命名空間與實驗旗標
 - Task Batches: T1 骨架 → T2 螢幕 → T3 命中層 → T4 生命週期 → T5 跑者 → T6 驗收與退休
 - Test Obligations: TDD Route=off（strict 僅授權 M1c／M1d）；驗收＝verify-m1a.ps1 的 S1–S4
 - Review Gates: T4 完成後需人工手勢確認；T6 的 A2「未驗證項」需使用者知悉
@@ -716,7 +722,7 @@ Execution Readiness View:
 
 ## Retirement
 
-- **本切片內執行**：`src/M05/`、`tools/dragsim/`、`tools/run-m05-experiment.ps1` 於 T6 刪除。
+- **本切片內執行**：`src/M05/`、`tools/run-m05-experiment.ps1` 於 T6 刪除；`tools/dragsim/` 保留（T5 反轉）。
 - **未來退休**：`--raise` 與 `--cycle-test` 是診斷旗標，M1f 交付前必須移除或收進「診斷模式」；`HitLayer` 的 alpha 參數在 M1b 之後固定為 1，不得作為使用者選項。
 
 ## Self-Review

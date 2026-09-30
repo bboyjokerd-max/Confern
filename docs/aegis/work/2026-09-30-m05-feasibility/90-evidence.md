@@ -151,6 +151,24 @@ FindWindowW(M05OverlayWindow) = 0            (視窗已徹底消失)
 - 結論：問題在**合成拖曳器**，不在接收層命題。自動化路徑不可用；`--target` 對照組模式保留在程式碼中作為證據。
 - **影響**：目前沒有自動化回歸，M1 每次都要人工拖曳驗收（殘餘項 R4）。
 
+> ### ⚠ 後續更正（2026-09-30，M1a T5）— 本節結論**已被推翻**
+>
+> 上面「合成 `DoDragDrop` 無法產生真實拖曳」**是錯的**：失敗的是**工具設計**，不是平台限制。
+> 兩次嘗試都從計時器／其他執行緒呼叫 `DoDragDrop`；M1a T5 的一次有界 spike 把它移進
+> **同一執行緒回應 `WM_LBUTTONDOWN` 的處理常式內**同步呼叫，其餘手勢完全不變，結果：
+>
+> ```
+> WM_LBUTTONDOWN -> calling DoDragDrop synchronously
+> DoDragDrop returned: Copy
+> CONTROL DragEnter
+> CONTROL DROP RECEIVED: C:\Users\User\AppData\Local\Temp\sidecar-verify\sample-drag.txt
+> ```
+>
+> 對照組這次收到了 drop。自動化拖曳驗證**可用**，`tools/dragsim` 已由廢棄原型改列為驗收資產
+> （M1a 的 `tools/verify-m1a.ps1` S4 即以其命中接收層）。**本節原始觀測保留不改寫**——
+> 「儀器壞掉會被誤讀成假設被否證」本身是這份紀錄最有價值的教訓。
+> 詳見 `docs/aegis/work/2026-09-30-m1a-lifecycle/90-evidence.md` §7。
+
 ## 5. 對規格的實質影響（已寫回）
 
 | 規格位置 | 變更 |
@@ -166,5 +184,5 @@ FindWindowW(M05OverlayWindow) = 0            (視窗已徹底消失)
 | R1 | 第二螢幕、Per-Monitor DPI | M1 第一切片：每螢幕一視窗 + PerMonitorV2 座標換算 |
 | R2 | 保險 #4／#5（行程結束、緊急停用熱鍵）與 Wheel 階段收層 | M1 實作完整五層 |
 | R3 | IME／注音下的觸發鍵 | M1 以「觸發鍵可自訂」為出口；上線前補矩陣 |
-| R4 | 無自動化拖曳回歸 | 另尋方案（UI Automation 驅動真實滑鼠）或維持人工矩陣 |
+| R4 | 無自動化拖曳回歸 | ~~另尋方案（UI Automation 驅動真實滑鼠）或維持人工矩陣~~ **已於 M1a T5 推翻並解決**：合成 OLE 拖曳可用（見上方更正），`tools/verify-m1a.ps1` S4 自動命中接收層；只剩「以 explorer 為來源」需人工或 UI Automation |
 | R5 | z-order 與系統拖曳殘影（矩陣 #2 項） | M1 繪製輪盤後判定 |

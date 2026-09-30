@@ -1,15 +1,15 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-09-30-m1a-lifecycle",
-  "currentTodo": "T5 驗收跑者 verify-m1a.ps1 + R4 有界 spike",
+  "currentTodo": "T6 已完成（證據歸檔、原型退休、路線圖與規格更正、Obsidian 同步）",
   "completedTodos": [
-    "T4 生命週期與五層硬保險（ReleaseGuard 單一收層權威；合成手勢驗證 13/13）"
+    "T5 驗收跑者 45/45；R4 spike 推翻 M0.5 結論"
   ],
-  "activeSlice": "T5",
+  "activeSlice": "M1a（完成）",
   "evidenceRefs": [
-    "src/Sidecar/Interaction/ReleaseGuard.cs; %TEMP%/sidecar-verify/t4.log"
+    "docs/aegis/work/2026-09-30-m1a-lifecycle/90-evidence.md; tools/verify-m1a.ps1"
   ],
   "blockedOn": null,
-  "nextStep": "把 T4 的合成驗證正式化為 tools/verify-m1a.ps1（S1-S4）",
+  "nextStep": "M1b：視覺層（輪盤）渲染；或先補 A7 人工手勢證據",
   "updatedAt": "2026-09-30"
 }

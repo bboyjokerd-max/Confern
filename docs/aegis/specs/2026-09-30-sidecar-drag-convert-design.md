@@ -350,7 +350,7 @@ WHEEL ──(Esc)──▶ CANCELLED ──▶ IDLE（收層 + drop 保底語意
 | R1 | 第二螢幕與 Per-Monitor DPI 未實測 | 多螢幕使用者可能遇到接收層座標或 DPI 偏差 | M1 第一個切片：每螢幕一視窗 + PerMonitorV2 座標換算；需有第二螢幕的機器驗收 |
 | R2 | 緊急停用熱鍵（保險 #5）與 Wheel 階段的收層未實作 | 原型只覆蓋 #1／#2／#3 | M1 實作 §4.2.2 完整五層 |
 | R3 | 觸發鍵與輸入法（附錄 C #3）未做確定性測試 | 注音／IME 開啟時空白鍵可能被吃掉 | M1 以「觸發鍵可自訂」為設計出口；上線前補 IME 矩陣 |
-| R4 | 自動化拖曳驗證器（`tools/dragsim`）**不可用** | 無自動化回歸；每次都要人工拖曳 | 已證實合成 `DoDragDrop` 無法產生真實拖曳（含對照組失敗）。M1 需另尋方案（例如以 UI Automation 驅動真實滑鼠）或改為人工矩陣 |
+| R4 | ~~自動化拖曳驗證器（`tools/dragsim`）不可用~~ **已推翻（M1a T5）** | 合成拖曳的來源只能是我們自己的視窗，不是 explorer | 「合成 `DoDragDrop` 無法產生真實拖曳」是**工具設計錯誤，不是平台限制**：把 `DoDragDrop` 放進**同一執行緒**的 `WM_LBUTTONDOWN` 處理常式內同步呼叫即可。M1a T5 的 spike 得到 `DoDragDrop returned: Copy`，且對照組收到 `CONTROL DROP RECEIVED`。剩下的缺口只有「以 explorer 當來源」——需點在真實桌面圖示上或以 UI Automation 取得圖示座標 |
 
 ### 9.3 效能
 

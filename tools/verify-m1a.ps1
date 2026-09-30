@@ -97,6 +97,38 @@ public static class Probe {
     a[0].U.ki.wVk = vk; a[0].U.ki.dwFlags = up ? KEYUP : 0;
     SendInput(1, a, Marshal.SizeOf(typeof(INPUT)));
   }
+
+  // --- token integrity: the direct measurement for "runs as a standard user" (A14) ---
+  // The application manifest is embedded in the exe as a Win32 resource, so checking for a
+  // .manifest file next to the binary is the wrong instrument. Measure the running process.
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int cls, IntPtr info, int len, out int ret);
+
+  /// Returns the last subauthority of the token integrity SID, or -1 on failure.
+  /// 0x1000 = low, 0x2000 = medium (standard user), 0x3000 = high (elevated), 0x4000 = system.
+  /// Do not mix these up: medium is 8192 = 0x2000, NOT 0x1000.
+  public static int IntegrityRid(uint pid) {
+    IntPtr p = OpenProcess(0x1000, false, pid);              // PROCESS_QUERY_LIMITED_INFORMATION
+    if (p == IntPtr.Zero) return -1;
+    IntPtr tok;
+    if (!OpenProcessToken(p, 0x0008, out tok)) { CloseHandle(p); return -1; }   // TOKEN_QUERY
+    int len = 0;
+    GetTokenInformation(tok, 25, IntPtr.Zero, 0, out len);   // TokenIntegrityLevel
+    int rid = -1;
+    if (len > 0) {
+      IntPtr buf = Marshal.AllocHGlobal(len);
+      if (GetTokenInformation(tok, 25, buf, len, out len)) {
+        IntPtr sid = Marshal.ReadIntPtr(buf);                // TOKEN_MANDATORY_LABEL.Sid
+        byte subCount = Marshal.ReadByte(sid, 1);            // SID.SubAuthorityCount
+        rid = Marshal.ReadInt32(sid, 8 + (subCount - 1) * 4);
+      }
+      Marshal.FreeHGlobal(buf);
+    }
+    CloseHandle(tok); CloseHandle(p);
+    return rid;
+  }
 }
 '@
 
@@ -137,6 +169,22 @@ function Invoke-Capture([string[]]$Argv) {
   $proc = Start-Process -FilePath $Exe -ArgumentList $Argv -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
   $text = if (Test-Path -LiteralPath $out) { (Get-Content -LiteralPath $out -Raw -Encoding UTF8) } else { '' }
   return [pscustomobject]@{ Exit = $proc.ExitCode; Stdout = $text }
+}
+
+# ---------------------------------------------------------------- S0
+function Invoke-S0 {
+  Write-Host ""
+  Write-Host "=== S0 no elevation (A14) ==="
+  $groups = (& whoami /groups) -join "`n"
+  Check "S0.1 this session is NOT elevated (medium integrity, S-1-16-8192)" ($groups -match 'S-1-16-8192')
+
+  Stop-AllSidecar
+  $run = Start-Sidecar @() 's0'
+  $rid = [Probe]::IntegrityRid([uint32]$run.Process.Id)
+  Write-Host ("      app token integrity RID = 0x{0:X}" -f $rid)
+  Check "S0.2 the app runs at medium integrity, i.e. NOT elevated (0x2000)" ($rid -eq 0x2000)
+  if (-not $run.Process.HasExited) { Stop-Process -Id $run.Process.Id -Force }
+  Start-Sleep -Milliseconds 300
 }
 
 # ---------------------------------------------------------------- S1
@@ -419,7 +467,7 @@ function Invoke-S5 {
 
 # ---------------------------------------------------------------- drive
 $sections = switch ($Section) {
-  'All' { @('S1', 'S2', 'S3', 'S3b', 'S4', 'S5') }
+  'All' { @('S0', 'S1', 'S2', 'S3', 'S3b', 'S4', 'S5') }
   'S4m' { @('S4a', 'S4b') }
   default { @($Section) }
 }
@@ -428,6 +476,7 @@ Write-Host "verify-m1a: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
 foreach ($s in $sections) {
   switch ($s) {
+    'S0'  { Invoke-S0 }
     'S1'  { Invoke-S1 }
     'S2'  { Invoke-S2 }
     'S3'  { Invoke-S3 }

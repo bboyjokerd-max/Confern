@@ -2,9 +2,9 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-09-30-m1a-lifecycle",
   "lastCheckpointRef": "docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json",
-  "resumeInstruction": "讀 docs/aegis/plans/2026-09-30-m1a-lifecycle.md T5/T6",
+  "resumeInstruction": "讀 docs/aegis/plans/2026-09-30-m1-roadmap.md 規劃 M1b",
   "knownPartialWork": [
-    "T4 生命週期與五層硬保險（ReleaseGuard 單一收層權威；合成手勢驗證 13/13）"
+    "T5 驗收跑者 45/45；R4 spike 推翻 M0.5 結論"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-09-30-m1a-lifecycle/10-intent.md",
@@ -12,6 +12,6 @@
     "docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "T4 的人工手勢驗證已完成（實際上只有合成驗證；真實 drop 仍待人工，見 T5 S4）"
+    "A7 已通過（未取得人工手勢證據）"
   ]
 }
