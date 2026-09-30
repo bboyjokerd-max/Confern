@@ -466,11 +466,22 @@ function Invoke-S5 {
 }
 
 # ---------------------------------------------------------------- drive
+# -Section accepts a comma-separated list (e.g. -Section S0,S1,S2,S5). Unknown names are a
+# hard error: a runner that silently runs nothing and reports "0/0 passed (exit 0)" is worse
+# than no runner at all (see 99-reflection.md: a check that can never fail).
+$knownSections = @('S0', 'S1', 'S2', 'S3', 'S3b', 'S4', 'S4a', 'S4b', 'S5')
 $sections = switch ($Section) {
   'All' { @('S0', 'S1', 'S2', 'S3', 'S3b', 'S4', 'S5') }
   'S4m' { @('S4a', 'S4b') }
-  default { @($Section) }
+  default { @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
 }
+$unknown = @($sections | Where-Object { $knownSections -notcontains $_ })
+if ($unknown.Count -gt 0) {
+  Write-Host "unknown section(s): $($unknown -join ', ')"
+  Write-Host "known: All, S4m, $($knownSections -join ', ')"
+  exit 2
+}
+if ($sections.Count -eq 0) { Write-Host "no sections requested"; exit 2 }
 
 Write-Host "verify-m1a: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
@@ -500,6 +511,7 @@ if ($EvidenceDir -ne '') {
 }
 
 $fail = @($results | Where-Object { -not $_.Pass }).Count
+if ($results.Count -eq 0) { Write-Host "FATAL: no checks ran - refusing to report success"; exit 2 }
 Write-Host ""
 Write-Host "M1a summary: $($results.Count - $fail)/$($results.Count) checks passed ($Section)"
 if ($inconclusive.Count -gt 0) {

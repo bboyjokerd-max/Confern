@@ -44,6 +44,14 @@ internal static class Program
             return 0;
         }
 
+        // 純幾何自測不需要任何視窗；在建任何圖層之前就處理掉。
+        // 注意：執行邏輯（含 CycleTest／WheelDemo）掛在 Options 上，這是 M1a 遺留的結構。
+        if (opt.GeometrySelfTest)
+        {
+            Native.AttachParentConsole();
+            return App.RunGeometrySelfTest(opt);
+        }
+
         // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
         // 因此這裡不留下任何需要清理的檔案鎖。
         using var mutex = new Mutex(initiallyOwned: true, @"Local\Sidecar.SingleInstance", out bool isFirst);
@@ -77,7 +85,13 @@ internal sealed class Options
           --log <path>              evidence log path
           --trigger-key <0xNN|NAME> trigger virtual-key (default 0x20 / VK_SPACE)
           --cycle-test <N>          show/hide the hit layer N times and exit
-          --wheel-demo <X> <Y>      raise both layers and paint the T1 demo bitmap at (X,Y)
+          --wheel-demo <X> <Y>      raise both layers and show the wheel at (X,Y) (diagnostic)
+          --wheel-dump <path>       with --wheel-demo: write the painted frame as PNG and exit
+          --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
+          --wheel-targets <a,b,c>   with --wheel-demo: target format list (default PNG,JPG,WEBP,BMP)
+          --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
+          --wheel-previews <N>      with --wheel-demo: file count shown in the preview (default 1)
+          --wheel-geometry-selftest check the wheel geometry against known angles and exit
           --quiet                   do not echo events to the console
         """;
 
@@ -104,9 +118,15 @@ internal sealed class Options
     /// </summary>
     public bool AssumeExplorerForeground;
 
-    /// <summary>診斷用：把視覺層（T1 示範圖）顯示在指定螢幕座標，用來驗證兩層堆疊的穿透。</summary>
+    /// <summary>診斷用：把輪盤顯示在指定螢幕座標（驗兩層堆疊的穿透與輪盤外觀）。</summary>
     public int? WheelDemoX;
     public int? WheelDemoY;
+    public string? WheelDump;
+    public string WheelSource = "HEIC";
+    public string[] WheelTargets = Array.Empty<string>();
+    public int WheelSelected;
+    public int WheelPreviews = 1;
+    public bool GeometrySelfTest;
 
     public static Options Parse(string[] args)
     {
@@ -121,6 +141,19 @@ internal sealed class Options
                 case "--dump-monitors": o.DumpMonitors = true; break;
                 case "--raise": o.ForceRaiseHitLayer = true; break;
                 case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
+                case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
+                case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
+                case "--wheel-targets":
+                    if (i + 1 < args.Length)
+                        o.WheelTargets = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries);
+                    break;
+                case "--wheel-selected":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int ws)) { o.WheelSelected = ws; i++; }
+                    break;
+                case "--wheel-previews":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int wp)) { o.WheelPreviews = wp; i++; }
+                    break;
+                case "--wheel-geometry-selftest": o.GeometrySelfTest = true; break;
                 case "--wheel-demo":
                     if (i + 2 < args.Length &&
                         int.TryParse(args[i + 1], out int wx) && int.TryParse(args[i + 2], out int wy))
@@ -230,7 +263,7 @@ internal static class App
         if (opt.CycleTest > 0) return CycleTest(hit, evidence, opt.CycleTest);
 
         if (opt.WheelDemoX.HasValue)
-            return WheelDemo(hit, guard, evidence, opt.WheelDemoX.Value, opt.WheelDemoY!.Value);
+            return WheelDemo(hit, guard, evidence, opt);
 
         using var hooks = new Hooks();
         if (opt.ForceRaiseHitLayer)
@@ -265,76 +298,104 @@ internal static class App
         (Native.GetAsyncKeyState((int)Native.VK_SHIFT) & 0x8000) != 0;
 
     /// <summary>
-    /// T1 生死線 2（診斷用）：同時升起命中層與視覺層，證明「視覺層存在時拖放仍穿透到命中層」。
-    /// 兩層都必須是可見的——`WindowFromPoint` 只會回可見視窗，隱藏起來驗不出穿透。
+    /// 診斷用：同時升起命中層與視覺層。穿透只有在**兩層都可見**時才驗得出來
+    /// （`WindowFromPoint` 只會回可見視窗，藏起來等於驗不出東西）。
     /// </summary>
-    private static int WheelDemo(HitLayer hit, ReleaseGuard guard, Evidence evidence, int x, int y)
+    private static int WheelDemo(HitLayer hit, ReleaseGuard guard, Evidence evidence, Options opt)
     {
-        evidence.Line($"--wheel-demo: hooks NOT installed; demo at ({x},{y})");
+        int x = opt.WheelDemoX!.Value, y = opt.WheelDemoY!.Value;
+        evidence.Line($"--wheel-demo: hooks NOT installed; wheel at ({x},{y})");
         guard.OnCaptured();                       // 升起命中層，並用真正的保險 #3 計時
 
         using var visual = new VisualLayer(evidence);
+        var presenter = new WheelPresenter(evidence, visual);
+        string[] targets = opt.WheelTargets.Length > 0 ? opt.WheelTargets : new[] { "PNG", "JPG", "WEBP", "BMP" };
+
         var sw = Stopwatch.StartNew();
-        using var bmp = PaintDemoBitmap(DemoBitmapSize);
-        visual.Show(x, y, bmp);
+        presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected, PreviewText(targets, opt));
         sw.Stop();
 
-        evidence.Line($"visual demo shown at ({x},{y}) size={bmp.Width}x{bmp.Height} " +
+        evidence.Line($"visual demo shown at ({x},{y}) " +
+                      $"size={WheelGeometry.BitmapWidthPx}x{WheelGeometry.BitmapHeightPx} " +
                       $"in {sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+
+        if (opt.WheelDump != null)
+        {
+            presenter.DumpTo(opt.WheelDump);
+            return 0;
+        }
         return RunMessageLoop(evidence);
     }
 
-    /// <summary>示範圖尺寸＝輪盤直徑 + 邊距（T3 會由 WheelPresenter 依實際版面決定）。</summary>
-    private const int DemoBitmapSize = 260;
+    /// <summary>M1b 的預覽文字只是示範：真正的命名規則屬 M1d 的 <c>NamingPolicy</c>。</summary>
+    private static string PreviewText(string[] targets, Options opt)
+    {
+        if (opt.WheelPreviews > 1) return $"{opt.WheelPreviews} 個檔案";
+        int i = Math.Clamp(opt.WheelSelected, 0, targets.Length - 1);
+        return $"holiday.{targets[i].ToLowerInvariant()}";
+    }
 
     /// <summary>
-    /// T1 的示範點陣圖：4 個扇區 + 中心文字。目的不是外觀，而是**一次驗證 GDI+ 寫進 alpha 通道
-    /// 與文字反鋸齒都正確**（傳統 GDI 不會寫 alpha；GDI+ 的 ClearType 會把 alpha 弄壞，故用 AntiAlias）。
+    /// T2 的自我對照（post-change regression，不是 strict RED）：以**已知角度**驗扇區映射，
+    /// 並以已知座標驗翻邊。全數符合回 0，否則回 5 並列出不符項。
     /// </summary>
-    private static Bitmap PaintDemoBitmap(int size)
+    internal static int RunGeometrySelfTest(Options opt)
     {
-        var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.CompositingMode = CompositingMode.SourceOver;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-        g.Clear(Color.Transparent);
-
-        float c = size / 2f;
-        float r = c - 6f;
-        var colors = new[]
+        var cases = new (int Count, double Dx, double Dy, int Expected, string Why)[]
         {
-            Color.FromArgb(235, 33, 150, 243), Color.FromArgb(235, 76, 175, 80),
-            Color.FromArgb(235, 255, 152, 0),  Color.FromArgb(235, 156, 39, 176)
+            (4, 0, -100, 0, "count=4 straight up -> 0"),
+            (4, 100, -0.01, 0, "count=4 just before the 90deg boundary -> 0"),
+            (4, 100, 0.01, 1, "count=4 just after the 90deg boundary -> 1"),
+            (4, 100, 100, 1, "count=4 down-right 45deg -> 1"),
+            (4, 0, 100, 2, "count=4 straight down -> 2"),
+            (4, -100, 0, 3, "count=4 straight left -> 3"),
+            (3, 0, -100, 0, "count=3 straight up -> 0"),
+            (3, -100, 0, 2, "count=3 straight left -> 2"),
+            (2, 0, -100, 0, "count=2 straight up -> 0"),
+            (2, 0, 100, 1, "count=2 straight down -> 1"),
+            (7, 0, 100, 3, "count=7 straight down -> 3"),
+            (1, 500, 500, 0, "count=1 any direction -> 0")
         };
-        var labels = new[] { "PNG", "JPG", "WEBP", "BMP" };
-        float sweep = 360f / colors.Length;
 
-        for (int i = 0; i < colors.Length; i++)
+        int failed = 0;
+        var out_ = new List<string>();
+
+        void Report(string text, bool ok)
         {
-            using var brush = new SolidBrush(colors[i]);
-            g.FillPie(brush, c - r, c - r, r * 2, r * 2, -90f + i * sweep, sweep - 1.5f);
+            if (!ok) failed++;
+            out_.Add($"{(ok ? "PASS" : "FAIL")}  {text}");
         }
 
-        // 扇區標籤：放在各扇區中間角、半徑 0.68r 處
-        using var fg = new SolidBrush(Color.White);
-        using var font = new Font("Segoe UI", 9f, FontStyle.Bold, GraphicsUnit.Point);
-        using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        for (int i = 0; i < labels.Length; i++)
+        foreach (var c in cases)
         {
-            double mid = (-90.0 + (i + 0.5) * sweep) * Math.PI / 180.0;
-            float lx = c + (float)(Math.Cos(mid) * r * 0.68);
-            float ly = c + (float)(Math.Sin(mid) * r * 0.68);
-            g.DrawString(labels[i], font, fg, new RectangleF(lx - 34, ly - 11, 68, 22), sf);
+            int got = WheelGeometry.SectorAt(c.Dx, c.Dy, c.Count);
+            Report($"{c.Why} (got {got}, want {c.Expected})", got == c.Expected);
         }
 
-        using var centerBrush = new SolidBrush(Color.FromArgb(242, 24, 26, 32));
-        g.FillEllipse(centerBrush, c - 52, c - 52, 104, 104);
-        using var font2 = new Font("Segoe UI", 12f, FontStyle.Bold, GraphicsUnit.Point);
-        g.DrawString("HEIC → PNG", font2, fg, new RectangleF(c - 50, c - 12, 100, 24), sf);
+        var work = new Native.RECT { Left = 0, Top = 0, Right = 2560, Bottom = 1032 };
+        var (fx, fy) = WheelGeometry.FlipEdge(2500, 1000, WheelGeometry.BoxPx, work);
+        Report($"flip at bottom-right -> ({fx},{fy}), want (2234,734)", fx == 2234 && fy == 734);
 
-        return bmp;
+        var (gx, gy) = WheelGeometry.FlipEdge(100, 100, WheelGeometry.BoxPx, work);
+        Report($"no flip near the top-left -> ({gx},{gy}), want (118,118)", gx == 118 && gy == 118);
+
+        var tiny = new Native.RECT { Left = 0, Top = 0, Right = 200, Bottom = 200 };
+        var (hx, hy) = WheelGeometry.FlipEdge(100, 100, WheelGeometry.BoxPx, tiny);
+        Report($"clamped when the work area is smaller than the wheel -> ({hx},{hy}), want (0,0)", hx == 0 && hy == 0);
+
+        Report($"wheel box = {WheelGeometry.BoxPx} px (want 248)", WheelGeometry.BoxPx == 248);
+        Report($"bitmap = {WheelGeometry.BitmapWidthPx}x{WheelGeometry.BitmapHeightPx} (want 304x330)",
+               WheelGeometry.BitmapWidthPx == 304 && WheelGeometry.BitmapHeightPx == 330);
+
+        foreach (var line in out_) Console.WriteLine(line);
+        if (opt.LogPath is { Length: > 0 })
+        {
+            try { File.AppendAllLines(opt.LogPath, out_); } catch (IOException) { /* 記錄失敗不改變判定 */ }
+        }
+        Console.WriteLine($"geometry selftest: {out_.Count - failed}/{out_.Count} passed");
+        return failed == 0 ? 0 : 5;
     }
+
 
     /// <summary>程式化收層循環：N 次升起／收起後以**作業系統狀態**斷言全部隱藏。</summary>
     private static int CycleTest(HitLayer hit, Evidence evidence, int cycles)

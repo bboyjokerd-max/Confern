@@ -18,7 +18,12 @@ param(
   [string]$DragSim = '',
   [int]$DemoX = 900,
   [int]$DemoY = 400,
-  [int]$DemoSize = 260,
+  # The visual-layer window is anchored at (cursor - PadPx), NOT at the cursor:
+  # the wheel box sits at cursor+(18,18) inside a bitmap that also has to contain the
+  # 32 px ghost card centred on the cursor. WheelGeometry.PadPx owns that value.
+  [int]$PadPx = 24,
+  [int]$DemoW = 304,
+  [int]$DemoH = 330,
   [string]$LogDir = "$env:TEMP\sidecar-verify"
 )
 
@@ -132,8 +137,10 @@ function Invoke-S6 {
     Check "S6.5 visual layer is layered + topmost + toolwindow" `
       ((($ex -band 0x80000) -ne 0) -and (($ex -band 0x8) -ne 0) -and (($ex -band 0x80) -ne 0))
     Check "S6.6 visual layer is visible for the test" $vvis
-    Check "S6.7 visual layer rect equals the requested position/size" `
-      (($vx -eq $DemoX) -and ($vy -eq $DemoY) -and ($vw -eq $DemoSize) -and ($vh -eq $DemoSize))
+    $wantX = $DemoX - $PadPx
+    $wantY = $DemoY - $PadPx
+    Check "S6.7 visual layer rect is (cursor-PadPx, cursor-PadPx, $DemoW x $DemoH)" `
+      (($vx -eq $wantX) -and ($vy -eq $wantY) -and ($vw -eq $DemoW) -and ($vh -eq $DemoH))
   }
 
   # The decisive check: with BOTH layers visible, every sampled point must resolve to the
@@ -156,9 +163,9 @@ function Invoke-S6 {
 
   $outside = @(
     @(($DemoX - 60), ($DemoY + 130)),
-    @(($DemoX + $DemoSize + 60), ($DemoY + 130)),
+    @(($DemoX + $DemoW + 60), ($DemoY + 130)),
     @(($DemoX + 130), ($DemoY - 60)),
-    @(($DemoX + 130), ($DemoY + $DemoSize + 60))
+    @(($DemoX + 130), ($DemoY + $DemoH + 60))
   )
   $outsideMiss = @()
   foreach ($pt in $outside) {
@@ -188,10 +195,19 @@ function Invoke-S6 {
 }
 
 # ------------------------------------------------------------------ drive
+# -Section accepts a comma-separated list. Unknown names and "nothing ran" are hard errors.
+$knownSections = @('S6', 'S7', 'S8')
 $sections = switch ($Section) {
   'All' { @('S6') }
-  default { @($Section) }
+  default { @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
 }
+$unknown = @($sections | Where-Object { $knownSections -notcontains $_ })
+if ($unknown.Count -gt 0) {
+  Write-Host "unknown section(s): $($unknown -join ', ')"
+  Write-Host "known: All, $($knownSections -join ', ')"
+  exit 2
+}
+if ($sections.Count -eq 0) { Write-Host "no sections requested"; exit 2 }
 
 Write-Host "verify-m1b: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
@@ -205,6 +221,7 @@ foreach ($s in $sections) {
 Stop-AllSidecar
 
 $fail = @($results | Where-Object { -not $_.Pass }).Count
+if ($results.Count -eq 0) { Write-Host "FATAL: no checks ran - refusing to report success"; exit 2 }
 Write-Host ""
 Write-Host "M1b summary: $($results.Count - $fail)/$($results.Count) checks passed ($Section)"
 if ($inconclusive.Count -gt 0) {
