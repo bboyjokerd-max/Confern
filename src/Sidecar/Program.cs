@@ -66,6 +66,7 @@ internal sealed class Options
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
+          --raise-seconds <N>       auto-hide after N seconds in --raise mode (default 30)
           --log <path>              evidence log path
           --trigger-key <0xNN|NAME> trigger virtual-key (default 0x20 / VK_SPACE)
           --cycle-test <N>          show/hide the hit layer N times and exit
@@ -80,6 +81,9 @@ internal sealed class Options
     public uint TriggerKey = Program.DefaultTriggerKey;
     public int CycleTest;
     public bool Quiet;
+
+    /// <summary>--raise 的自我收層秒數（診斷模式沒有釋放路徑，必須自己保證不會困住桌面）。</summary>
+    public int RaiseSeconds = 30;
 
     public static Options Parse(string[] args)
     {
@@ -102,6 +106,9 @@ internal sealed class Options
                     break;
                 case "--cycle-test":
                     if (++i < args.Length && int.TryParse(args[i], out int n) && n > 0) o.CycleTest = n;
+                    break;
+                case "--raise-seconds":
+                    if (++i < args.Length && int.TryParse(args[i], out int s) && s >= 0) o.RaiseSeconds = s;
                     break;
             }
         }
@@ -139,17 +146,85 @@ internal static class App
                       $"dumpMonitors={opt.DumpMonitors} raise={opt.ForceRaiseHitLayer} " +
                       $"cycleTest={opt.CycleTest} log={evidence.Path}");
 
+        try
+        {
+            return RunCore(opt, evidence);
+        }
+        catch (Exception ex)
+        {
+            // 大聲失敗：證據檔與 stderr 都要留痕，而且不得讓 WER 對話框卡住驗收跑者。
+            evidence.Line("FATAL: " + ex.ToString().Replace("\r", string.Empty).Replace("\n", " | "));
+            Native.AttachParentConsole();
+            Console.Error.WriteLine("FATAL: " + ex.Message);
+            return 9;
+        }
+    }
+
+    private static int RunCore(Options opt, Evidence evidence)
+    {
+        MonitorEntry[] monitors = MonitorLayout.Enumerate();
+        evidence.Line($"monitors: {monitors.Length}");
+
         if (opt.DumpMonitors)
         {
-            // T2 會把這一支接上 MonitorLayout；在接線之前**大聲失敗**，不要讓呼叫他的人以為成功。
-            evidence.Line("FATAL: --dump-monitors is not wired yet (arrives in T2)");
             Native.AttachParentConsole();
-            Console.Error.WriteLine("--dump-monitors is not wired yet (arrives in T2)");
-            return 4;
+            foreach (MonitorEntry m in monitors)
+            {
+                string line =
+                    $"monitor#{m.Index} {m.Device} bounds=({m.Bounds.Left},{m.Bounds.Top},{m.Width}x{m.Height}) " +
+                    $"work=({m.Work.Left},{m.Work.Top},{m.Work.Right - m.Work.Left}x{m.Work.Bottom - m.Work.Top}) " +
+                    $"primary={m.IsPrimary}";
+                evidence.Line(line);
+                Console.WriteLine(line);
+            }
+            return 0;
         }
 
-        evidence.Line("message loop starting (interaction layer arrives in T3/T4)");
+        using var hit = new HitLayer(evidence, monitors, Native.OverlayAlpha);
+
+        hit.FilesDropped += (index, paths) =>
+        {
+            evidence.Status($"DROP: {paths.Length} file(s) on hit#{index} — M1a records only, no file operation");
+            // T4 會在此接上 guard.OnDrop()（立即收層）。本任務尚無收層權威，故只記錄。
+        };
+
+        hit.EnsureCreated();      // 預先建立、保持隱藏（規格 §9.3：升起 < 30 ms）
+
+        if (opt.CycleTest > 0) return CycleTest(hit, evidence, opt.CycleTest);
+
+        if (opt.ForceRaiseHitLayer)
+        {
+            evidence.Line($"--raise: raising hit layer without hooks; auto-hide in {opt.RaiseSeconds}s");
+            hit.ShowAll();
+            // 診斷模式沒有釋放路徑，因此這裡自己計時收層——診斷也絕不可以困住桌面。
+            // T4 會以 ReleaseGuard 的 watchdog（保險 #3）取代這一段。
+            var raiseGuard = new System.Timers.Timer(opt.RaiseSeconds * 1000.0) { AutoReset = false };
+            raiseGuard.Elapsed += (_, _) =>
+            {
+                evidence.Line($"--raise auto-hide after {opt.RaiseSeconds}s");
+                hit.RequestHideAll();
+            };
+            raiseGuard.Start();
+        }
+
+        evidence.Line("message loop starting (release guard arrives in T4)");
         return RunMessageLoop(evidence);
+    }
+
+    /// <summary>程式化收層循環：N 次升起／收起後以**作業系統狀態**斷言全部隱藏。</summary>
+    private static int CycleTest(HitLayer hit, Evidence evidence, int cycles)
+    {
+        for (int i = 0; i < cycles; i++)
+        {
+            hit.ShowAll();
+            Thread.Sleep(30);
+            hit.HideAll();
+            Thread.Sleep(30);
+        }
+        Thread.Sleep(150);
+        bool hidden = !hit.IsVisible;
+        evidence.Line($"cycle test done: {cycles} cycles; allHidden={hidden} (must be True)");
+        return hidden ? 0 : 1;
     }
 
     private static int RunMessageLoop(Evidence evidence)

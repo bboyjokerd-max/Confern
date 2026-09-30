@@ -1,11 +1,15 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-09-30-m1a-lifecycle",
-  "currentTodo": "T1 產品骨架與建置",
-  "completedTodos": [],
-  "activeSlice": "T1",
-  "evidenceRefs": [],
+  "currentTodo": "T4 生命週期與五層硬保險（Hooks/DragDetector/ReleaseGuard）",
+  "completedTodos": [
+    "T1 產品骨架; T2 螢幕幾何; T3 命中層（多螢幕、預先建立隱藏、exstyle 斷言、單一實例）"
+  ],
+  "activeSlice": "T4",
+  "evidenceRefs": [
+    "src/Sidecar/Interaction/HitLayer.cs; src/Sidecar/Interaction/MonitorLayout.cs"
+  ],
   "blockedOn": null,
-  "nextStep": "建立 src/Sidecar 四個檔案並建置成功",
+  "nextStep": "移植 Hooks/DragDetector 並新增 ReleaseGuard（唯一收層權威）",
   "updatedAt": "2026-09-30"
 }

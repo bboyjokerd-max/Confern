@@ -20,3 +20,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/impact-statement-draft.json | M1a 拖曳生命週期與五層硬保險 impact statement draft |
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json | M1a 拖曳生命週期與五層硬保險 todo checkpoint draft |
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/drift-check-draft.json | M1a 拖曳生命週期與五層硬保險 drift check draft |
+| 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/resume-state-hint.json | 2026-09-30-m1a-lifecycle resume state hint |
