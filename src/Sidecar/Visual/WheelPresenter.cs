@@ -31,7 +31,7 @@ internal sealed class WheelPresenter
 
     private string _sourceFormat = "?";
     private IReadOnlyList<string> _targets = Array.Empty<string>();
-    private string? _previewText;
+    private Func<int, string?>? _preview;
     private string? _notice;
     private int _selected;
     private int _cursorX, _cursorY;
@@ -47,9 +47,12 @@ internal sealed class WheelPresenter
         _layer = layer;
     }
 
-    /// <summary>在游標處顯示輪盤。<paramref name="notice"/> 非空時取代檔名預覽（例如混合選取拒絕）。</summary>
+    /// <summary>
+    /// 在游標處顯示輪盤。<paramref name="notice"/> 非空時取代檔名預覽（例如混合選取拒絕）；
+    /// <paramref name="preview"/> 以「當前選中索引」為輸入，因此切換扇區時輸出檔名會跟著更新。
+    /// </summary>
     public void Show(int cursorX, int cursorY, string sourceFormat, IReadOnlyList<string> targets,
-                     int selected = 0, string? previewText = null, string? notice = null,
+                     int selected = 0, Func<int, string?>? preview = null, string? notice = null,
                      MonitorEntry[]? monitors = null)
     {
         _cursorX = cursorX;
@@ -57,7 +60,7 @@ internal sealed class WheelPresenter
         _sourceFormat = sourceFormat;
         _targets = targets;
         _selected = targets.Count > 0 ? Math.Clamp(selected, 0, targets.Count - 1) : 0;
-        _previewText = previewText;
+        _preview = preview;
         _notice = notice;
 
         var all = monitors ?? MonitorLayout.Enumerate();
@@ -69,7 +72,7 @@ internal sealed class WheelPresenter
         _evidence.Line($"wheel shown cursor=({cursorX},{cursorY}) origin=({ox},{oy}) " +
                        $"size={bmp.Width}x{bmp.Height} source={_sourceFormat} " +
                        $"targets=[{string.Join(",", _targets)}] selected={_selected} " +
-                       $"notice={(notice ?? "-")} preview={(previewText ?? "-")}");
+                       $"notice={(notice ?? "-")} preview={(_preview?.Invoke(_selected) ?? "-")}");
     }
 
     /// <summary>環狀切換選中扇區並重畫（規格 §4.3：←→↑↓）。</summary>
@@ -212,7 +215,7 @@ internal sealed class WheelPresenter
 
     private void DrawPreview(Graphics g, float boxOrigin, float boxBottom)
     {
-        string? line = _notice ?? _previewText;
+        string? line = _notice ?? _preview?.Invoke(_selected);
         if (string.IsNullOrEmpty(line)) return;
 
         using var font = MakeFont(9f);

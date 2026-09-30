@@ -255,6 +255,14 @@ internal static class App
         using var guard = new ReleaseGuard(evidence, hit, opt.WatchdogSeconds * 1000);
         var detector = new DragDetector(evidence, opt.TriggerKey, opt.AssumeExplorerForeground);
 
+        // OLE 拖放必須先初始化，否則 RegisterDragDrop 會回 CO_E_NOTINITIALIZED。
+        // 主執行緒有 [STAThread]，所以不會撞 RPC_E_CHANGED_MODE。結果一律寫進證據——失敗時
+        // 輪盤會退回「原格式未知」的佔位符，而不是靜靜地少一半功能。
+        int hrOle = OleInterop.OleInitialize(IntPtr.Zero);
+        evidence.Line($"OleInitialize -> {OleInterop.HResultText(hrOle)}");
+        if (hrOle != 0 && hrOle != 1)
+            evidence.Line("WARNING: OLE 未初始化 → 拖曳途中的酬載拿不到，輪盤只會顯示佔位符");
+
         hit.FilesDropped += (index, paths) =>
         {
             evidence.Status($"DROP: {paths.Length} file(s) on hit#{index} — M1a records only, no file operation");
@@ -278,7 +286,15 @@ internal static class App
 
         // 兩層在同一瞬間收起：guard 決定、接收層執行，視覺層只是跟著收（通知，不是決定權）。
         hit.Hidden += _ => presenter.Hide();
-        detector.Captured += () => ShowWheel(presenter, catalog, evidence);
+
+        // 拖曳途中拿到酬載（規格 §4.3）→ 這才是輪盤顯示真實原格式的路徑。
+        hit.PayloadObserved += (_, paths) => ShowWheelFromPayload(presenter, catalog, evidence, paths);
+
+        // OLE 路徑確認的放手：與 WM_DROPFILES 交叉確認。收層是幂等的，不會出現兩次收層。
+        hit.OleDropObserved += _ => guard.OnDrop();
+
+        // 啟發式（觸發鍵按著 + 移動超過門檻）只在輪盤尚未由酬載顯示時，才用佔位符把它叫出來。
+        detector.Captured += () => { if (!presenter.IsVisible) ShowWheel(presenter, catalog, evidence); };
 
         if (opt.WheelSimulateCycles > 0)
             return WheelSimulateCycle(hit, guard, evidence, presenter, catalog, opt.WheelSimulateCycles);
@@ -333,7 +349,10 @@ internal static class App
         string[] targets = opt.WheelTargets.Length > 0 ? opt.WheelTargets : new[] { "PNG", "JPG", "WEBP", "BMP" };
 
         var sw = Stopwatch.StartNew();
-        presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected, PreviewText(targets, opt));
+        var catalog = new StubFormatCatalog();
+        presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected,
+                       PreviewFactory(targets, catalog, new[] { $"holiday.{opt.WheelSource.ToLowerInvariant()}" },
+                                      opt.WheelPreviews));
         sw.Stop();
 
         evidence.Line($"visual demo shown at ({x},{y}) " +
@@ -348,25 +367,50 @@ internal static class App
         return RunMessageLoop(evidence);
     }
 
-    /// <summary>M1b 的預覽文字只是示範：真正的命名規則屬 M1d 的 <c>NamingPolicy</c>。</summary>
-    private static string PreviewText(string[] targets, Options opt)
+    /// <summary>
+    /// 檔名預覽的產生器（以選中索引為輸入，所以切扇區時輸出檔名會跟著更新）。
+    ///
+    /// M1b 的命名只是示範：真正的命名規則（`name (1).png` 衝突處理）屬 M1d 的 `NamingPolicy`。
+    /// </summary>
+    private static Func<int, string?> PreviewFactory(IReadOnlyList<string> targets, IFormatCatalog catalog,
+                                                     string[] paths, int forcedCount)
     {
-        if (opt.WheelPreviews > 1) return $"{opt.WheelPreviews} 個檔案";
-        int i = Math.Clamp(opt.WheelSelected, 0, targets.Length - 1);
-        return $"holiday.{targets[i].ToLowerInvariant()}";
+        if (forcedCount > 1) return _ => $"{forcedCount} 個檔案";
+        if (paths.Length > 1) return _ => $"{paths.Length} 個檔案";
+        if (paths.Length == 0) return _ => null;
+
+        string stem = Path.GetFileNameWithoutExtension(paths[0]);
+        if (string.IsNullOrEmpty(stem)) return _ => null;
+        return i => targets.Count == 0 ? stem : $"{stem}.{catalog.ExtensionOf(targets[i])}";
+    }
+
+    /// <summary>
+    /// 拖曳**途中**拿到酬載 → 叫出輪盤（規格 §4.3：第一個 `DragEnter` 後 ≤100 ms）。
+    /// 這是輪盤唯一能顯示真實 `原格式` 的路徑；先前只有 DragDetector 的 Capturing 啟發式。
+    /// </summary>
+    private static void ShowWheelFromPayload(WheelPresenter presenter, IFormatCatalog catalog,
+                                             Evidence evidence, string[] paths)
+    {
+        var sw = Stopwatch.StartNew();
+        Native.GetCursorPos(out Native.POINT p);
+        string? source = catalog.SourceFormat(paths);
+        IReadOnlyList<string> targets = catalog.TargetsFor(source);
+        presenter.Show(p.X, p.Y, source ?? "?", targets, 0, PreviewFactory(targets, catalog, paths, 1));
+        sw.Stop();
+        evidence.Line($"wheel from OLE payload: files={paths.Length} source={source ?? "UNKNOWN"} " +
+                      $"latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
     }
 
     /// <summary>
     /// 捕捉開始時在游標處叫出輪盤（規格 §4.3）。
-    /// 原格式目前一定是未知：拖曳**進行中**的酬載需要 OLE `IDropTarget::DragEnter`（T7），
-    /// 在那之前中心只顯示佔位符——這一點一律寫進證據，不用假資料假裝知道。
+    /// 若 OLE 酬載還沒到（或 OLE 未初始化），原格式是**未知佔位符**——一律寫進證據，不用假資料假裝知道。
     /// </summary>
     private static void ShowWheel(WheelPresenter presenter, IFormatCatalog catalog, Evidence evidence)
     {
         Native.GetCursorPos(out Native.POINT p);
         string? source = catalog.SourceFormat(Array.Empty<string>());
         if (source == null)
-            evidence.Line("wheel: source format UNKNOWN (drag payload plumbing = T7); placeholder center shown");
+            evidence.Line("wheel: source format UNKNOWN (no OLE payload yet); placeholder center shown");
         presenter.Show(p.X, p.Y, source ?? "?", catalog.TargetsFor(source));
     }
 

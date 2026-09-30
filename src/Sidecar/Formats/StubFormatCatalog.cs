@@ -13,7 +13,17 @@ internal sealed class StubFormatCatalog : IFormatCatalog
 {
     private static readonly string[] DefaultTargets = { "PNG", "JPG", "WEBP", "BMP", "TIF" };
 
-    public string? SourceFormat(IReadOnlyList<string> paths) => null;
+    /// <summary>
+    /// 以副檔名當原格式——**這正是 M1c 要用真正的格式探測取代的事**（M1c 之後不得再用副檔名猜）。
+    /// 這裡之所以還是做，是為了讓 T7 的酬載接線能被端到端驗證（日誌要出現真實的 `source=JPG`）。
+    /// </summary>
+    public string? SourceFormat(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0) return null;
+        string ext = Path.GetExtension(paths[0]);
+        if (string.IsNullOrEmpty(ext) || ext.Length < 2) return null;
+        return ext.TrimStart('.').ToUpperInvariant();
+    }
 
     public IReadOnlyList<string> TargetsFor(string? sourceFormat) => DefaultTargets;
 

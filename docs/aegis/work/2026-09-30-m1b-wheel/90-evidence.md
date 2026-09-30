@@ -23,6 +23,7 @@
 | S6 | 兩層堆疊：視覺層樣式、穿透、零侵入、首次顯示、程序結束清理 | **13/13 PASS** |
 | T2 自測 | 扇區映射（含邊界角）、翻邊、夾制、點陣圖尺寸 | **17/17 PASS** |
 | T4 模擬 | 捕捉 → 顯示 → 環狀選取 → Esc → 兩層同收，×3 循環 | **15/15 PASS** |
+| T7 自我檢查 | `OleInitialize` + `RegisterDragDrop` 結果；T4 模擬接線回歸 | **S_OK / S_OK；接線 5/5 PASS** |
 | M1a 回歸 | S0／S1／S2／S5（非侵入區段） | **22/22 PASS** |
 
 ## 3. 關鍵實測
@@ -53,6 +54,19 @@
 連續 5 次 forward 回繞回原點 → `guard.OnUserResolved("escape")` → `hit.Hidden` 通知 → 兩層同收。
 3 個循環全部 PASS，且每次都以**作業系統真實狀態**斷言（`!hit.IsVisible && !presenter.IsVisible`）。
 
+### 3.5 OLE 拖放目標（T7）
+
+| 檢查 | 結果 |
+|------|------|
+| `OleInitialize` | **S_OK**（主執行緒本就有 `[STAThread]`，未撞 `RPC_E_CHANGED_MODE`） |
+| `hit#0 RegisterDragDrop` | **S_OK** |
+| 實作約束 | 類別必須 `public` + `[ComVisible(true)]`；COM 可見的公開簽章**不可**使用 internal 型別（CS0051）→ 另立 `OleInterop.OlePoint`（版面同 `Native.POINT`、兩個 int）；`DropTarget` 因此不直接依賴 `Evidence`，改注入 `Action<string>` 記錄器 |
+| 收層幂等 | `IDropTarget::Drop` 與 `WM_DROPFILES` 兩條路都呼叫 `guard.OnDrop()`；`HideNow` 以作業系統真實可見度判斷，第二次是 no-op |
+
+⚠️ **S8 必須回答的風險**：同一視窗同時 `DragAcceptFiles` + `RegisterDragDrop` 之後，shell 是否**仍會**送
+`WM_DROPFILES`？若不再送，放手當下的「檔案清單權威」必須改成 OLE 這條。兩條路都會收層，
+所以不會有收不了層的失效模式；但**檔案清單的權威必須唯一**（M1d 的檔案操作會依賴它）。
+
 ## 4. 本切片發現並修正的缺陷
 
 | # | 缺陷 | 影響 | 處置 |
@@ -76,7 +90,8 @@
 |----|------|----------|
 | **A1**「20/20 次輪盤出現於游標 20 px 內」 | ❌ 未驗 | 真實拖曳（要滑鼠）+ T7 酬載 |
 | **A7** 不按觸發鍵的拖曳零侵入 | ❌ 未驗（M1a 已鋪路） | 真人手勢 |
-| **T7** `DragEnter` 酬載 → 真實 `原格式` | ⬜ 未開始 | OLE `IDropTarget` 實作 |
+| **T7** `DragEnter` 酬載 → 真實 `原格式` | 🟡 已實作，OLE 初始化與註冊皆 S_OK；**端到端未驗** | 真實拖曳（S8） |
+| **S8** OLE 與 `WM_DROPFILES` 是否並存 | ❌ 未驗 | 真實拖曳（S8） |
 | **T5** 混合選取拒絕／無可轉換目標提示 | 🟡 繪製路徑已有（`notice` 參數），但資料來源（格式矩陣）在 M1c | M1c 的 `IFormatCatalog` 實作 |
 | 第二螢幕／Per-Monitor DPI | ❌ 未驗（本機單螢幕） | 第二螢幕硬體（M1f） |
 | 真實放手的 drop 與輪盤同時存在 | ❌ 未驗 | S8（要滑鼠） |

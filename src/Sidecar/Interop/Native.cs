@@ -283,4 +283,21 @@ internal static class Native
     // MSG／TranslateMessage／DispatchMessageW 已存在（訊息迴圈在用），這裡只補 PeekMessageW。
     public const uint PM_REMOVE = 0x0001;
     [DllImport("user32.dll")] public static extern bool PeekMessageW(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
+
+    /// <summary>
+    /// 讀出 HDROP 的檔案清單。CF_HDROP 的 <c>HGLOBAL</c> 本身就是 HDROP，兩種來源都要用同一套讀法。
+    /// </summary>
+    public static string[] ReadDropFileList(IntPtr hDrop)
+    {
+        uint count = DragQueryFileW(hDrop, DRAGQUERY_COUNT, null, 0);
+        var paths = new List<string>((int)count);
+        for (uint i = 0; i < count; i++)
+        {
+            uint len = DragQueryFileW(hDrop, i, null, 0);
+            var sb = new StringBuilder((int)len + 1);
+            DragQueryFileW(hDrop, i, sb, (uint)sb.Capacity);
+            paths.Add(sb.ToString());
+        }
+        return paths.ToArray();
+    }
 }

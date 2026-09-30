@@ -23,10 +23,17 @@ internal sealed class HitLayer : IDisposable
     private readonly Evidence _evidence;
     private readonly MonitorEntry[] _monitors;
     private readonly byte _alpha;
+    private readonly List<DropTarget> _dropTargets = new();
     private IntPtr[] _handles = Array.Empty<IntPtr>();
     private int _showCount;
 
     public event Action<int, string[]>? FilesDropped;
+
+    /// <summary>拖曳**進行中**觀察到的酬載（檔名清單）。來源＝OLE `IDropTarget::DragEnter`。</summary>
+    public event Action<int, string[]>? PayloadObserved;
+
+    /// <summary>OLE 路徑確認的放手。與 `WM_DROPFILES` 交叉確認用（檔案清單權威仍是後者）。</summary>
+    public event Action<int>? OleDropObserved;
 
     public HitLayer(Evidence evidence, MonitorEntry[] monitors, byte alpha = Native.OverlayAlpha)
     {
@@ -106,8 +113,19 @@ internal sealed class HitLayer : IDisposable
         }
 
         _handles = handles;
-        _evidence.Line($"hit layer ready: {_handles.Length} window(s), allHidden={!IsVisible} (must be True)");
-    }
+        // OLE 拖放目標：拖曳**進行中**的酬載只有這條路拿得到（規格 §4.3 的 DragEnter）。
+        // 與 DragAcceptFiles／WM_DROPFILES 並存：後者仍是「放手」的檔案清單權威。
+        for (int i = 0; i < _handles.Length; i++)
+        {
+            var target = new DropTarget(i, _evidence.Line, OnPayloadObserved, OnOleDropObserved);
+            _dropTargets.Add(target);      // 必須保留參考：CCW 的壽命由 Managed 端掌握
+            int hr = OleInterop.RegisterDragDrop(_handles[i], target);
+            _evidence.Line($"hit#{i} RegisterDragDrop -> {OleInterop.HResultText(hr)}");
+            if (hr != 0)
+                _evidence.Line($"hit#{i} WARNING: OLE drop target NOT registered; drag-time payload unavailable");
+        }
+
+        _evidence.Line($"hit layer ready: {_handles.Length} window(s), allHidden={!IsVisible} (must be True)");    }
 
     public void ShowAll()
     {
@@ -202,6 +220,10 @@ internal sealed class HitLayer : IDisposable
         }
     }
 
+    private void OnPayloadObserved(int monitorIndex, string[] paths) => PayloadObserved?.Invoke(monitorIndex, paths);
+
+    private void OnOleDropObserved(int monitorIndex) => OleDropObserved?.Invoke(monitorIndex);
+
     public void Dispose()
     {
         IntPtr[] owned = _handles;
@@ -209,8 +231,10 @@ internal sealed class HitLayer : IDisposable
         {
             if (h == IntPtr.Zero) continue;
             Windows.Remove(h);
+            OleInterop.RevokeDragDrop(h);
             Native.DestroyWindow(h);
         }
+        _dropTargets.Clear();
         _handles = Array.Empty<IntPtr>();
 
         // 用 IsWindow 對「自己擁有的 handle」直接驗，而非 FindWindowW：
