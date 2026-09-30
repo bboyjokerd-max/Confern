@@ -1,0 +1,20 @@
+{
+  "vaultSubPath": "DSH 4070/Tangerine Converter Windows",
+  "files": [
+    {
+      "source": "tools/obsidian/00-index.md",
+      "banner": null,
+      "dest": "00 索引與決策.md"
+    },
+    {
+      "source": "00-teardown-and-windows-port.md",
+      "banner": "tools/obsidian/01-banner.md",
+      "dest": "01 解構與移植路線.md"
+    },
+    {
+      "source": "docs/aegis/specs/2026-09-30-sidecar-drag-convert-design.md",
+      "banner": "tools/obsidian/02-banner.md",
+      "dest": "02 設計規格 - 權威.md"
+    }
+  ]
+}
