@@ -22,14 +22,17 @@ public sealed class DropTarget : OleInterop.IDropTarget
     private readonly Action<string> _log;
     private readonly Action<int, string[]> _onPayload;
     private readonly Action<int> _onDropObserved;
+    private readonly Action<int, int, int> _onDragOver;
 
     public DropTarget(int monitorIndex, Action<string> log,
-                      Action<int, string[]> onPayload, Action<int> onDropObserved)
+                      Action<int, string[]> onPayload, Action<int> onDropObserved,
+                      Action<int, int, int> onDragOver)
     {
         _monitorIndex = monitorIndex;
         _log = log;
         _onPayload = onPayload;
         _onDropObserved = onDropObserved;
+        _onDragOver = onDragOver;
     }
 
     public void DragEnter(OleInterop.IDataObject? dataObject, uint keyState, OleInterop.OlePoint pt, ref uint effect)
@@ -40,7 +43,15 @@ public sealed class DropTarget : OleInterop.IDropTarget
         if (paths.Length > 0) _onPayload(_monitorIndex, paths);
     }
 
-    public void DragOver(uint keyState, OleInterop.OlePoint pt, ref uint effect) => effect = OleInterop.DROPEFFECT_COPY;
+    /// <summary>
+    /// 拖曳途中的游標位置（螢幕座標）。**刻意不在這裡記錄每一次移動**——DragOver 非常頻繁，
+    /// 逐次寫日誌會洗版；判斷「選取有沒有變」是 presenter 的事，它只在改變時記錄。
+    /// </summary>
+    public void DragOver(uint keyState, OleInterop.OlePoint pt, ref uint effect)
+    {
+        effect = OleInterop.DROPEFFECT_COPY;
+        _onDragOver(_monitorIndex, pt.X, pt.Y);
+    }
 
     public void DragLeave() => _log($"OLE DragLeave: hit#{_monitorIndex}");
 

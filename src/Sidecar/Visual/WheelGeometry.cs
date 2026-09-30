@@ -44,6 +44,12 @@ internal static class WheelGeometry
     /// <summary>每個扇區的角度（度）。</summary>
     public static double SweepDeg(int count) => count > 0 ? 360.0 / count : 0.0;
 
+    /// <summary>中心圓盤半徑對輪盤半徑的比例（繪製與命中都必須用同一個值）。</summary>
+    public const float CenterRatio = 0.44f;
+
+    /// <summary>中心圓盤半徑（px）。圓盤不是扇區，游標停在上面不改變選取。</summary>
+    public static double CenterRadiusPx => DiameterPx / 2.0 * CenterRatio;
+
     /// <summary>正上方起算（規格：扇區自正上方開始、順時針排列）。</summary>
     public const double StartDeg = -90.0;
 
@@ -87,4 +93,8 @@ internal static class WheelGeometry
     /// <summary>輪盤框左上角 → 視覺層視窗左上角（往左上退掉游標保留區與偏移）。</summary>
     public static (int X, int Y) WindowOrigin(int boxX, int boxY) =>
         (boxX - BoxOriginInBitmapPx, boxY - BoxOriginInBitmapPx);
+
+    /// <summary>輪盤框左上角 → 圓心（螢幕座標）。繪製與滑鼠命中都用這一條。</summary>
+    public static (double X, double Y) CenterOfBox(int boxX, int boxY) =>
+        (boxX + BoxPx / 2.0, boxY + BoxPx / 2.0);
 }

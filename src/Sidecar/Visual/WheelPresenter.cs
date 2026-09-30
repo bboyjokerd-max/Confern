@@ -35,6 +35,7 @@ internal sealed class WheelPresenter
     private string? _notice;
     private int _selected;
     private int _cursorX, _cursorY;
+    private int _originX, _originY;      // 目前的視窗原點（滑鼠命中要用它反推圓心）
     private MonitorEntry? _monitor;
 
     public bool IsVisible => _layer.IsVisible;
@@ -78,6 +79,10 @@ internal sealed class WheelPresenter
         using var bmp = Compose(out int ox, out int oy);
         _layer.Show(ox, oy, bmp);
 
+        // 記下來給滑鼠命中用（SelectAt 需要由視窗原點反推圓心）
+        _originX = ox;
+        _originY = oy;
+
         _evidence.Line($"wheel shown cursor=({cursorX},{cursorY}) origin=({ox},{oy}) " +
                        $"size={bmp.Width}x{bmp.Height} source={_sourceFormat} " +
                        $"targets=[{string.Join(",", _targets)}] selected={_selected} " +
@@ -92,6 +97,45 @@ internal sealed class WheelPresenter
         Repaint();
         _evidence.Line($"wheel selection changed -> index={_selected} target={_targets[_selected]}");
         return _selected;
+    }
+
+    /// <summary>
+    /// 滑鼠所在位置對應的扇區 → 直接改變選取（規格 §4.3：扇區可直接點擊）。
+    ///
+    /// 拖曳途中座標只有 OLE `IDropTarget::DragOver` 拿得到（拖放迴圈會吃掉滑鼠訊息），
+    /// 所以這個方法是那條路徑的落點。回傳 -1 表示「游標不在任何扇區上 → 維持原選取」：
+    /// 中心圓盤與輪盤外都屬於這一類，否則游標經過中心就會把選取跳掉。
+    /// </summary>
+    public int SelectAt(int screenX, int screenY)
+    {
+        if (_targets.Count == 0) return -1;
+
+        var (cx, cy) = CenterOnScreen;
+        double dx = screenX - cx;
+        double dy = screenY - cy;
+
+        if (!WheelGeometry.Inside(dx, dy)) return -1;
+        if (Math.Sqrt(dx * dx + dy * dy) <= WheelGeometry.CenterRadiusPx) return -1;
+
+        int idx = WheelGeometry.SectorAt(dx, dy, _targets.Count);
+        if (idx < 0 || idx >= _targets.Count) return -1;
+        if (idx == _selected) return idx;
+
+        _selected = idx;
+        Repaint();
+        _evidence.Line($"wheel hover selection -> index={idx} target={_targets[idx]} cursor=({screenX},{screenY})");
+        return idx;
+    }
+
+    /// <summary>目前輪盤圓心在螢幕上的位置（驗證與診斷用；不參與繪製決策）。</summary>
+    public (int X, int Y) CenterOnScreen
+    {
+        get
+        {
+            double cx = _originX + WheelGeometry.BoxOriginInBitmapPx + WheelGeometry.BoxPx / 2.0;
+            double cy = _originY + WheelGeometry.BoxOriginInBitmapPx + WheelGeometry.BoxPx / 2.0;
+            return ((int)Math.Round(cx), (int)Math.Round(cy));
+        }
     }
 
     public void Hide()
@@ -209,7 +253,7 @@ internal sealed class WheelPresenter
 
     private void DrawCenter(Graphics g, float cx, float cy)
     {
-        float r = WheelGeometry.DiameterPx / 2f * 0.44f;
+        float r = (float)WheelGeometry.CenterRadiusPx;
         using var brush = new SolidBrush(Color.FromArgb(244, 24, 26, 32));
         g.FillEllipse(brush, cx - r, cy - r, r * 2, r * 2);
 

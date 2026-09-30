@@ -35,6 +35,9 @@ internal sealed class HitLayer : IDisposable
     /// <summary>OLE 路徑確認的放手。與 `WM_DROPFILES` 交叉確認用（檔案清單權威仍是後者）。</summary>
     public event Action<int>? OleDropObserved;
 
+    /// <summary>拖曳途中的游標位置（螢幕座標）。來源＝OLE `IDropTarget::DragOver`。</summary>
+    public event Action<int, int, int>? DragOverObserved;
+
     public HitLayer(Evidence evidence, MonitorEntry[] monitors, byte alpha = Native.OverlayAlpha)
     {
         _evidence = evidence;
@@ -117,7 +120,7 @@ internal sealed class HitLayer : IDisposable
         // 與 DragAcceptFiles／WM_DROPFILES 並存：後者仍是「放手」的檔案清單權威。
         for (int i = 0; i < _handles.Length; i++)
         {
-            var target = new DropTarget(i, _evidence.Line, OnPayloadObserved, OnOleDropObserved);
+            var target = new DropTarget(i, _evidence.Line, OnPayloadObserved, OnOleDropObserved, OnDragOverObserved);
             _dropTargets.Add(target);      // 必須保留參考：CCW 的壽命由 Managed 端掌握
             int hr = OleInterop.RegisterDragDrop(_handles[i], target);
             _evidence.Line($"hit#{i} RegisterDragDrop -> {OleInterop.HResultText(hr)}");
@@ -223,6 +226,9 @@ internal sealed class HitLayer : IDisposable
     private void OnPayloadObserved(int monitorIndex, string[] paths) => PayloadObserved?.Invoke(monitorIndex, paths);
 
     private void OnOleDropObserved(int monitorIndex) => OleDropObserved?.Invoke(monitorIndex);
+
+    private void OnDragOverObserved(int monitorIndex, int x, int y) =>
+        DragOverObserved?.Invoke(monitorIndex, x, y);
 
     public void Dispose()
     {

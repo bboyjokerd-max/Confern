@@ -327,9 +327,23 @@ function Invoke-S7 {
   Check "S7.29 single non-image -> Unsupported" (Test-Log $r.Lines 'status=Unsupported')
   Check "S7.30 Unsupported: Enter refused and the wheel stays" (Test-Log $r.Lines 'committed=False wheelVisibleAfter=True')
 
+  # ---- mouse hover: the cursor -> sector mapping (where DragOver lands) ----
+  Stop-AllSidecar
+  $log = Join-Path $LogDir 'm1b-s7-hover.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--wheel-hover-selftest', '--quiet', '--watchdog-seconds', '300', '--log', $log) -PassThru -Wait
+  $lines = Get-LogLines $log
+  Check "S7.31 hover self-test exits 0" ($proc.ExitCode -eq 0)
+  Check "S7.32 hover self-test has no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
+  $hits = @($lines | Select-String -Pattern 'hover sector' -CaseSensitive).Count
+  Check "S7.33 every sector is individually reachable by hover (saw $hits)" ($hits -ge 5)
+  Check "S7.34 centre disc keeps the selection" (Test-Log $lines 'centre disc does not move the selection')
+  Check "S7.35 outside the wheel keeps the selection" (Test-Log $lines 'outside the wheel does not move the selection')
+
   Stop-AllSidecar
   $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
-  Check "S7.31 no visual layer window survives the runs" ($left.Count -eq 0)
+  Check "S7.36 no visual layer window survives the runs" ($left.Count -eq 0)
 }
 
 # ------------------------------------------------------------------ drive

@@ -92,6 +92,8 @@ internal sealed class Options
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
           --wheel-previews <N>      with --wheel-demo: file count shown in the preview (default 1)
           --wheel-geometry-selftest check the wheel geometry against known angles and exit
+          --wheel-hover-selftest
+                                    feed each sector's own mid-angle point into the hover mapping and exit
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
@@ -131,6 +133,7 @@ internal sealed class Options
     public int WheelSelected;
     public int WheelPreviews = 1;
     public bool GeometrySelfTest;
+    public bool WheelHoverSelfTest;
     public int WheelSimulateCycles;
 
     /// <summary>
@@ -165,6 +168,7 @@ internal sealed class Options
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int wp)) { o.WheelPreviews = wp; i++; }
                     break;
                 case "--wheel-geometry-selftest": o.GeometrySelfTest = true; break;
+                case "--wheel-hover-selftest": o.WheelHoverSelfTest = true; break;
                 case "--wheel-payload":
                     if (i + 1 < args.Length) { o.WheelPayload = args[i + 1]; i++; }
                     break;
@@ -305,8 +309,15 @@ internal static class App
         // OLE 路徑確認的放手：與 WM_DROPFILES 交叉確認。收層是幂等的，不會出現兩次收層。
         hit.OleDropObserved += _ => guard.OnDrop();
 
+        // 規格 §4.3：扇區可直接點擊 → 拖曳途中游標移到哪個扇區就選哪個。
+        // 拖放迴圈會吃掉滑鼠訊息，所以座標只有 DragOver 拿得到。
+        hit.DragOverObserved += (_, x, y) => presenter.SelectAt(x, y);
+
         // 啟發式（觸發鍵按著 + 移動超過門檻）只在輪盤尚未由酬載顯示時，才用佔位符把它叫出來。
         detector.Captured += () => { if (!presenter.IsVisible) ShowWheel(presenter, catalog, evidence); };
+
+        if (opt.WheelHoverSelfTest)
+            return WheelHoverSelfTest(presenter, catalog, evidence, opt);
 
         if (opt.WheelSimulateCycles > 0)
             return WheelSimulateCycle(hit, guard, evidence, presenter, catalog, opt.WheelSimulateCycles);
@@ -465,6 +476,59 @@ internal static class App
         evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
         guard.OnUserResolved("enter");
         return true;
+    }
+
+    /// <summary>
+    /// T4（滑鼠半邊）的自我對照：由**幾何反推**每個扇區內部的一個點，餵進 <see cref="WheelPresenter.SelectAt"/>，
+    /// 檢查回傳索引等於該扇區，並檢查兩條邊界規則（中心圓盤、輪盤外都不得改變選取）。
+    /// 真實的滑鼠 hover 走 OLE `DragOver`（只有 S8 能驗），這裡驗的是「座標 → 扇區」這條映射本身。
+    /// </summary>
+    private static int WheelHoverSelfTest(WheelPresenter presenter, IFormatCatalog catalog,
+                                          Evidence evidence, Options opt)
+    {
+        int failed = 0;
+        void Report(string text, bool ok)
+        {
+            if (!ok) failed++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  {text}");
+        }
+
+        int cx = opt.WheelDemoX ?? 900;
+        int cy = opt.WheelDemoY ?? 400;
+        IReadOnlyList<string> targets = catalog.TargetsFor("HEIC");
+        presenter.Show(cx, cy, "HEIC", targets, 0);
+        Report($"wheel shown with {targets.Count} sectors", presenter.IsVisible && targets.Count >= 2);
+
+        var (scx, scy) = presenter.CenterOnScreen;
+        double r = WheelGeometry.DiameterPx / 2.0 * 0.66;      // 與標籤同一個半徑
+
+        for (int i = 0; i < targets.Count; i++)
+        {
+            double mid = WheelGeometry.SectorMidDeg(i, targets.Count) * Math.PI / 180.0;
+            int px = (int)Math.Round(scx + Math.Cos(mid) * r);
+            int py = (int)Math.Round(scy + Math.Sin(mid) * r);
+            int got = presenter.SelectAt(px, py);
+            Report($"hover sector {i} ({targets[i]}) at ({px},{py}) -> index {got}", got == i);
+        }
+
+        int before = presenter.Selected;
+        int atCenter = presenter.SelectAt(scx, scy);
+        Report($"centre disc does not move the selection (got {atCenter})",
+               atCenter == -1 && presenter.Selected == before);
+
+        int outside = presenter.SelectAt(scx + WheelGeometry.DiameterPx, scy + WheelGeometry.DiameterPx);
+        Report($"outside the wheel does not move the selection (got {outside})",
+               outside == -1 && presenter.Selected == before);
+
+        double lastMid = WheelGeometry.SectorMidDeg(targets.Count - 1, targets.Count) * Math.PI / 180.0;
+        int lastIdx = presenter.SelectAt((int)Math.Round(scx + Math.Cos(lastMid) * r),
+                                         (int)Math.Round(scy + Math.Sin(lastMid) * r));
+        int wrap = presenter.SelectNext(1);
+        Report($"ring wraps after the last sector ({lastIdx} -> {wrap})",
+               lastIdx == targets.Count - 1 && wrap == 0);
+
+        evidence.Line($"wheel hover self-test done: failed={failed}");
+        return failed == 0 ? 0 : 6;
     }
 
     /// <summary>
