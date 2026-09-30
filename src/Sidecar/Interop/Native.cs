@@ -148,4 +148,76 @@ internal static class Native
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     public static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, StringBuilder? lpszFile, uint cch);
     [DllImport("shell32.dll")] public static extern void DragFinish(IntPtr hDrop);
+
+    // ---- 低階 hook ----
+    // WH_MOUSE_LL / WH_KEYBOARD_LL **不需要管理員權限**：它們在安裝它們的行程中執行，
+    // 不像 WH_GETMESSAGE 需要注入目標行程。回呼在安裝執行緒（＝有訊息迴圈的 UI 執行緒）上被呼叫。
+    public const int WH_KEYBOARD_LL = 13;
+    public const int WH_MOUSE_LL = 14;
+
+    public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLHOOKSTRUCT
+    {
+        public POINT pt; public uint mouseData; public uint flags; public uint time; public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KBDLLHOOKSTRUCT
+    {
+        public uint vkCode; public uint scanCode; public uint flags; public uint time; public IntPtr dwExtraInfo;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetWindowsHookExW(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")]
+    public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    // ---- 滑鼠／鍵盤訊息與系統度量 ----
+    public const uint WM_MOUSEMOVE = 0x0200;
+    public const uint WM_LBUTTONDOWN = 0x0201;
+    public const uint WM_LBUTTONUP = 0x0202;
+    public const uint WM_RBUTTONDOWN = 0x0204;
+    public const uint WM_RBUTTONUP = 0x0205;
+    public const uint WM_KEYDOWN = 0x0100;
+    public const uint WM_KEYUP = 0x0101;
+    public const uint WM_SYSKEYDOWN = 0x0104;
+    public const uint WM_SYSKEYUP = 0x0105;
+
+    public const int SM_CXDRAG = 68;
+    public const int SM_CYDRAG = 69;
+
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+
+    // ---- 虛擬鍵 ----
+    public const uint VK_CONTROL = 0x11;
+    public const uint VK_SHIFT = 0x10;
+    public const uint VK_MENU = 0x12;
+    public const uint VK_Q = 0x51;
+
+    // ---- 收層原因碼（夾帶在 WM_APP_FORCE_HIDE 的 wParam）----
+    // 定時器在執行緒池執行緒上觸發，不可跨執行緒直接呼叫 ShowWindow；
+    // 因此「決定收層」與「實際收層」分離：guard 決定並投遞，UI 執行緒執行。
+    public const int HideReasonDrop = 1;
+    public const int HideReasonGrace = 2;
+    public const int HideReasonWatchdog = 3;
+    public const int HideReasonKillSwitch = 4;
+    public const int HideReasonManual = 5;
+
+    public static string HideReasonText(int code) => code switch
+    {
+        HideReasonDrop => "drop resolved",
+        HideReasonGrace => $"{250} ms grace elapsed",
+        HideReasonWatchdog => "guard #3 watchdog",
+        HideReasonKillSwitch => "kill switch",
+        HideReasonManual => "manual",
+        _ => $"unknown({code})"
+    };
 }

@@ -2,9 +2,9 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-09-30-m1a-lifecycle",
   "lastCheckpointRef": "docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json",
-  "resumeInstruction": "讀 docs/aegis/plans/2026-09-30-m1a-lifecycle.md T4；原型碼在 src/M05（T6 才刪）",
+  "resumeInstruction": "讀 docs/aegis/plans/2026-09-30-m1a-lifecycle.md T5/T6",
   "knownPartialWork": [
-    "T1 產品骨架; T2 螢幕幾何; T3 命中層（多螢幕、預先建立隱藏、exstyle 斷言、單一實例）"
+    "T4 生命週期與五層硬保險（ReleaseGuard 單一收層權威；合成手勢驗證 13/13）"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-09-30-m1a-lifecycle/10-intent.md",
@@ -12,6 +12,6 @@
     "docs/aegis/work/2026-09-30-m1a-lifecycle/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "FindWindowW 可列舉命中視窗（實測不可，須用 EnumWindows+GetClassNameW）"
+    "T4 的人工手勢驗證已完成（實際上只有合成驗證；真實 drop 仍待人工，見 T5 S4）"
   ]
 }

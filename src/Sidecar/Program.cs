@@ -66,7 +66,7 @@ internal sealed class Options
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
-          --raise-seconds <N>       auto-hide after N seconds in --raise mode (default 30)
+          --watchdog-seconds <N>    override guard #3 visible timeout (default 30)
           --log <path>              evidence log path
           --trigger-key <0xNN|NAME> trigger virtual-key (default 0x20 / VK_SPACE)
           --cycle-test <N>          show/hide the hit layer N times and exit
@@ -82,8 +82,11 @@ internal sealed class Options
     public int CycleTest;
     public bool Quiet;
 
-    /// <summary>--raise 的自我收層秒數（診斷模式沒有釋放路徑，必須自己保證不會困住桌面）。</summary>
-    public int RaiseSeconds = 30;
+    /// <summary>
+    /// 保險 #3 的可視逾時（秒）。生產值為規格固定的 30 s；此旗標僅供診斷加速驗證，
+    /// 每次都必須寫進證據，避免「以為驗的是 30 秒其實不是」。
+    /// </summary>
+    public int WatchdogSeconds = 30;
 
     public static Options Parse(string[] args)
     {
@@ -107,8 +110,8 @@ internal sealed class Options
                 case "--cycle-test":
                     if (++i < args.Length && int.TryParse(args[i], out int n) && n > 0) o.CycleTest = n;
                     break;
-                case "--raise-seconds":
-                    if (++i < args.Length && int.TryParse(args[i], out int s) && s >= 0) o.RaiseSeconds = s;
+                case "--watchdog-seconds":
+                    if (++i < args.Length && int.TryParse(args[i], out int s) && s > 0) o.WatchdogSeconds = s;
                     break;
             }
         }
@@ -181,35 +184,53 @@ internal static class App
         }
 
         using var hit = new HitLayer(evidence, monitors, Native.OverlayAlpha);
+        using var guard = new ReleaseGuard(evidence, hit, opt.WatchdogSeconds * 1000);
+        var detector = new DragDetector(evidence, opt.TriggerKey);
 
         hit.FilesDropped += (index, paths) =>
         {
             evidence.Status($"DROP: {paths.Length} file(s) on hit#{index} — M1a records only, no file operation");
-            // T4 會在此接上 guard.OnDrop()（立即收層）。本任務尚無收層權威，故只記錄。
+            guard.OnDrop();                                    // drop 已解析 → 立即收層
         };
+
+        detector.Captured += guard.OnCaptured;                 // 升起 + 武裝保險 #3
+        detector.Released += guard.OnReleaseRequested;         // 保險 #1／#2（含 250 ms 寬限）
 
         hit.EnsureCreated();      // 預先建立、保持隱藏（規格 §9.3：升起 < 30 ms）
 
         if (opt.CycleTest > 0) return CycleTest(hit, evidence, opt.CycleTest);
 
+        using var hooks = new Hooks();
         if (opt.ForceRaiseHitLayer)
         {
-            evidence.Line($"--raise: raising hit layer without hooks; auto-hide in {opt.RaiseSeconds}s");
-            hit.ShowAll();
-            // 診斷模式沒有釋放路徑，因此這裡自己計時收層——診斷也絕不可以困住桌面。
-            // T4 會以 ReleaseGuard 的 watchdog（保險 #3）取代這一段。
-            var raiseGuard = new System.Timers.Timer(opt.RaiseSeconds * 1000.0) { AutoReset = false };
-            raiseGuard.Elapsed += (_, _) =>
+            evidence.Line("--raise: hooks NOT installed");
+            guard.OnCaptured();       // 用真正的保險 #3 計時收層，不用替代品
+        }
+        else
+        {
+            hooks.MouseEvent += detector.OnMouse;
+            hooks.KeyEvent += (vk, isDown) =>
             {
-                evidence.Line($"--raise auto-hide after {opt.RaiseSeconds}s");
-                hit.RequestHideAll();
+                if (isDown && vk == Native.VK_Q && IsCtrlAltShiftDown())
+                {
+                    guard.OnKillSwitch();     // 保險 #5
+                    detector.Disable();
+                    return;
+                }
+                detector.OnKey(vk, isDown);
             };
-            raiseGuard.Start();
+            hooks.Install(evidence);
         }
 
-        evidence.Line("message loop starting (release guard arrives in T4)");
+        evidence.Line("message loop starting");
         return RunMessageLoop(evidence);
     }
+
+    /// <summary>保險 #5 的組合鍵判定：Ctrl／Alt／Shift 三個都必須按著才算。</summary>
+    private static bool IsCtrlAltShiftDown() =>
+        (Native.GetAsyncKeyState((int)Native.VK_CONTROL) & 0x8000) != 0 &&
+        (Native.GetAsyncKeyState((int)Native.VK_MENU) & 0x8000) != 0 &&
+        (Native.GetAsyncKeyState((int)Native.VK_SHIFT) & 0x8000) != 0;
 
     /// <summary>程式化收層循環：N 次升起／收起後以**作業系統狀態**斷言全部隱藏。</summary>
     private static int CycleTest(HitLayer hit, Evidence evidence, int cycles)

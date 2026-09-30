@@ -1,15 +1,15 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-09-30-m1a-lifecycle",
-  "currentTodo": "T4 生命週期與五層硬保險（Hooks/DragDetector/ReleaseGuard）",
+  "currentTodo": "T5 驗收跑者 verify-m1a.ps1 + R4 有界 spike",
   "completedTodos": [
-    "T1 產品骨架; T2 螢幕幾何; T3 命中層（多螢幕、預先建立隱藏、exstyle 斷言、單一實例）"
+    "T4 生命週期與五層硬保險（ReleaseGuard 單一收層權威；合成手勢驗證 13/13）"
   ],
-  "activeSlice": "T4",
+  "activeSlice": "T5",
   "evidenceRefs": [
-    "src/Sidecar/Interaction/HitLayer.cs; src/Sidecar/Interaction/MonitorLayout.cs"
+    "src/Sidecar/Interaction/ReleaseGuard.cs; %TEMP%/sidecar-verify/t4.log"
   ],
   "blockedOn": null,
-  "nextStep": "移植 Hooks/DragDetector 並新增 ReleaseGuard（唯一收層權威）",
+  "nextStep": "把 T4 的合成驗證正式化為 tools/verify-m1a.ps1（S1-S4）",
   "updatedAt": "2026-09-30"
 }
