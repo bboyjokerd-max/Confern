@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    "docs/aegis/specs/2026-09-30-sidecar-drag-convert-design.md",
+    "docs/aegis/work/2026-09-30-m05-feasibility/90-evidence.md",
+    "src/M05"
+  ],
+  "whyRelevant": "移植來源（拋棄式原型）",
+  "missingAuthority": []
+}

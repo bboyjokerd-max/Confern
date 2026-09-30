@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-09-30-m1a-lifecycle",
+  "currentTodo": "T1 產品骨架與建置",
+  "completedTodos": [],
+  "activeSlice": "T1",
+  "evidenceRefs": [],
+  "blockedOn": null,
+  "nextStep": "建立 src/Sidecar 四個檔案並建置成功",
+  "updatedAt": "2026-09-30"
+}

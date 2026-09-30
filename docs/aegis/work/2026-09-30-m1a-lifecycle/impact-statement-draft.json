@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "Windows 視窗生命週期與拖放攔截"
+  ],
+  "owners": [
+    "ReleaseGuard=唯一收層權威; Native=唯一 P/Invoke 來源; HitLayer=視窗唯一擁有者; MonitorLayout=唯一座標來源"
+  ],
+  "invariants": [
+    "被拖曳檔案唯讀；接收層只在 CAPTURING 可見；非觸發拖曳位元級等價"
+  ],
+  "compatBoundary": "不裝 shell 擴充、不寫 HKLM、非管理員、不碰使用者檔案",
+  "nonGoals": [
+    "輪盤 UI(M1b)、編解碼(M1c)、寫檔契約與放手語意(M1d)、行程邊界(M1e)、設定頁(M1f)"
+  ]
+}
