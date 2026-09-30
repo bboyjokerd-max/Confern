@@ -131,6 +131,13 @@ internal sealed class HitLayer : IDisposable
     }
 
     /// <summary>
+    /// 通知：接收層已實際隱藏（帶原因碼）。**這是通知，不是決定權**——決定權仍然只在
+    /// <see cref="ReleaseGuard"/>。視覺層（輪盤）據此跟著收起，兩層才會在同一瞬間消失；
+    /// 由 UI 執行緒的 WndProc 觸發，所以在處理常式裡操作視窗是安全的。
+    /// </summary>
+    public event Action<int>? Hidden;
+
+    /// <summary>
     /// 由 <see cref="ReleaseGuard"/> 要求收層。走視窗訊息（不跨執行緒直接呼叫 ShowWindow），
     /// 原因碼夾帶在 wParam，實際的隱藏與記錄都在 UI 執行緒的 WndProc 裡發生。
     /// </summary>
@@ -153,6 +160,7 @@ internal sealed class HitLayer : IDisposable
             {
                 Native.ShowWindow(hWnd, Native.SW_HIDE);
                 entry.Owner._evidence.Line($"hit layer HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
+                entry.Owner.Hidden?.Invoke(wParam.ToInt32());
                 return IntPtr.Zero;
             }
             if (msg == Native.WM_DESTROY)

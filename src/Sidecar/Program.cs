@@ -92,6 +92,8 @@ internal sealed class Options
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
           --wheel-previews <N>      with --wheel-demo: file count shown in the preview (default 1)
           --wheel-geometry-selftest check the wheel geometry against known angles and exit
+          --wheel-simulate-cycles <N>
+                                    run N non-invasive capture/show/select/escape cycles and exit
           --quiet                   do not echo events to the console
         """;
 
@@ -127,6 +129,7 @@ internal sealed class Options
     public int WheelSelected;
     public int WheelPreviews = 1;
     public bool GeometrySelfTest;
+    public int WheelSimulateCycles;
 
     public static Options Parse(string[] args)
     {
@@ -154,6 +157,9 @@ internal sealed class Options
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int wp)) { o.WheelPreviews = wp; i++; }
                     break;
                 case "--wheel-geometry-selftest": o.GeometrySelfTest = true; break;
+                case "--wheel-simulate-cycles":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int sc)) { o.WheelSimulateCycles = sc; i++; }
+                    break;
                 case "--wheel-demo":
                     if (i + 2 < args.Length &&
                         int.TryParse(args[i + 1], out int wx) && int.TryParse(args[i + 2], out int wy))
@@ -265,6 +271,18 @@ internal static class App
         if (opt.WheelDemoX.HasValue)
             return WheelDemo(hit, guard, evidence, opt);
 
+        // 視覺層同樣**預先建立**：規格 §9.3 要求輪盤首次顯示 < 100 ms，不可在拖曳中才建視窗。
+        using var visual = new VisualLayer(evidence);
+        var catalog = new StubFormatCatalog();
+        var presenter = new WheelPresenter(evidence, visual);
+
+        // 兩層在同一瞬間收起：guard 決定、接收層執行，視覺層只是跟著收（通知，不是決定權）。
+        hit.Hidden += _ => presenter.Hide();
+        detector.Captured += () => ShowWheel(presenter, catalog, evidence);
+
+        if (opt.WheelSimulateCycles > 0)
+            return WheelSimulateCycle(hit, guard, evidence, presenter, catalog, opt.WheelSimulateCycles);
+
         using var hooks = new Hooks();
         if (opt.ForceRaiseHitLayer)
         {
@@ -282,6 +300,9 @@ internal static class App
                     detector.Disable();
                     return;
                 }
+                // 輪盤可見時，方向鍵／Enter／Esc 屬於輪盤（規格 §4.3 鍵盤表）
+                if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence))
+                    return;
                 detector.OnKey(vk, isDown);
             };
             hooks.Install(evidence);
@@ -333,6 +354,105 @@ internal static class App
         if (opt.WheelPreviews > 1) return $"{opt.WheelPreviews} 個檔案";
         int i = Math.Clamp(opt.WheelSelected, 0, targets.Length - 1);
         return $"holiday.{targets[i].ToLowerInvariant()}";
+    }
+
+    /// <summary>
+    /// 捕捉開始時在游標處叫出輪盤（規格 §4.3）。
+    /// 原格式目前一定是未知：拖曳**進行中**的酬載需要 OLE `IDropTarget::DragEnter`（T7），
+    /// 在那之前中心只顯示佔位符——這一點一律寫進證據，不用假資料假裝知道。
+    /// </summary>
+    private static void ShowWheel(WheelPresenter presenter, IFormatCatalog catalog, Evidence evidence)
+    {
+        Native.GetCursorPos(out Native.POINT p);
+        string? source = catalog.SourceFormat(Array.Empty<string>());
+        if (source == null)
+            evidence.Line("wheel: source format UNKNOWN (drag payload plumbing = T7); placeholder center shown");
+        presenter.Show(p.X, p.Y, source ?? "?", catalog.TargetsFor(source));
+    }
+
+    /// <summary>輪盤可見時接管方向鍵／Enter／Esc；回傳 true 表示這個鍵已屬於輪盤。</summary>
+    private static bool HandleWheelKey(uint vk, WheelPresenter presenter, ReleaseGuard guard, Evidence evidence)
+    {
+        switch (vk)
+        {
+            case Native.VK_LEFT or Native.VK_UP:
+                presenter.SelectNext(-1);
+                return true;
+            case Native.VK_RIGHT or Native.VK_DOWN:
+                presenter.SelectNext(+1);
+                return true;
+            case Native.VK_RETURN:
+                // M1b 只記錄意圖，不轉檔；真正的執行在 M1d 之後
+                evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
+                guard.OnUserResolved("enter");
+                return true;
+            case Native.VK_ESCAPE:
+                // 規格 §4.3：Esc 立即收起；§4.2.3 的保底語意在 M1d 實作
+                evidence.Line("ESC: cancel (fallback semantics land in M1d)");
+                guard.OnUserResolved("escape");
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>把已投遞的訊息跑完直到條件成立（收層是訊息驅動的非同步動作，不跑就不會落地）。</summary>
+    private static bool PumpUntil(Func<bool> done, int timeoutMs = 1000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            while (Native.PeekMessageW(out Native.MSG msg, IntPtr.Zero, 0, 0, Native.PM_REMOVE))
+            {
+                Native.TranslateMessage(ref msg);
+                Native.DispatchMessageW(ref msg);
+            }
+            if (done()) return true;
+            Thread.Sleep(5);
+        }
+        return done();
+    }
+
+    /// <summary>
+    /// T4 的**非侵入**驗證：不注入任何輸入，直接走與真實拖曳相同的接線
+    /// （guard.OnCaptured → ShowWheel → 方向鍵 → Esc → guard.OnUserResolved），
+    /// 並以作業系統的真實狀態斷言兩層的顯示與隱藏。
+    /// 真實放手（真的拖曳）仍要 S8，那需要滑鼠。
+    /// </summary>
+    private static int WheelSimulateCycle(HitLayer hit, ReleaseGuard guard, Evidence evidence,
+                                          WheelPresenter presenter, IFormatCatalog catalog, int cycles)
+    {
+        int failed = 0;
+        void Report(string text, bool ok)
+        {
+            if (!ok) failed++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  {text}");
+        }
+
+        int count = catalog.TargetsFor(null).Count;
+        for (int i = 0; i < cycles; i++)
+        {
+            guard.OnCaptured();
+            ShowWheel(presenter, catalog, evidence);
+            Report($"wheel sim {i}: wheel visible after capture", presenter.IsVisible);
+
+            int a = presenter.SelectNext(1);
+            int b = presenter.SelectNext(1);
+            int c = presenter.SelectNext(-1);
+            Report($"wheel sim {i}: ring selection (fwd,fwd,back) -> {a},{b},{c}, want 1,2,1", a == 1 && b == 2 && c == 1);
+
+            int start = presenter.Selected;
+            for (int k = 0; k < count; k++) presenter.SelectNext(1);
+            Report($"wheel sim {i}: wrap-around after {count} steps returns to {start}", presenter.Selected == start);
+
+            guard.OnUserResolved("simulated escape");
+            bool hid = PumpUntil(() => !presenter.IsVisible, 1000);
+            Report($"wheel sim {i}: wheel hidden by the guard (through hit.Hidden)", hid);
+            Report($"wheel sim {i}: both layers hidden", !hit.IsVisible && !presenter.IsVisible);
+        }
+
+        evidence.Line($"wheel simulate cycle done: {cycles} cycles; failed={failed}");
+        return failed == 0 ? 0 : 5;
     }
 
     /// <summary>

@@ -75,6 +75,18 @@ internal sealed class ReleaseGuard : IDisposable
         HideNow(Native.HideReasonDrop);
     }
 
+    /// <summary>
+    /// 使用者主動結束（Esc 取消、Enter 直接執行）：**立即**收層。
+    /// 規格 §4.3：Esc 立即消失，不等淡出動畫；250 ms 寬限是為了讓放手當下的 drop
+    /// 能落到接收層上，Esc／Enter 之後並沒有 drop 要等。
+    /// </summary>
+    public void OnUserResolved(string what)
+    {
+        _evidence.Line($"user resolved: {what} -> immediate hide");
+        StopTimers();
+        HideNow(Native.HideReasonManual);
+    }
+
     /// <summary>保險 #5：緊急停用熱鍵（Ctrl+Alt+Shift+Q）。收層並停用捕捉直到重啟。</summary>
     public void OnKillSwitch()
     {

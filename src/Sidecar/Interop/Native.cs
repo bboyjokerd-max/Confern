@@ -202,6 +202,14 @@ internal static class Native
     public const uint VK_MENU = 0x12;
     public const uint VK_Q = 0x51;
 
+    // ---- 輪盤操作鍵（規格 §4.3 的鍵盤表）----
+    public const uint VK_RETURN = 0x0D;
+    public const uint VK_ESCAPE = 0x1B;
+    public const uint VK_LEFT = 0x25;
+    public const uint VK_UP = 0x26;
+    public const uint VK_RIGHT = 0x27;
+    public const uint VK_DOWN = 0x28;
+
     // ---- 收層原因碼（夾帶在 WM_APP_FORCE_HIDE 的 wParam）----
     // 定時器在執行緒池執行緒上觸發，不可跨執行緒直接呼叫 ShowWindow；
     // 因此「決定收層」與「實際收層」分離：guard 決定並投遞，UI 執行緒執行。
@@ -268,4 +276,11 @@ internal static class Native
 
     /// <summary>命中測試查詢：**會**跳過 WS_EX_TRANSPARENT 的視窗，因此正好可以證明穿透成立。</summary>
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
+
+    // ---- 訊息幫浦（驗證用）----
+    // 收層是「決定」與「執行」分離的非同步動作（由 guard 投遞、UI 執行緒執行），
+    // 驗證時若不多跑訊息，收層永遠不會落地，檢查就會變成假的。
+    // MSG／TranslateMessage／DispatchMessageW 已存在（訊息迴圈在用），這裡只補 PeekMessageW。
+    public const uint PM_REMOVE = 0x0001;
+    [DllImport("user32.dll")] public static extern bool PeekMessageW(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
 }
