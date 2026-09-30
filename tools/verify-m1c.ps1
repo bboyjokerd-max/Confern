@@ -64,8 +64,8 @@ function Get-ProbeLine([string[]]$lines, [string]$file) {
   return ''
 }
 
-function Get-MeasuredEncodableCsv([string[]]$lines) {
-  $m = [regex]::Match(($lines -join "`n"), 'encodable=\[([^\]]*)\]')
+function Get-OfferedOutputsCsv([string[]]$lines) {
+  $m = [regex]::Match(($lines -join "`n"), 'offered=\[([^\]]*)\]')
   if (-not $m.Success) { return $null }
   return $m.Groups[1].Value
 }
@@ -147,10 +147,18 @@ function Invoke-S9 {
   Check "S9.3 all five built-in encoders round-trip (encode+decode)" `
     ((Count-Log $lines 'PASS  codec (PNG|JPG|BMP|TIF|GIF) encode\+decode round-trip') -eq 5)
 
-  # Exactness: the claim must be exactly what was measured. Extra = a promise the
-  # machine cannot keep; missing = the probe itself is broken.
-  Check "S9.4 encodable set is exactly the measured set" `
-    (Test-LogCase $lines 'PASS  encodable set is exactly the measured WIC set')
+  # Three invariants, each of which can fail:
+  #   offered subset of the declared MVP matrix  (extra = promising what the spec never declared)
+  #   offered subset of what was measured        (extra = promising what the machine cannot do)
+  #   every declared output is offered or explicitly reported unavailable (nothing vanishes)
+  Check "S9.4a offered outputs stay inside the declared MVP output matrix" `
+    (Test-LogCase $lines 'PASS  offered \[[^\]]*\] is a subset of the declared MVP matrix')
+  Check "S9.4b offered outputs stay inside the measured capability set" `
+    (Test-LogCase $lines 'PASS  offered \[[^\]]*\] is a subset of what was measured')
+  Check "S9.4c every declared output is accounted for (offered or unavailable)" `
+    (Test-LogCase $lines 'PASS  every declared output is either offered or reported unavailable')
+  Check "S9.4d capable-but-undeclared outputs (e.g. GIF encode) stay out of the wheel" `
+    (Test-LogCase $lines 'PASS  capable-but-not-declared outputs stay out of the wheel')
 
   # Instrument honesty: the probe must be able to report failure.
   Check "S9.5 probe reports a missing file as Unreadable (it can fail)" `
@@ -195,9 +203,9 @@ function Invoke-S9 {
     if ($brandLine -notmatch 'heifBrand=heic') { Write-Host "      measured: $brandLine" }
   }
 
-  $measured = Get-MeasuredEncodableCsv $lines
-  if ($null -eq $measured) { Inconclusive "no encodable set parsed from --codecs" }
-  else { Write-Host "  (measured encodable on this machine: [$measured])" }
+  $measured = Get-OfferedOutputsCsv $lines
+  if ($null -eq $measured) { Inconclusive "no offered-output set parsed from --codecs" }
+  else { Write-Host "  (offered outputs on this machine: [$measured])" }
 
   # Same rule as S7, from the other side: the wheel DEMO must also show the
   # measured set minus its source, never a hardcoded list.
@@ -211,10 +219,10 @@ function Invoke-S9 {
     '--quiet', '--log', $demoLog) -PassThru -Wait
   $demoLines = Get-LogLines $demoLog
   $demoTargets = Get-ShownTargetsCsv $demoLines
-  if ($null -eq $measured) { Inconclusive "demo sectors vs measured set (probe unavailable)" }
-  elseif ($null -eq $demoTargets) { Check "S9.14 wheel demo sectors equal measured minus source" $false }
+  if ($null -eq $measured) { Inconclusive "demo sectors vs offered set (probe unavailable)" }
+  elseif ($null -eq $demoTargets) { Check "S9.14 wheel demo sectors equal offered minus source" $false }
   else {
-    Check "S9.14 wheel demo sectors equal measured minus source" `
+    Check "S9.14 wheel demo sectors equal offered minus source" `
       ($demoTargets -eq (Remove-FromCsv $measured 'JPG'))
   }
   Check "S9.15 wheel demo did not promise the source format as an output" `

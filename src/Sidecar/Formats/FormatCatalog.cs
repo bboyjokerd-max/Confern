@@ -73,16 +73,19 @@ internal sealed class FormatCatalog : IFormatCatalog
     }
 
     /// <summary>
-    /// 規格 §4.3：扇區＝所有**可輸出**格式排除來源。這條不變式屬於本介面的契約，
+    /// 規格 §4.3：扇區＝所有**實際提供**的輸出格式排除來源。這條不變式屬於本介面的契約，
     /// 因此實作必須自己遵守——**不得把責任推回 UI**。
+    ///
+    /// 「實際提供」＝規格宣告的 ∩ 實測可用的（見 <see cref="CodecRegistry.OfferedOutputs"/>），
+    /// 不是單看能力：GIF 編得出來但 §6.2 沒宣告，所以不出現。
     /// </summary>
     public IReadOnlyList<string> TargetsFor(string? sourceFormat)
     {
-        IReadOnlyList<string> encodable = _codecs.EncodableFormats;
-        if (string.IsNullOrEmpty(sourceFormat)) return encodable;
+        IReadOnlyList<string> offered = _codecs.OfferedOutputs;
+        if (string.IsNullOrEmpty(sourceFormat)) return offered;
 
-        var list = new List<string>(encodable.Count);
-        foreach (string format in encodable)
+        var list = new List<string>(offered.Count);
+        foreach (string format in offered)
             if (!string.Equals(format, sourceFormat, StringComparison.OrdinalIgnoreCase)) list.Add(format);
         return list;
     }

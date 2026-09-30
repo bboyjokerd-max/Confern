@@ -24,7 +24,12 @@ internal sealed class VisualLayer : IDisposable
     private readonly IntPtr _hwnd;
 
     /// <summary>hwnd → 實例（靜態 WndProc 分派用）。</summary>
-    private static readonly Dictionary<IntPtr, VisualLayer> Instances = new();    private bool _visible;
+    private static readonly Dictionary<IntPtr, VisualLayer> Instances = new();
+    /// <summary>週期性回呼（進度顯示的淡出與重畫用）。只有需要時才啟動計時器。</summary>
+    public event Action? TickRequested;
+    private const int TickTimerId = 1;
+    private bool _tickRunning;
+    private bool _visible;
     private int _frames;
 
     public IntPtr Handle => _hwnd;
@@ -168,7 +173,33 @@ internal sealed class VisualLayer : IDisposable
             layer._evidence.Line($"visual layer HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
             return IntPtr.Zero;
         }
+        if (msg == Native.WM_TIMER && wParam.ToInt64() == TickTimerId &&
+            Instances.TryGetValue(hWnd, out VisualLayer? ticking))
+        {
+            ticking.TickRequested?.Invoke();
+            return IntPtr.Zero;
+        }
         return Native.DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    /// <summary>
+    /// 啟動（或停止）週期性回呼。<paramref name="intervalMs"/> = 0 表示停止。
+    /// 這是進度顯示唯一的驅動來源——它讓 UI 不必為了「有沒有進展」而一直輪詢。
+    /// </summary>
+    public void StartTick(int intervalMs)
+    {
+        if (intervalMs <= 0)
+        {
+            if (_tickRunning)
+            {
+                Native.KillTimer(_hwnd, new IntPtr(TickTimerId));
+                _tickRunning = false;
+            }
+            return;
+        }
+        Native.KillTimer(_hwnd, new IntPtr(TickTimerId));
+        Native.SetTimer(_hwnd, new IntPtr(TickTimerId), (uint)intervalMs, IntPtr.Zero);
+        _tickRunning = true;
     }
 
     public void Dispose()

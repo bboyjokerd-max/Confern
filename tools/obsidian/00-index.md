@@ -56,8 +56,11 @@ tags: [專案, Tangerine, Windows版, 索引, Sidecar]
 重新同步（改完 repo 後執行一次）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\User\Desktop\專案\tangerine-win\tools\sync-to-obsidian.ps1" -ProjectRoot "C:\Users\User\Desktop\專案\tangerine-win" -VaultRoot "C:\Users\User\Documents\Obsidian\Danny_Vault_01"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\User\Desktop\專案\tangerine-win\tools\obsidian\sync.ps1"
 ```
+
+> 腳本讀 `tools\obsidian\map.json`（repo 檔 → vault 檔的對照表），並在每篇前面加上對應的 banner。
+> 要新增一份文件到 vault：在 `map.json` 加一筆、寫一個 `NN-banner.md`，然後跑上面那行。
 
 > [!warning] 鏡像筆記，請勿直接編輯
 > `01`–`07` 各篇由同步腳本產生，**直接編輯會在下次同步被覆蓋**。要改內容請改 repo，再重新同步。
@@ -70,6 +73,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\User\Desktop\專�
 | M1a 生命週期與五層硬保險 | **已驗收**（自動化 45/45；A7 與 A2 位置多樣性待人工手勢） |
 | M1b 輪盤（渲染層） | **機制完成並已驗證**（S6 13/13、S7 36/36、`All` 49/49、hover 映射 9/9、模擬迴圈 15/15；**端到端 A1／A6／A7 與 S8 真實拖曳待人工配合**）。M1c 之後 S7 新增一條跨儀器檢查 → `All` **50/50** |
 | M1c 格式知識與編解碼 | **已驗收**（`tools/verify-m1c.ps1` **S9 17/17**；`CodecRegistry` 能力探測、`FormatCatalog` 取代 stub、HEIC／WebP 逐檔探測、§7.1 錯誤映射）。**量測推翻了兩個預設值**：WIC 其實解得出 WebP；「找不到解碼器」是 `NotSupportedException` 而非 `0x88982F50` |
-| M1d 放手語意與檔案契約 | 未開始 |
-| M1e Worker 行程與 IPC | 未開始 |
-| M1f 設定、錯誤 UI、批次 | 未開始 |
+| M1d 放手語意與檔案契約 | **已驗收**（併入 M1def 首發） |
+| M1e Worker 行程與 IPC | **已驗收**（`tools/verify-m1d.ps1` 41/41；雙行程、版本化 JSON、進度單行、逾時保護） |
+| M1f 設定、錯誤 UI、批次 | **部分**（設定檔＋夾制＋§7.1 訊息已驗收；設定**頁**與失敗清單展開未做） |
+| **M1def 首發轉檔（真的會轉檔）** | **已驗收**：M1a 38/38、M1b 50/50、M1c 20/20、M1d 41/41；桌面捷徑可啟動；**真實滑鼠拖曳待人工（14 篇清單）** |
+| 本切片修掉的兩個真 bug | ① 具名管道死鎖（每次轉檔都逾時、一個檔都轉不出來）② 同一場工作階段第二次轉檔造成 **UI 崩潰**（見 13 篇） |

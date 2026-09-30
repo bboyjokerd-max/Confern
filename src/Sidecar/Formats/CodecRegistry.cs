@@ -73,15 +73,29 @@ internal sealed class CodecRegistry
         ("HEIC", new[] { "heic", "heif" }, ImageCategory),
     };
 
-    /// <summary>Windows 內建的 WIC 編碼器（經 WPF 包裝）。這五個是「應該要能用」的基準。</summary>
-    private static readonly (string Format, Func<BitmapEncoder> Make)[] WicEncoders =
+    /// <summary>Windows 內建的 WIC 編碼器格式（經 WPF 包裝）。這五個是「應該要能用」的基準。</summary>
+    private static readonly string[] WicEncoderFormats = { "PNG", "JPG", "BMP", "TIF", "GIF" };
+
+    /// <summary>
+    /// 建立編碼器——**編碼器知識的唯一來源**（轉檔引擎與能力探測都走這裡，
+    /// 免得「探測的設定」與「實際轉檔的設定」各自演化）。
+    /// 規格 §6.2：JPG 品質可設定（60–100）、TIFF 無壓縮、PNG 無損、BMP 32-bit（由引擎轉像素格式）。
+    /// </summary>
+    public static BitmapEncoder? CreateEncoder(string format, int quality) => format switch
     {
-        ("PNG", () => new PngBitmapEncoder()),
-        ("JPG", () => new JpegBitmapEncoder { QualityLevel = 85 }),   // 規格 §6.2：品質 85
-        ("BMP", () => new BmpBitmapEncoder()),
-        ("TIF", () => new TiffBitmapEncoder()),
-        ("GIF", () => new GifBitmapEncoder()),
+        "PNG" => new PngBitmapEncoder(),
+        "JPG" => new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, 60, 100) },
+        "BMP" => new BmpBitmapEncoder(),
+        "TIF" => new TiffBitmapEncoder { Compression = TiffCompressOption.None },
+        "GIF" => new GifBitmapEncoder(),
+        _ => null,
     };
+
+    /// <summary>規格 §6.1 宣告的**輸入**格式（MVP 承諾）。</summary>
+    private static readonly string[] MvpInputs = { "JPG", "PNG", "BMP", "TIF", "GIF", "WEBP", "HEIC" };
+
+    /// <summary>規格 §6.2 宣告的**輸出**格式（MVP 承諾）。**GIF 與 HEIC 不在其中。**</summary>
+    private static readonly string[] MvpOutputs = { "PNG", "JPG", "WEBP", "BMP", "TIF" };
 
     private readonly List<CodecCapability> _capabilities = new();
 
@@ -90,7 +104,24 @@ internal sealed class CodecRegistry
         ProbeWicEncoders();
         DeclareWebp();
         DeclareHeic();
+
+        // 兩個方向都會出錯，所以這裡把「宣告」與「實測」分開記錄：
+        //   只信能力 → 多承諾：GIF 真的編得出來，但規格 §6.2 沒把它列為 MVP 輸出。
+        //   只信宣告 → 假承諾：WebP 宣告了，但這台機器沒有編碼器（實測才發現）。
+        // 真正提供的是兩者的交集；兩邊的差集都要留下來（否則它們會默默消失）。
+        OfferedOutputs = MvpOutputs.Where(f => EncodableFormats.Contains(f)).ToArray();
+        CapableButNotDeclared = EncodableFormats.Where(f => !MvpOutputs.Contains(f)).ToArray();
+        DeclaredButUnavailable = MvpOutputs.Where(f => !EncodableFormats.Contains(f)).ToArray();
     }
+
+    /// <summary>**實際提供**的輸出＝規格宣告的 ∩ 實測可用的。</summary>
+    public IReadOnlyList<string> OfferedOutputs { get; }
+
+    /// <summary>能力上可行、但 MVP 未宣告的輸出（目前是 GIF）——留著，免得它被忘記。</summary>
+    public IReadOnlyList<string> CapableButNotDeclared { get; }
+
+    /// <summary>MVP 宣告了、但這台機器做不到的輸出（目前是 WebP，缺 libwebp）。</summary>
+    public IReadOnlyList<string> DeclaredButUnavailable { get; }
 
     /// <summary>每個格式的實測結果，順序與格式表一致。</summary>
     public IReadOnlyList<CodecCapability> Capabilities => _capabilities;
@@ -102,7 +133,7 @@ internal sealed class CodecRegistry
         _capabilities.Where(c => c.CanEncode).Select(c => c.Format).ToArray();
 
     /// <summary>可作為輸入的所有格式名稱（含「要靠系統擴充才成立」的，例如 HEIC）。</summary>
-    public IReadOnlyList<string> InputFormats => Table.Select(t => t.Format).ToArray();
+    public IReadOnlyList<string> InputFormats => MvpInputs;
 
     /// <summary>由路徑的副檔名取得格式名稱；不認得回 <c>null</c>。</summary>
     public string? FormatOfPath(string path)
@@ -182,56 +213,38 @@ internal sealed class CodecRegistry
         }
         catch (FileNotFoundException) { return new DecodeOutcome(DecodeStatus.Unreadable, format, "file not found"); }
         catch (DirectoryNotFoundException) { return new DecodeOutcome(DecodeStatus.Unreadable, format, "folder not found"); }
-        catch (UnauthorizedAccessException ex)
-        {
-            return new DecodeOutcome(DecodeStatus.Unreadable, format, $"access denied: {Short(ex.Message)}");
-        }
-        catch (FileFormatException ex)
-        {
-            return new DecodeOutcome(DecodeStatus.Corrupt, format,
-                $"FileFormatException hresult=0x{ex.HResult:X8}: {Short(ex.Message)}" + Inner(ex));
-        }
-        catch (NotSupportedException ex)
-        {
-            // WIC 找不到可用解碼器時說的是「No imaging component suitable to complete this operation was found.」
-            // **實測：這不是 COMException 0x88982F50**，所以照猜測寫會讓 HEIC 顯示錯誤的訊息。
-            // 兩種完全不同的處置必須分開：這是 HEIC → 「需要 HEIF 影像擴充」；否則 → 「不支援的格式」。
-            if (IsHeifFormat(format) && LooksLikeHeif(path, out string brand))
-                return new DecodeOutcome(DecodeStatus.NeedsExtension, format,
-                    $"no HEIF decoder available (container brand={brand}); {Short(ex.Message)}");
-            return new DecodeOutcome(DecodeStatus.Unsupported, format, $"NotSupportedException: {Short(ex.Message)}");
-        }
-        catch (System.Runtime.InteropServices.COMException ex)
-        {
-            uint hr = (uint)ex.HResult;
-            string brandNote = IsHeifFormat(format) && LooksLikeHeif(path, out string brand)
-                ? $" heifBrand={brand}" : "";
-
-            // WINCODEC_ERR_COMPONENTNOTFOUND = 0x88982F50：系統找不到這個格式的解碼器
-            if (hr == 0x88982F50u)
-            {
-                return IsHeifFormat(format) && brandNote.Length > 0
-                    ? new DecodeOutcome(DecodeStatus.NeedsExtension, format,
-                        $"0x{hr:X8} WINCODEC_ERR_COMPONENTNOTFOUND{brandNote}: {Short(ex.Message)}")
-                    : new DecodeOutcome(DecodeStatus.Unsupported, format,
-                        $"0x{hr:X8} WINCODEC_ERR_COMPONENTNOTFOUND: {Short(ex.Message)}");
-            }
-
-            // 「檔案與相關的檔案格式規格不符」＝資料壞了，不是格式不支援。
-            // 實測：品牌盒正確但影像資料被截斷的 HEIC → 0xC00D36BE。
-            // §7.1 對這兩者的使用者訊息不同（「無法解碼」vs「不支援的格式」），不可以混。
-            if (CorruptHresults.Contains(hr))
-                return new DecodeOutcome(DecodeStatus.Corrupt, format,
-                    $"0x{hr:X8} data does not match the format spec{brandNote}: {Short(ex.Message)}");
-
-            return new DecodeOutcome(DecodeStatus.Unsupported, format,
-                $"COMException hresult=0x{hr:X8}{brandNote}: {Short(ex.Message)}");
-        }
         catch (Exception ex)
         {
-            return new DecodeOutcome(DecodeStatus.Unsupported, format,
-                $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {Short(ex.Message)}");
+            return new DecodeOutcome(ClassifyDecodeException(ex, format, path), format, DescribeDecodeException(ex, path));
         }
+    }
+
+    /// <summary>
+    /// 解碼例外的**唯一分類權威**：探測（<see cref="ProbeDecode"/>）與實際轉檔都走這裡，
+    /// 免得「探測說的話」與「轉檔說的話」各自演化。
+    /// </summary>
+    public static DecodeStatus ClassifyDecodeException(Exception ex, string format, string path) => ex switch
+    {
+        UnauthorizedAccessException => DecodeStatus.Unreadable,
+        FileFormatException => DecodeStatus.Corrupt,
+        NotSupportedException => IsHeifFormat(format) && LooksLikeHeif(path, out _)
+            ? DecodeStatus.NeedsExtension
+            : DecodeStatus.Unsupported,
+        System.Runtime.InteropServices.COMException com when (uint)com.HResult == 0x88982F50u =>
+            IsHeifFormat(format) && LooksLikeHeif(path, out _) ? DecodeStatus.NeedsExtension : DecodeStatus.Unsupported,
+        System.Runtime.InteropServices.COMException com when CorruptHresults.Contains((uint)com.HResult) =>
+            DecodeStatus.Corrupt,
+        _ => DecodeStatus.Unsupported
+    };
+
+    /// <summary>給日誌用的細節：型別＋HRESULT＋訊息，並在 HEIF 檔上附上品牌盒判定結果。</summary>
+    private static string DescribeDecodeException(Exception ex, string path)
+    {
+        string note = LooksLikeHeif(path, out string brand) ? $" heifBrand={brand}" : "";
+        string inner = ex.InnerException == null
+            ? ""
+            : $" <- {ex.InnerException.GetType().Name} 0x{ex.InnerException.HResult:X8}";
+        return $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}{note}: {Short(ex.Message)}{inner}";
     }
 
     private static string Inner(Exception ex) =>
@@ -281,12 +294,18 @@ internal sealed class CodecRegistry
     {
         BitmapSource source = MakeProbeBitmap();
 
-        foreach ((string format, Func<BitmapEncoder> make) in WicEncoders)
+        foreach (string format in WicEncoderFormats)
         {
             byte[]? bytes = null;
             try
             {
-                BitmapEncoder encoder = make();
+                BitmapEncoder? encoder = CreateEncoder(format, 85);
+                if (encoder == null)
+                {
+                    _capabilities.Add(new CodecCapability(format, DecodeSupport.No, false,
+                        "no encoder factory for this format"));
+                    continue;
+                }
                 encoder.Frames.Add(BitmapFrame.Create(source));
                 using var stream = new MemoryStream();
                 encoder.Save(stream);

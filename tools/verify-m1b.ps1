@@ -142,16 +142,17 @@ function Get-PayloadRun([string]$payload, [string]$tag) {
   return [pscustomobject]@{ Exit = $proc.ExitCode; Lines = (Get-LogLines $log) }
 }
 
-# M1c: the sector list is a MEASURED capability set, not a constant. S7 must therefore not
-# hardcode it -- it cross-checks the wheel against what --codecs measured on this machine.
-# Returns the encodable list as a CSV string ("PNG,JPG,BMP,TIF,GIF") or $null when the probe
+# M1c: the sector list is what the app OFFERS (spec 6.2 declared output matrix intersected
+# with what this machine actually encodes), not a constant and not raw capability either.
+# S7 must therefore not hardcode it -- it cross-checks the wheel against the --codecs run.
+# Returns the offered list as a CSV string ("PNG,JPG,BMP,TIF") or $null when the probe
 # itself failed (in which case the caller reports INCONCLUSIVE instead of passing vacuously).
-function Get-MeasuredEncodableCsv {
+function Get-OfferedOutputsCsv {
   $log = Join-Path $LogDir 'm1c-codecs.log'
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
   $proc = Start-Process -FilePath $Exe -ArgumentList @('--codecs', '--quiet', '--log', $log) -PassThru -Wait
   $lines = Get-LogLines $log
-  $m = [regex]::Match(($lines -join "`n"), 'encodable=\[([^\]]*)\]')
+  $m = [regex]::Match(($lines -join "`n"), 'offered=\[([^\]]*)\]')
   if (-not $m.Success) { return $null }
   return $m.Groups[1].Value
 }
@@ -348,21 +349,21 @@ function Invoke-S7 {
   Check "S7.13 simulate cycles: 3 cycles, 0 failed" (Test-Log $lines 'simulate cycle done: 3 cycles; failed=0')
 
   # ---- payload path: INJECTED, not a real drag (see the note at the top of S7) ----
-  $measured = Get-MeasuredEncodableCsv
-  if ($null -eq $measured) { Inconclusive "M1c --codecs probe produced no encodable set" }
-  else { Write-Host "  (measured encodable on this machine: [$measured])" }
+  $measured = Get-OfferedOutputsCsv
+  if ($null -eq $measured) { Inconclusive "M1c --codecs probe produced no offered-output set" }
+  else { Write-Host "  (offered outputs on this machine: [$measured])" }
 
   $r = Get-PayloadRun 'C:\Temp\holiday.jpg' 'single'
   Check "S7.14 single-image payload run exits 0" ($r.Exit -eq 0)
   Check "S7.15 payload source format is JPG" (Test-Log $r.Lines 'source=JPG')
   # spec 4.3: the source format must NOT appear among the output sectors
   Check "S7.16 source format excluded from the sectors" (-not (Test-Log $r.Lines 'targets=\[[^\]]*\bJPG\b'))
-  # M1c: sectors must equal the MEASURED capability set minus the source (cross-instrument check)
+  # M1c: sectors must equal the OFFERED set minus the source (cross-instrument check)
   $shown = Get-ShownTargetsCsv $r.Lines
-  if ($null -eq $measured) { Inconclusive "sectors vs measured capability set (probe unavailable)" }
-  elseif ($null -eq $shown) { Check "S7.16b sectors equal the measured capability set minus the source" $false }
+  if ($null -eq $measured) { Inconclusive "sectors vs offered set (probe unavailable)" }
+  elseif ($null -eq $shown) { Check "S7.16b sectors equal the offered set minus the source" $false }
   else {
-    Check "S7.16b sectors equal measured [$measured] minus source ($shown)" ($shown -eq (Remove-FromCsv $measured 'JPG'))
+    Check "S7.16b sectors equal offered [$measured] minus source ($shown)" ($shown -eq (Remove-FromCsv $measured 'JPG'))
   }
   Check "S7.17 preview shows the output file name" (Test-Log $r.Lines 'preview=holiday\.png')
   # The ring advances in order, so select#1 must land on the SECOND sector -- whatever it is.
@@ -409,7 +410,16 @@ function Invoke-S7 {
   Check "S7.31 hover self-test exits 0" ($proc.ExitCode -eq 0)
   Check "S7.32 hover self-test has no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
   $hits = @($lines | Select-String -Pattern 'hover sector' -CaseSensitive).Count
-  Check "S7.33 every sector is individually reachable by hover (saw $hits)" ($hits -ge 5)
+  # Derive the expectation from the wheel's OWN sector list. The sector count is
+  # (offered outputs for the source format) and it changes with the catalog: a hardcoded
+  # ">= 5" silently became wrong once offered was pinned to declared n measured.
+  # Equality (not >=) is the real invariant: EVERY offered sector must be reachable.
+  $targetLine = ($lines | Select-String -Pattern 'targets=\[' | Select-Object -First 1)
+  $expected = 0
+  if ($targetLine) {
+    $expected = @((([regex]::Match($targetLine.Line, 'targets=\[([^\]]*)\]')).Groups[1].Value -split ',')).Count
+  }
+  Check "S7.33 every offered sector is individually reachable by hover (saw $hits of $expected)" (($expected -gt 0) -and ($hits -eq $expected))
   Check "S7.34 centre disc keeps the selection" (Test-Log $lines 'centre disc does not move the selection')
   Check "S7.35 outside the wheel keeps the selection" (Test-Log $lines 'outside the wheel does not move the selection')
 

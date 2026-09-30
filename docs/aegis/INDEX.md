@@ -23,3 +23,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-09-30 | artifact | docs/aegis/work/2026-09-30-m1a-lifecycle/resume-state-hint.json | 2026-09-30-m1a-lifecycle resume state hint |
 | 2026-10-01 | plan | docs/aegis/plans/2026-10-01-m1c-formats.md | M1c format knowledge and codec plan |
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-m1c-formats/90-evidence.md | M1c 格式知識與編解碼 evidence (C1 codec capability probe) |
+| 2026-10-01 | plan | docs/aegis/plans/2026-10-01-m1def-first-release.md | M1d–M1f first testable release plan (file contract, worker, settings) |
+| 2026-10-01 | work | docs/aegis/work/2026-10-01-m1def-conversion/90-evidence.md | M1d/M1e/M1f-lite evidence: real conversion, 41/41 regression, pipe deadlock and crash fixes |
+| 2026-10-01 | artifact | docs/TEST-PLAN-M1-first-run.md | 人工測試清單（17 項＋附錄）：明天驗證初版用 |

@@ -100,6 +100,26 @@ internal static class Native
     public const uint WM_DROPFILES = 0x0233;
     /// <summary>自訂訊息：要求接收層收起（WM_APP + 1）。跨執行緒一律走這條，不直接呼叫 ShowWindow。</summary>
     public const uint WM_APP_FORCE_HIDE = 0x8001;
+    public const uint WM_TIMER = 0x0113;
+
+    // ---- 計時器 ----
+    // 進度顯示要週期性更新（淡出、重畫）。用 SetTimer 讓 GetMessageW 繼續阻塞——
+    // 不改成 sleep 輪詢，因為那樣會讓 UI 行程一直在醒著，也失去「有訊息才動」的性質。
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetTimer(IntPtr hWnd, IntPtr nIDEvent, uint uElapse, IntPtr lpTimerFunc);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool KillTimer(IntPtr hWnd, IntPtr uIDEvent);
+
+    /// <summary>把目前排隊的訊息跑完（不阻塞）。等待非同步結果時用，避免訊息卡在佇列裡。</summary>
+    public static void PumpMessages()
+    {
+        while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(ref msg);
+            DispatchMessageW(ref msg);
+        }
+    }
 
     // ---- 視窗位置 ----
     public static readonly IntPtr HWND_TOPMOST = new(-1);

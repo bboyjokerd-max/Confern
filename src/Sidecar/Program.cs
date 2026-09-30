@@ -61,6 +61,42 @@ internal static class Program
             return App.RunCodecProbe(probeEvidence, opt.CodecProbeFiles);
         }
 
+        // M1e：worker 行程（規格 §9.1）。它不建視窗、不裝勾子、不碰 UI，只轉檔。
+        if (!string.IsNullOrEmpty(opt.WorkerPipe))
+        {
+            using var workerEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return WorkerServer.Run(opt.WorkerPipe, workerEvidence);
+        }
+
+        if (!string.IsNullOrEmpty(opt.ProgressDump))
+        {
+            Native.AttachParentConsole();
+            using var dumpEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunProgressDump(opt.ProgressDump, dumpEvidence);
+        }
+
+        // M1f：設定檔的範圍驗證（§8）——超範圍要夾回並說出來，壞檔要退回預設而不是讓程式起不來。
+        if (!string.IsNullOrEmpty(opt.SettingsProbe))
+        {
+            Native.AttachParentConsole();
+            using var settingsEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            Settings loaded = SettingsStore.Load(opt.SettingsProbe, settingsEvidence.Line);
+            settingsEvidence.Line($"settings probe result: jpgQuality={loaded.JpgQuality} " +
+                                  $"webpQuality={loaded.WebpQuality} capture={loaded.CaptureTimeoutSeconds} " +
+                                  $"trigger={loaded.TriggerKey} collision={loaded.NamingCollision} " +
+                                  $"hotkey={loaded.EmergencyHotkey} diagnostics={loaded.Diagnostics}");
+            settingsEvidence.Line("settings probe done: failed=0");
+            return 0;
+        }
+
+        // M1d：無需滑鼠的整條轉檔管線（解碼 → 編碼 → 原子寫入）。驗證靠它，不靠人工拖曳。
+        if (!string.IsNullOrEmpty(opt.ConvertPayload))
+        {
+            Native.AttachParentConsole();
+            using var convertEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunConvert(opt, convertEvidence);
+        }
+
         // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
         // 因此這裡不留下任何需要清理的檔案鎖。
         using var mutex = new Mutex(initiallyOwned: true, @"Local\Sidecar.SingleInstance", out bool isFirst);
@@ -105,6 +141,11 @@ internal sealed class Options
                                     feed each sector's own mid-angle point into the hover mapping and exit
           --codecs                  probe which formats this machine can really encode/decode, then exit
           --codec-probe <path>      also decode this real file (repeatable) and report the outcome
+          --convert <p1;p2>         convert these files (headless, no mouse needed) and report the outcome
+          --target <FORMAT>         target format for --convert (default PNG)
+          --quality <60-100>        JPG/WebP quality for --convert (default 85)
+          --worker <pipeName>       run as the conversion worker and connect back to this pipe (spec 9.1)
+          --progress-dump <dir>     render the progress line to PNGs (verifies glyphs without a screen)
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
@@ -148,6 +189,16 @@ internal sealed class Options
     public bool Codecs;
     /// <summary>--codec-probe 指定的真實檔案（可重複），用來量測解碼能力。</summary>
     public List<string> CodecProbeFiles = new();
+    /// <summary>--convert 的來源（以 `;` 分隔）；不需要滑鼠就能驗證整條轉檔管線。</summary>
+    public string ConvertPayload = "";
+    public string ConvertTarget = "PNG";
+    public int ConvertQuality = 85;
+    /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
+    public string WorkerPipe = "";
+    /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
+    public string ProgressDump = "";
+    /// <summary>--settings-probe <path>：載入指定的設定檔並印出夾制後的結果（驗證 §8 的範圍規則）。</summary>
+    public string SettingsProbe = "";
     public int WheelSimulateCycles;
 
     /// <summary>
@@ -186,6 +237,24 @@ internal sealed class Options
                 case "--codecs": o.Codecs = true; break;
                 case "--codec-probe":
                     if (i + 1 < args.Length) { o.CodecProbeFiles.Add(args[i + 1]); i++; }
+                    break;
+                case "--convert":
+                    if (i + 1 < args.Length) { o.ConvertPayload = args[i + 1]; i++; }
+                    break;
+                case "--target":
+                    if (i + 1 < args.Length) { o.ConvertTarget = args[i + 1]; i++; }
+                    break;
+                case "--quality":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int q)) { o.ConvertQuality = q; i++; }
+                    break;
+                case "--worker":
+                    if (i + 1 < args.Length) { o.WorkerPipe = args[i + 1]; i++; }
+                    break;
+                case "--progress-dump":
+                    if (i + 1 < args.Length) { o.ProgressDump = args[i + 1]; i++; }
+                    break;
+                case "--settings-probe":
+                    if (i + 1 < args.Length) { o.SettingsProbe = args[i + 1]; i++; }
                     break;
                 case "--wheel-payload":
                     if (i + 1 < args.Length) { o.WheelPayload = args[i + 1]; i++; }
@@ -303,7 +372,7 @@ internal static class App
         };
 
         detector.Captured += guard.OnCaptured;                 // 升起 + 武裝保險 #3
-        detector.Released += guard.OnReleaseRequested;         // 保險 #1／#2（含 250 ms 寬限）
+        // 放手的處置掛在後面（需要 presenter／runner）；見「release(...)」那段
 
         hit.EnsureCreated();      // 預先建立、保持隱藏（規格 §9.3：升起 < 30 ms）
 
@@ -314,10 +383,24 @@ internal static class App
 
         // 視覺層同樣**預先建立**：規格 §9.3 要求輪盤首次顯示 < 100 ms，不可在拖曳中才建視窗。
         using var visual = new VisualLayer(evidence);
+        // 進度層（規格 §4.4）同樣預先建立：轉檔開始時不可以再多花一次建視窗的成本，
+        // 而且它必須與輪盤**分開**——輪盤收起後那一行進度還要留在原位置。
+        using var progressLayer = new VisualLayer(evidence);
+        using var progress = new ProgressPresenter(evidence, progressLayer);
+        // runner 一定要釋放：它擁有 worker 行程與管道（Dispose 會送 shutdown 並確保 worker 收掉）
+        using var runner = new ConversionRunner(Environment.ProcessPath ?? "Sidecar.exe", evidence.Line, progress);
         // 格式能力探測也要**預先做**：第一次使用 WPF/WIC 會載入 PresentationCore，
         // 若等到酬載進來才做，那筆成本會直接落在「酬載 → 顯示」的 100 ms 預算上。
         var catalog = BuildCatalog(evidence);
         var presenter = new WheelPresenter(evidence, visual);
+
+        // M1f：設定（規格 §8）——預設值即規格值，檔案壞掉／超範圍都會退回並說明，不靜默。
+        _settings = SettingsStore.Load(null, evidence.Line);
+
+        // 規格 §7.1：上次崩潰／斷電留下的 `.tmp-*` 必須在啟動時清掉，並且**說出來**。
+        int recoveredTemps = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
+        evidence.Line($"startup temp recovery: removed={recoveredTemps} stale .tmp-* file(s) " +
+                      $"(spec 7.1: no leftovers after a crash)");
 
         // 兩層由**同一個權威**廣播收起。先前是「命中層先收、視覺層跟著收（hit.Hidden）」，
         // 那個順序在命中層沒升起時永遠不會發生 —— 輪盤就會卡在畫面上（最壞的失效模式）。
@@ -326,8 +409,32 @@ internal static class App
         // 拖曳途中拿到酬載（規格 §4.3）→ 這才是輪盤顯示真實原格式的路徑。
         hit.PayloadObserved += (_, paths) => ShowWheelFromPayload(presenter, catalog, evidence, paths);
 
+        // 規格 §4.3「選好放手就轉檔」：**只有滑鼠放手**才執行轉檔。
+        // 觸發鍵放開是「收起輪盤」（§4.2.2 保險 #2），**不是**執行——這兩件事語意不同，
+        // 混在一起會變成「使用者只是放開空白鍵，檔案卻被轉了」。
+        // （低階 hook 會在 shell 的拖放迴圈之前看到 mouse-up，所以這條是主要路徑；
+        //   OLE drop 那條是交叉確認，且收層是幂等的，不會重複轉檔。）
+        detector.Released += reason =>
+        {
+            bool mouseRelease = reason.IndexOf("mouse", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (mouseRelease && presenter.IsVisible && presenter.CanCommit)
+            {
+                evidence.Line($"release({reason}): wheel visible with a valid selection -> commit (spec 4.3)");
+                CommitWheel(presenter, guard, evidence, runner);
+                return;
+            }
+            guard.OnReleaseRequested(reason);      // 保險 #1／#2（含 250 ms 寬限）
+        };
+
         // OLE 路徑確認的放手：與 WM_DROPFILES 交叉確認。收層是幂等的，不會出現兩次收層。
-        hit.OleDropObserved += _ => guard.OnDrop();
+        // 規格 §4.3 的「選好放手就轉檔」在這裡執行——這是**最自然的使用者動作**，
+        // 少了它，使用者拖完、選完、放手卻什麼都沒發生（M1b 時期只記錄意圖，M1d 起真的執行）。
+        hit.OleDropObserved += _ =>
+        {
+            if (presenter.IsVisible && presenter.CanCommit)
+                CommitWheel(presenter, guard, evidence, runner);
+            guard.OnDrop();
+        };
 
         // 規格 §4.3：扇區可直接點擊 → 拖曳途中游標移到哪個扇區就選哪個。
         // 拖放迴圈會吃掉滑鼠訊息，所以座標只有 DragOver 拿得到。
@@ -352,7 +459,7 @@ internal static class App
 
             // 拒絕狀態（混合選取／不支援）下 Enter 必須不執行，而且輪盤要留在畫面上等 Esc。
             if (opt.WheelDump != null) presenter.DumpTo(opt.WheelDump);
-            bool committed = CommitWheel(presenter, guard, evidence);
+            bool committed = CommitWheel(presenter, guard, evidence, runner);
             if (committed) PumpUntil(() => !presenter.IsVisible, 500);
             evidence.Line($"payload enter attempt: committed={committed} wheelVisibleAfter={presenter.IsVisible}");
 
@@ -362,6 +469,33 @@ internal static class App
                 int idx = presenter.SelectNext(1);
                 evidence.Line($"payload select#{step}: index={idx} target={presenter.SelectedTarget} " +
                               $"preview={presenter.CurrentPreview ?? "-"}");
+            }
+
+            // M1e：這條注入路徑**真的會轉檔**（透過 worker 行程），所以它就是 UI 端最完整的自動驗證：
+            // 進度那一行、淡出、部分失敗摘要都能在這裡被斷言，不需要滑鼠。
+            if (committed)
+            {
+                ConversionSnapshot final = runner.Wait(60000);
+                evidence.Line($"conversion finished: finished={final.Finished} ok={final.Ok} failed={final.Failed} " +
+                              $"error={final.Error ?? "-"} line='{final.Line}'");
+                evidence.Line($"progress instrument: updates={progress.Updates} frames={progress.Frames} " +
+                              $"visible={progress.IsVisible} (spec 4.4: one line, updated in place)");
+                bool faded = PumpUntil(() => !progress.IsVisible, 12000);
+                evidence.Line($"progress faded out on its own: {faded} visible={progress.IsVisible}");
+
+                // M1d：**放手即轉檔**（規格 §4.3）是使用者最自然的動作，但它需要真的滑鼠手勢，
+                // 自動測試碰不到。這裡用 detector.ForceRelease("mouse up") 走**同一條** Released
+                // 事件，至少證明「滑鼠放手 → 執行轉檔」這段接線是通的。
+                // 真實手勢仍必須人工確認（這條只保證接線，不保證 Windows 真的把 mouse-up 送給我們）。
+                guard.OnCaptured();                       // 接收層再次升起（＝第二次拖曳）
+                ShowWheelFromPayload(presenter, catalog, evidence, injected);
+                int sel = presenter.SelectNext(1);        // 換一個扇區，輸出才不會撞名
+                evidence.Line($"release-path: selected index={sel} target={presenter.SelectedTarget}");
+                detector.ForceRelease("mouse up");        // 走真正的 Released 事件，不是替代品
+                ConversionSnapshot after = runner.Wait(60000);
+                evidence.Line($"release commit finished: finished={after.Finished} ok={after.Ok} " +
+                              $"failed={after.Failed} line='{after.Line}'");
+                PumpUntil(() => !progress.IsVisible, 12000);
             }
             return 0;
         }
@@ -384,7 +518,7 @@ internal static class App
                     return;
                 }
                 // 輪盤可見時，方向鍵／Enter／Esc 屬於輪盤（規格 §4.3 鍵盤表）
-                if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence))
+                if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence, runner))
                     return;
                 detector.OnKey(vk, isDown);
             };
@@ -482,6 +616,7 @@ internal static class App
         Native.GetCursorPos(out Native.POINT p);
 
         PayloadVerdict verdict = catalog.Classify(paths);
+        PendingPaths = paths;      // Enter 要用這一批（規格 §4.4：同一類別就全部轉）
         // 真實拖曳的檔案清單必須留證據（M1d 的批次輸出要用它；也讓「讀到什麼」可回溯）。
         // 格式與 WM_DROPFILES 路徑一致，S8 才能斷言「這一批就是被拖的那個檔」。
         foreach (string path in paths) evidence.Line($"    payload file: {path}");
@@ -507,8 +642,10 @@ internal static class App
 
     /// <summary>
     /// Enter：只有「有選項且不在拒絕狀態」才執行（規格 §4.3：混合選取要拒絕、只允許 Esc）。
+    /// M1d 起這裡是**真的會轉檔**：把輪盤的選擇交給 worker 行程，進度顯示在輪盤收起處（§4.4）。
     /// </summary>
-    private static bool CommitWheel(WheelPresenter presenter, ReleaseGuard guard, Evidence evidence)
+    private static bool CommitWheel(WheelPresenter presenter, ReleaseGuard guard, Evidence evidence,
+                                    ConversionRunner? runner = null)
     {
         if (!presenter.CanCommit)
         {
@@ -516,9 +653,110 @@ internal static class App
                           $"target={(presenter.SelectedTarget ?? "-")} (spec 4.3)");
             return false;
         }
-        evidence.Line($"ENTER: commit intent -> {presenter.SelectedTarget} (M1b records only)");
-        guard.OnUserResolved("enter");
+
+        string target = presenter.SelectedTarget!;
+        string[] paths = PendingPaths;
+        var (centerX, centerY) = presenter.CenterOnScreen;
+        evidence.Line($"ENTER: commit -> {target}, files={paths.Length}, " +
+                      $"wheelCenter=({centerX},{centerY}) (real conversion via worker, spec 9.1)");
+
+        guard.OnUserResolved("enter");      // 收起輪盤（收層是幂等的）
+
+        if (runner == null)
+        {
+            evidence.Line("ENTER: no conversion runner in this mode (diagnostic path)");
+            return true;
+        }
+        if (paths.Length == 0)
+        {
+            evidence.Line("ENTER: no payload paths recorded -> nothing to convert");
+            return true;
+        }
+
+        Settings settings = _settings ?? new Settings();
+        runner.Start(paths, target, settings.QualityFor(target), centerX, centerY);
+        PendingPaths = Array.Empty<string>();
         return true;
+    }
+
+    /// <summary>最近一次拖曳／注入的檔案清單——Enter 要靠它才知道要轉哪些檔。</summary>
+    private static string[] PendingPaths = Array.Empty<string>();
+
+    /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
+    private static Settings? _settings;
+
+    /// <summary>
+    /// 把進度那一行畫成 PNG（不需要畫面）。✓／✗ 這類符號若字型缺字會變成方框，
+    /// 只讀程式碼看不出來，所以要有辦法把它輸出成看得見的檔案。
+    /// </summary>
+    internal static int RunProgressDump(string directory, Evidence evidence)
+    {
+        try { Directory.CreateDirectory(directory); }
+        catch (Exception ex)
+        {
+            evidence.Line($"progress-dump: cannot create {directory}: {ex.Message}");
+            return 10;
+        }
+
+        (string Name, string Text, int Done, int Total, bool Finished, int Failed, int Alpha)[] variants =
+        {
+            ("running",  "3/8",        3, 8, false, 0, 255),
+            ("success",  "✓ 8",        8, 8, true,  0, 255),
+            ("partial",  "✓ 8 / ✗ 2",  10, 10, true, 2, 255),
+            ("error",    "轉檔逾時",    1, 3, true,  2, 255),
+            ("faded",    "✓ 8",        8, 8, true,  0, 80),
+        };
+
+        int failed = 0;
+        foreach (var v in variants)
+        {
+            string path = Path.Combine(directory, $"progress-{v.Name}.png");
+            using Bitmap bitmap = ProgressPresenter.Compose(v.Text, v.Done, v.Total, v.Finished, v.Failed, v.Alpha);
+            bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            long size = new FileInfo(path).Length;
+            bool ok = size > 500;      // 空白圖會小很多（背景透明且沒有文字）
+            if (!ok) failed++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  progress '{v.Text}' rendered {bitmap.Width}x{bitmap.Height} " +
+                          $"-> {path} ({size}B)");
+        }
+
+        evidence.Line($"progress dump done: variants={variants.Length} failed={failed}");
+        return failed == 0 ? 0 : 7;
+    }
+
+    /// <summary>
+    /// M1d：不需要滑鼠就能跑完整條轉檔管線——**驗證必須靠這個，不是靠人工拖曳**。
+    /// 同時也是使用者可用的「命令列轉檔」入口（明天測試時很好用）。
+    /// </summary>
+    internal static int RunConvert(Options opt, Evidence evidence)
+    {
+        var registry = new CodecRegistry();
+        var journal = new TempJournal(TempJournal.DefaultPath());
+        int recovered = journal.RecoverStale();
+        evidence.Line($"temp journal: recovered {recovered} stale temp file(s) " +
+                      $"(spec 7.1: crash/power loss must not leave .tmp-* behind)");
+
+        var engine = new ConversionEngine(registry, evidence.Line);
+        string[] paths = opt.ConvertPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        string target = opt.ConvertTarget.ToUpperInvariant();
+
+        evidence.Line($"convert job: files={paths.Length} target={target} quality={opt.ConvertQuality} " +
+                      $"offered=[{string.Join(",", registry.OfferedOutputs)}]");
+
+        var results = new List<ConversionResult>();
+        foreach (string path in paths)
+        {
+            ConversionResult result = engine.Convert(path, target, opt.ConvertQuality, journal);
+            results.Add(result);
+            evidence.Line(result.Ok
+                ? $"convert result: Ok source={result.SourcePath} output={result.OutputPath} detail={result.Detail}"
+                : $"convert result: Fail error={result.Error} source={result.SourcePath} " +
+                  $"message={result.UserMessage} detail={result.Detail}");
+        }
+
+        var summary = new ConversionSummary(results);
+        evidence.Line($"convert summary: {summary.Line}  (ok={summary.Ok} failed={summary.Failed})");
+        return summary.AllOk ? 0 : 9;
     }
 
     /// <summary>
@@ -553,11 +791,23 @@ internal static class App
                    c is { CanEncode: true, Decode: DecodeSupport.Yes });
         }
 
-        // 可輸出的集合必須**正好**是量到的那些。多一個就是假承諾（選了會失敗）；
-        // 少一個代表探測本身有問題。日後真的打包 libwebp 時，這行必須連同能力一起改。
+        // 實際提供的輸出＝宣告 ∩ 實測。三條不變式都要成立，而且各自都能失敗：
+        //   ① offered ⊆ declared（多一個就是承諾了規格沒宣告的東西）
+        //   ② offered ⊆ measured（多一個就是承諾了機器做不到的事）
+        //   ③ declared = offered ∪ unavailable（宣告的每一個都必須有交代，不能默默消失）
         IReadOnlyList<string> encodable = registry.EncodableFormats;
-        bool exact = encodable.Count == builtin.Length && builtin.All(encodable.Contains);
-        Report($"encodable set is exactly the measured WIC set [{string.Join(",", encodable)}]", exact);
+        IReadOnlyList<string> offered = registry.OfferedOutputs;
+        string[] declared = { "PNG", "JPG", "WEBP", "BMP", "TIF" };
+        Report($"offered [{string.Join(",", offered)}] is a subset of the declared MVP matrix", offered.All(declared.Contains));
+        Report($"offered [{string.Join(",", offered)}] is a subset of what was measured", offered.All(encodable.Contains));
+        Report($"every declared output is either offered or reported unavailable " +
+               $"(unavailable=[{string.Join(",", registry.DeclaredButUnavailable)}])",
+               declared.All(f => offered.Contains(f) || registry.DeclaredButUnavailable.Contains(f)));
+
+        // 能力上可行、但規格沒宣告的：列出來，不准默默變成扇區
+        Report($"capable-but-not-declared outputs stay out of the wheel " +
+               $"([{string.Join(",", registry.CapableButNotDeclared)}])",
+               registry.CapableButNotDeclared.All(f => !offered.Contains(f)));
 
         // 儀器誠實性：探測必須能**回報失敗**。用一個保證不存在的路徑當反向對照——
         // 「永遠回報 Ok」的探測器比沒有探測器更危險（它會讓每個扇區都看起來可用）。
@@ -576,6 +826,9 @@ internal static class App
 
         evidence.Line($"codec probe summary: decodable=[{string.Join(",", registry.DecodableFormats)}] " +
                       $"encodable=[{string.Join(",", encodable)}] " +
+                      $"offered=[{string.Join(",", offered)}] " +
+                      $"capable-not-declared=[{string.Join(",", registry.CapableButNotDeclared)}] " +
+                      $"declared-unavailable=[{string.Join(",", registry.DeclaredButUnavailable)}] " +
                       $"inputs=[{string.Join(",", registry.InputFormats)}] " +
                       $"heifExtension={CodecRegistry.HeifExtensionState()}");
         evidence.Line($"codec probe done: failed={failed}");
@@ -649,7 +902,8 @@ internal static class App
     }
 
     /// <summary>輪盤可見時接管方向鍵／Enter／Esc；回傳 true 表示這個鍵已屬於輪盤。</summary>
-    private static bool HandleWheelKey(uint vk, WheelPresenter presenter, ReleaseGuard guard, Evidence evidence)
+    private static bool HandleWheelKey(uint vk, WheelPresenter presenter, ReleaseGuard guard, Evidence evidence,
+                                       ConversionRunner runner)
     {
         switch (vk)
         {
@@ -660,12 +914,12 @@ internal static class App
                 presenter.SelectNext(+1);
                 return true;
             case Native.VK_RETURN:
-                // M1b 只記錄意圖，不轉檔；真正的執行在 M1d 之後
-                CommitWheel(presenter, guard, evidence);
+                // M1d 起：真的轉檔（交給 worker 行程）
+                CommitWheel(presenter, guard, evidence, runner);
                 return true;
             case Native.VK_ESCAPE:
-                // 規格 §4.3：Esc 立即收起；§4.2.3 的保底語意在 M1d 實作
-                evidence.Line("ESC: cancel (fallback semantics land in M1d)");
+                // 規格 §4.3：Esc 立即收起（已開始的轉檔不因此中斷：取消是另外一個語意）
+                evidence.Line("ESC: cancel (wheel dismissed; a running job keeps going)");
                 guard.OnUserResolved("escape");
                 return true;
             default:
