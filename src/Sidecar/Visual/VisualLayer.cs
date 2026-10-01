@@ -27,14 +27,15 @@ internal sealed class VisualLayer : IDisposable
     private static readonly Dictionary<IntPtr, VisualLayer> Instances = new();
     /// <summary>週期性回呼（進度顯示的淡出與重畫用）。只有需要時才啟動計時器。</summary>
     public event Action? TickRequested;
-    private const int TickTimerId = 1;
-    private bool _tickRunning;
+    private System.Threading.Timer? _tickTimer;
     private bool _visible;
     private int _frames;
 
     public IntPtr Handle => _hwnd;
     public bool IsVisible => _visible;
     public int Frames => _frames;
+    /// <summary>診斷用：週期回呼的計時器是否還活著（null＝已被停掉）。</summary>
+    public bool TickAlive => _tickTimer != null;
 
     public VisualLayer(Evidence evidence)
     {
@@ -173,8 +174,7 @@ internal sealed class VisualLayer : IDisposable
             layer._evidence.Line($"visual layer HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
             return IntPtr.Zero;
         }
-        if (msg == Native.WM_TIMER && wParam.ToInt64() == TickTimerId &&
-            Instances.TryGetValue(hWnd, out VisualLayer? ticking))
+        if (msg == Native.WM_APP_TICK && Instances.TryGetValue(hWnd, out VisualLayer? ticking))
         {
             ticking.TickRequested?.Invoke();
             return IntPtr.Zero;
@@ -190,20 +190,23 @@ internal sealed class VisualLayer : IDisposable
     {
         if (intervalMs <= 0)
         {
-            if (_tickRunning)
-            {
-                Native.KillTimer(_hwnd, new IntPtr(TickTimerId));
-                _tickRunning = false;
-            }
+            _tickTimer?.Dispose();
+            _tickTimer = null;
             return;
         }
-        Native.KillTimer(_hwnd, new IntPtr(TickTimerId));
-        Native.SetTimer(_hwnd, new IntPtr(TickTimerId), (uint)intervalMs, IntPtr.Zero);
-        _tickRunning = true;
+        _tickTimer?.Dispose();
+        // 執行緒計時器 + PostMessage，不經 SetTimer/WM_TIMER（見 Native.WM_APP_TICK）。
+        // 這是防禦性選擇，不是任何已知 bug 的修法；好處是回呼次數可以被斷言。
+        IntPtr hwnd = _hwnd;
+        _tickTimer = new System.Threading.Timer(
+            _ => Native.PostMessageW(hwnd, Native.WM_APP_TICK, IntPtr.Zero, IntPtr.Zero),
+            null, intervalMs, intervalMs);
     }
 
     public void Dispose()
     {
+        _tickTimer?.Dispose();
+        _tickTimer = null;
         Instances.Remove(_hwnd);
         Native.DestroyWindow(_hwnd);
         _evidence.Line($"visual layer disposed; frames={_frames}");

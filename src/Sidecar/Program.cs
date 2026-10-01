@@ -197,6 +197,8 @@ internal sealed class Options
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
     public string ProgressDump = "";
+    /// <summary>--progress-trace：記錄每一次週期回呼的決策（診斷淡出卡住用）。</summary>
+    public bool ProgressTrace = false;
     /// <summary>--settings-probe <path>：載入指定的設定檔並印出夾制後的結果（驗證 §8 的範圍規則）。</summary>
     public string SettingsProbe = "";
     public int WheelSimulateCycles;
@@ -255,6 +257,9 @@ internal sealed class Options
                     break;
                 case "--settings-probe":
                     if (i + 1 < args.Length) { o.SettingsProbe = args[i + 1]; i++; }
+                    break;
+                case "--progress-trace":
+                    o.ProgressTrace = true;
                     break;
                 case "--wheel-payload":
                     if (i + 1 < args.Length) { o.WheelPayload = args[i + 1]; i++; }
@@ -386,7 +391,7 @@ internal static class App
         // 進度層（規格 §4.4）同樣預先建立：轉檔開始時不可以再多花一次建視窗的成本，
         // 而且它必須與輪盤**分開**——輪盤收起後那一行進度還要留在原位置。
         using var progressLayer = new VisualLayer(evidence);
-        using var progress = new ProgressPresenter(evidence, progressLayer);
+        using var progress = new ProgressPresenter(evidence, progressLayer, opt.ProgressTrace);
         // runner 一定要釋放：它擁有 worker 行程與管道（Dispose 會送 shutdown 並確保 worker 收掉）
         using var runner = new ConversionRunner(Environment.ProcessPath ?? "Sidecar.exe", evidence.Line, progress);
         // 格式能力探測也要**預先做**：第一次使用 WPF/WIC 會載入 PresentationCore，
@@ -460,6 +465,11 @@ internal static class App
             // 拒絕狀態（混合選取／不支援）下 Enter 必須不執行，而且輪盤要留在畫面上等 Esc。
             if (opt.WheelDump != null) presenter.DumpTo(opt.WheelDump);
             bool committed = CommitWheel(presenter, guard, evidence, runner);
+            // 診斷用：確定性地重現「第一次回呼來得太晚」這個時序（見 ProgressPresenter.Update）。
+            // CommitWheel -> ConversionClient.Start 會為了等 worker 連線而擋住 UI 執行緒，
+            // 而 worker 的實際工作只要幾毫秒；再睡一下，就保證第一個回呼看到的是「已完成」。
+            // 少了這一段，這條路徑只有大約 1/6 的機率踩到（S12.10d 就是這樣漏掉的）。
+            if (committed) Thread.Sleep(600);
             if (committed) PumpUntil(() => !presenter.IsVisible, 500);
             evidence.Line($"payload enter attempt: committed={committed} wheelVisibleAfter={presenter.IsVisible}");
 

@@ -69,6 +69,12 @@ internal sealed class PipeLink : IDisposable
                 await writer.FlushAsync().ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException)
+        {
+            // 正常的收工：Dispose 會取消 token。**這不是錯誤**——寫成錯誤會讓日誌看起來像壞掉
+            //（上一個工作的 client 被釋放時就會出現這一行）。
+            _log("pipe: write loop stopped (link disposed)");
+        }
         catch (Exception ex)
         {
             _log($"pipe: write loop ended: {ex.GetType().Name}: {ex.Message}");

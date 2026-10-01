@@ -27,6 +27,8 @@ internal sealed class ProgressPresenter : IDisposable
     private int _x, _y;
     private bool _shown;
     private bool _started;
+    private int _tickCount;
+    private readonly bool _trace;              // --progress-trace：每次回呼的決策（診斷用）
     private int _updates;
     private ConversionSnapshot _last = ConversionSnapshot.Idle;
     private System.Diagnostics.Stopwatch? _finishedAt;
@@ -37,11 +39,12 @@ internal sealed class ProgressPresenter : IDisposable
     /// </summary>
     public Func<ConversionSnapshot>? Source { get; set; }
 
-    public ProgressPresenter(Evidence evidence, VisualLayer layer)
+    public ProgressPresenter(Evidence evidence, VisualLayer layer, bool trace = false)
     {
         _evidence = evidence;
         _layer = layer;
-        _layer.TickRequested += Tick;      // 用 SetTimer 驅動，不用輪詢迴圈
+        _trace = trace;
+        _layer.TickRequested += Tick;      // 由圖層的週期回呼驅動，不用輪詢迴圈
     }
 
     public bool IsVisible => _layer.IsVisible;
@@ -58,6 +61,7 @@ internal sealed class ProgressPresenter : IDisposable
         _shown = false;
         _started = true;
         _updates = 0;
+        _tickCount = 0;
         _finishedAt = null;
         _last = ConversionSnapshot.Idle;
         _layer.StartTick(80);
@@ -67,15 +71,30 @@ internal sealed class ProgressPresenter : IDisposable
     public void Update(ConversionSnapshot snapshot)
     {
         if (snapshot == _last && _shown) return;
-        bool justFinished = snapshot.Finished && !_last.Finished;
         _last = snapshot;
-        if (justFinished) _finishedAt = System.Diagnostics.Stopwatch.StartNew();
+        // 淡出時鐘：**第一次畫出「已完成」的那一幀**就開始計時，不靠狀態邊緣。
+        //
+        // 這裡原本寫成 justFinished = snapshot.Finished && !_last.Finished，是個定時炸彈：
+        // 本方法的初始狀態是 ConversionSnapshot.Idle，而 Idle.Finished 本來就是 true
+        // （Idle 的意思是「沒事做」）。所以只要**第一次回呼發生在轉檔已經結束之後**，
+        // 那個邊緣就永遠不會出現 → _finishedAt 永遠是 null → 進度那一行永遠不淡出。
+        // 這個情況不是理論：UI 執行緒在 ConversionClient.Start 等 worker 連線時被擋住
+        // 約 300 ms，而 worker 的實際工作是 3–8 ms，所以經常「回呼來得太晚」。
+        // 2026-10-01 由 S12.10d 抓到（當時 6 次出現 1 次）；--progress-trace 的 elapsed=-
+        // 是決定性證據。改成本條件後與時序無關。
+        if (snapshot.Finished && _finishedAt == null)
+            _finishedAt = System.Diagnostics.Stopwatch.StartNew();
         RedrawAlpha(255);
     }
 
     /// <summary>淡出與收尾；同時負責去來源拉最新狀態（唯一的驅動來源）。</summary>
     private void Tick()
     {
+        _tickCount++;
+        if (_trace)
+            _evidence.Line($"progress tick #{_tickCount} started={_started} shown={_shown} " +
+                           $"finished={_last.Finished} elapsed={_finishedAt?.ElapsedMilliseconds.ToString() ?? "-"} " +
+                           $"timerAlive={_layer.TickAlive}");
         if (!_started) return;
 
         if (Source != null) Update(Source());     // Update 內部有「沒變就不重畫」的守衛
@@ -88,7 +107,7 @@ internal sealed class ProgressPresenter : IDisposable
             if (elapsed >= hold + FadeOutMs)
             {
                 _evidence.Line($"progress: hiding after {elapsed} ms " +
-                               $"(updates={_updates}, hold={hold} ms)");
+                               $"(updates={_updates}, ticks={_tickCount}, hold={hold} ms)");
                 _layer.Hide();
                 _layer.StartTick(0);
                 _shown = false;

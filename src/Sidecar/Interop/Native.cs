@@ -100,6 +100,18 @@ internal static class Native
     public const uint WM_DROPFILES = 0x0233;
     /// <summary>自訂訊息：要求接收層收起（WM_APP + 1）。跨執行緒一律走這條，不直接呼叫 ShowWindow。</summary>
     public const uint WM_APP_FORCE_HIDE = 0x8001;
+
+    /// <summary>
+    /// 自訂訊息：週期回呼（進度顯示的淡出）。
+    /// 由執行緒計時器 PostMessage 進來，**不經 SetTimer/WM_TIMER**：WM_TIMER 是低優先權的
+    /// 合成訊息（佇列一忙就不被產生），而張貼的訊息是真實的佇列項目。
+    /// 注意：這是**防禦性選擇，不是某個 bug 的修法** —— 2026-10-01 那次「進度卡住不淡出」
+    /// 的真因是淡出時鐘（見 ProgressPresenter.Update），換掉計時器並沒有修好它。
+    /// 留著它的理由是它讓回呼次數可被斷言（S12.10d2），真的被餓死時看得出來。
+    /// </summary>
+    public const uint WM_APP_TICK = 0x8002;
+
+    /// <summary>保留作為對照：這個常數已不再是週期回呼的驅動來源。</summary>
     public const uint WM_TIMER = 0x0113;
 
     // ---- 計時器 ----

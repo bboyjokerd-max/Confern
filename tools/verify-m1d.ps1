@@ -175,6 +175,23 @@ if ($payloadText -match 'progress instrument: updates=(\d+) frames=(\d+) visible
   Check 'S12.10c frames == updates (same window, no line spam)' ($Matches[1] -eq $Matches[2]) "updates=$($Matches[1]) frames=$($Matches[2])"
 }
 Check 'S12.10d progress faded out on its own' ($payloadText -match 'progress faded out on its own: True') ''
+# The fade has exactly ONE driver: the layer's periodic callback. If that callback is
+# starved (the old SetTimer/WM_TIMER version was), the line stays on screen forever.
+# So "it faded" is not enough: prove the callback kept ticking for the whole window.
+# 2.4 s at 80 ms is ~30 ticks; the threshold is 10, which catches a collapsed chain.
+# NOTE: keep this file ASCII-only. Raw CJK in a BOM-less .ps1 makes PS 5.1 misparse
+# the following statement (the CJK bytes are decoded as ANSI).
+$hideLines = @([regex]::Matches($payloadText, 'progress: hiding after \d+ ms \(updates=(\d+), ticks=(\d+), hold='))
+if ($hideLines.Count -ge 2) {
+  $tickCounts = @($hideLines | ForEach-Object { [int]$_.Groups[2].Value })
+  $updateCounts = @($hideLines | ForEach-Object { [int]$_.Groups[1].Value })
+  Check 'S12.10d2 tick driver ran the whole fade (not starved) on both conversions' `
+        (($tickCounts | Where-Object { $_ -lt 10 }).Count -eq 0) "ticks=$($tickCounts -join ',')"
+  Check 'S12.10d3 both fades repainted the same line (>= 3 alpha steps)' `
+        (($updateCounts | Where-Object { $_ -lt 3 }).Count -eq 0) "updates=$($updateCounts -join ',')"
+} else {
+  Inconclusive 'S12.10d2 tick driver ran the whole fade' "only $($hideLines.Count) hiding line(s)"
+}
 Check 'S12.10e no worker timeout (regression: pipe deadlock)' (-not ($payloadText -match 'timed out')) ''
 Check 'S12.10f worker reported ready' ((Get-Content -LiteralPath $workerLog -Encoding UTF8 | Select-String -Pattern 'worker: ready protocolVersion=1') -ne $null) ''
 Check 'S12.10g no leftover worker process' (@(Get-Process -Name Sidecar -ErrorAction SilentlyContinue).Count -eq 0) ''
