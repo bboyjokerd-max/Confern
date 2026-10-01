@@ -45,8 +45,23 @@ internal sealed record ConversionSummary(IReadOnlyList<ConversionResult> Results
     public int Failed => Results.Count - Ok;
     public bool AllOk => Failed == 0;
 
-    /// <summary>單行摘要。全成功就只顯示成功數，有失敗才顯示 `✓ N / ✗ M`。</summary>
-    public string Line => AllOk ? $"✓ {Ok}" : $"✓ {Ok} / ✗ {Failed}";
+    /// <summary>
+    /// 完成後那一行的**唯一規則**（畫面＝輪盤收起處）。兩個呼叫端共用它，
+    /// 不允許任何地方再自己拼一次：
+    ///   全成功   → `✓ N`
+    ///   全失敗   → 規格 §7.1 的訊息（例：`broken.png 無法解碼`）——原因一定要到畫面上，
+    ///              只給 `✓ 0 / ✗ 1` 等於使用者看不到原因，踩到「不得靜默失敗」的紅線
+    ///   部分失敗 → 規格 §7.3 的 `✓ N / ✗ M`（點擊展開清單尚未實作）
+    /// </summary>
+    public static string ComposeLine(int ok, int failed, IReadOnlyList<string> failures)
+    {
+        if (failed == 0) return $"✓ {ok}";
+        if (ok == 0 && failures.Count > 0)
+            return failures.Count == 1 ? failures[0] : $"{failures[0]}（共 {failed} 個）";
+        return $"✓ {ok} / ✗ {failed}";
+    }
+
+    public string Line => ComposeLine(Ok, Failed, Failures.Select(r => r.UserMessage).ToList());
 
     public IEnumerable<ConversionResult> Failures => Results.Where(r => !r.Ok);
 }

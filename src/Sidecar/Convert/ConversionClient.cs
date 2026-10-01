@@ -22,7 +22,10 @@ internal sealed record ConversionSnapshot(int Done, int Total, string? Current, 
         {
             if (Error != null) return Error;
             if (!Finished) return Total > 0 ? $"{Done}/{Total}" : "…";
-            return Failed == 0 ? $"✓ {Ok}" : $"✓ {Ok} / ✗ {Failed}";
+            // 規則只有一份：ConversionSummary.ComposeLine。這裡曾經自己再拼一次
+            // `Failed == 0 ? ✓ : ✓ N / ✗ M`，於是規格 §7.1 的失敗原因（「無法解碼」）
+            // 永遠到不了畫面（2026-10-01 由人工測試抓到）。
+            return ConversionSummary.ComposeLine(Ok, Failed, Failures);
         }
     }
 }

@@ -19,6 +19,7 @@ internal sealed class ProgressPresenter : IDisposable
     private const int FailureHoldMs = 5000;  // 有失敗時留久一點（使用者要看得見 ✗ 幾個）
     private const int FadeOutMs = 350;
     private const int BitmapWidth = 168;
+    private const int HorizontalPadding = 14;
     private const int BitmapHeight = 54;
 
     private readonly VisualLayer _layer;
@@ -126,7 +127,7 @@ internal sealed class ProgressPresenter : IDisposable
     {
         using Bitmap bitmap = Compose(_last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed, alpha);
         // 以輪盤中心對齊，往上偏一點，避免正好壓在游標下方
-        _layer.Show(_x - BitmapWidth / 2, _y - BitmapHeight / 2, bitmap);
+        _layer.Show(_x - bitmap.Width / 2, _y - bitmap.Height / 2, bitmap);
         _shown = true;
         _updates++;
         _evidence.Line($"progress: {_last.Line} done={_last.Done}/{_last.Total} " +
@@ -147,7 +148,17 @@ internal sealed class ProgressPresenter : IDisposable
     /// </summary>
     public static Bitmap Compose(string text, int done, int total, bool finished, int failed, int alpha)
     {
-        var bitmap = new Bitmap(BitmapWidth, BitmapHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using var font = MakeFont(15f);
+        // 寬度依文字量測：規格 §7.1 的失敗訊息（`broken.png 無法解碼`）比 `✓ 1` 長得多，
+        // 固定寬度會把它裁掉 —— 那就等於使用者看不到原因。
+        int width;
+        using (var measureBitmap = new Bitmap(1, 1))
+        using (var measure = Graphics.FromImage(measureBitmap))
+        {
+            float needed = measure.MeasureString(text, font).Width;
+            width = Math.Max(BitmapWidth, (int)Math.Ceiling(needed) + HorizontalPadding * 2);
+        }
+        var bitmap = new Bitmap(width, BitmapHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bitmap);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
@@ -158,13 +169,12 @@ internal sealed class ProgressPresenter : IDisposable
             ? Color.FromArgb((int)(236 * a / 255), 150, 40, 40)
             : Color.FromArgb((int)(236 * a / 255), 24, 26, 32);
 
-        using (var path = RoundedRect(new RectangleF(1, 1, BitmapWidth - 2, BitmapHeight - 2), 12f))
+        using (var path = RoundedRect(new RectangleF(1, 1, width - 2, BitmapHeight - 2), 12f))
         using (var brush = new SolidBrush(pill))
         {
             g.FillPath(brush, path);
         }
 
-        using (var font = MakeFont(15f))
         using (var textBrush = new SolidBrush(Color.FromArgb(a, 245, 247, 250)))
         using (var format = new StringFormat
         {
@@ -173,13 +183,13 @@ internal sealed class ProgressPresenter : IDisposable
         })
         {
             g.DrawString(text, font, textBrush,
-                         new RectangleF(0, 2, BitmapWidth, BitmapHeight - 14), format);
+                         new RectangleF(0, 2, width, BitmapHeight - 14), format);
         }
 
         // 底部細長進度條：完成比例一目了然（沒有 total 時不畫，避免假的 100%）
         if (total > 0)
         {
-            var track = new RectangleF(12, BitmapHeight - 9, BitmapWidth - 24, 3);
+            var track = new RectangleF(12, BitmapHeight - 9, width - 24, 3);
             using (var trackBrush = new SolidBrush(Color.FromArgb((int)(90 * a / 255), 255, 255, 255)))
                 g.FillRectangle(trackBrush, track);
 
