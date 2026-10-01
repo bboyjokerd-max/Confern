@@ -27,3 +27,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-m1def-conversion/90-evidence.md | M1d/M1e/M1f-lite evidence: real conversion, 41/41 regression, pipe deadlock and crash fixes |
 | 2026-10-01 | artifact | docs/TEST-PLAN-M1-first-run.md | 人工測試清單（17 項＋附錄）：明天驗證初版用 |
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-progress-fade-stall/90-evidence.md | 進度卡住不淡出：真因是淡出時鐘（Idle.Finished=true 讓邊緣判定失效），含一次錯誤的 WM_TIMER 根因宣告與否證 |
+| 2026-10-01 | plan | docs/aegis/plans/2026-10-01-ui-redesign.md | UI redesign plan: radial wheel glass direction D |
+| 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/10-intent.md | Wheel impl slice card and readiness view (plan 5.3) |
+| 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/20-checkpoint.md | Wheel impl checkpoint: files, decisions, remaining gaps |
+| 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/90-evidence.md | Wheel impl evidence: 16/16 frame checks, regression, S4.2 finding |
