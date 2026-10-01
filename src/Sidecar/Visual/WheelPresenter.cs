@@ -12,20 +12,18 @@ namespace Sidecar;
 ///   - **不判斷副檔名、不知道格式矩陣**——目標格式清單由外部傳入（M1c 的 <c>CodecRegistry</c> 才是格式知識來源）
 ///   - **不決定收起**——收起一律由 <see cref="ReleaseGuard"/> 決定
 ///   - 不與 <see cref="HitLayer"/> 直接互動
+///
+/// 視覺＝方向 **D「冷鋼薄荷・對比加強」**（2026-10-01 拍板）。設計權杖在 <see cref="WheelDesign"/>，
+/// 玻璃快照在 <see cref="GlassSurface"/>，幾何在 <see cref="WheelGeometry"/>。本檔只負責**畫**。
+///
+/// ⚠ **alpha 語意紅線**（實測踩過，見 `docs/aegis/work/2026-10-01-glass-spike/91-round2-d-palette.md` §1）：
+/// alpha &lt; 255 的像素，RGB 不可含背景。本檔以**建構方式**保證這件事：
+///   1. 圓盤外的柔暈／投影 ⇒ 畫在透明點陣圖上的純圖層（只有顏色與 alpha，沒有背景）
+///   2. 圓盤本體 ⇒ 先用**不透明的**模糊桌布填滿路徑，再疊**不透明的**薄罩 ⇒ 該區域 alpha 恆為 255
+/// 不要為了「省一點透明度」把背景畫到圓盤外的圖層上，那會讓薄罩被 DWM 再合成一次而精確抵銷。
 /// </summary>
 internal sealed class WheelPresenter
 {
-    private static readonly Color[] Palette =
-    {
-        Color.FromArgb(236, 33, 150, 243),   // blue
-        Color.FromArgb(236, 76, 175, 80),    // green
-        Color.FromArgb(236, 255, 152, 0),    // amber
-        Color.FromArgb(236, 156, 39, 176),   // purple
-        Color.FromArgb(236, 233, 30, 99),    // pink
-        Color.FromArgb(236, 0, 188, 212),    // cyan
-        Color.FromArgb(236, 255, 87, 34)     // deep orange
-    };
-
     private readonly Evidence _evidence;
     private readonly VisualLayer _layer;
 
@@ -37,6 +35,15 @@ internal sealed class WheelPresenter
     private int _cursorX, _cursorY;
     private int _originX, _originY;      // 目前的視窗原點（滑鼠命中要用它反推圓心）
     private MonitorEntry? _monitor;
+
+    /// <summary>玻璃底材。**每輪拖曳只抓一次**，顯示期間的重畫全部重用（抓一次＝一個 vblank，16.67 ms）。</summary>
+    private GlassSurface? _glass;
+
+    /// <summary>底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布，供可重現的驗收）。</summary>
+    private readonly string _backdrop;
+
+    /// <summary>來源檔案的縮圖（穿透中心鏤空）。**由呼叫端擁有**，這裡只讀不釋放；null 時畫佔位圖。</summary>
+    private Bitmap? _sourceThumbnail;
 
     public bool IsVisible => _layer.IsVisible;
     public int Selected => _selected;
@@ -51,10 +58,17 @@ internal sealed class WheelPresenter
     /// <summary>規格 §4.3：拒絕狀態下 Enter 不執行，只允許 Esc。</summary>
     public bool CanCommit => _notice == null && _targets.Count > 0;
 
-    public WheelPresenter(Evidence evidence, VisualLayer layer)
+    /// <summary>鍵帽上顯示的按鍵名（預設空白鍵）。由 <see cref="Program"/> 依實際觸發鍵設定。</summary>
+    public string TriggerKeyLabel { get; set; } = "space";
+
+    /// <summary>診斷：最近一次玻璃底材的來源描述（null＝沒有底材，走純色 fallback）。</summary>
+    public string? GlassSource => _glass?.Source;
+
+    public WheelPresenter(Evidence evidence, VisualLayer layer, string backdrop = "screen")
     {
         _evidence = evidence;
         _layer = layer;
+        _backdrop = backdrop;
     }
 
     /// <summary>
@@ -63,7 +77,7 @@ internal sealed class WheelPresenter
     /// </summary>
     public void Show(int cursorX, int cursorY, string sourceFormat, IReadOnlyList<string> targets,
                      int selected = 0, Func<int, string?>? preview = null, string? notice = null,
-                     MonitorEntry[]? monitors = null)
+                     MonitorEntry[]? monitors = null, Bitmap? sourceThumbnail = null)
     {
         _cursorX = cursorX;
         _cursorY = cursorY;
@@ -72,9 +86,14 @@ internal sealed class WheelPresenter
         _selected = targets.Count > 0 ? Math.Clamp(selected, 0, targets.Count - 1) : 0;
         _preview = preview;
         _notice = notice;
+        _sourceThumbnail = sourceThumbnail;
 
         var all = monitors ?? MonitorLayout.Enumerate();
         _monitor = MonitorLayout.Nearest(cursorX, cursorY, all);
+
+        // ⚠ 順序是契約：**先抓玻璃，再顯示**。視覺層一旦可見，抓到的就是輪盤自己
+        //   （分層視窗會出現在畫面上），而且這個錯誤不會拋例外，只會讓畫面「有點怪」。
+        RefreshGlass();
 
         using var bmp = Compose(out int ox, out int oy);
         _layer.Show(ox, oy, bmp);
@@ -87,6 +106,46 @@ internal sealed class WheelPresenter
                        $"size={bmp.Width}x{bmp.Height} source={_sourceFormat} " +
                        $"targets=[{string.Join(",", _targets)}] selected={_selected} " +
                        $"notice={(notice ?? "-")} preview={(_preview?.Invoke(_selected) ?? "-")}");
+    }
+
+    /// <summary>
+    /// 取得這一輪的玻璃底材。**每輪只做一次**，而且必須在視覺層顯示前呼叫。
+    ///
+    /// 為什麼不是「非同步事後補」：抓螢幕要 16.67 ms（一個 vblank，與面積無關），
+    /// 但非同步的抓取會在視覺層已經顯示之後才執行，拍到的就是輪盤自己。
+    /// 所以改成同步一次、只付一次（首次顯示仍在 100 ms 預算內，見計畫 §4.1）。
+    /// </summary>
+    private void RefreshGlass()
+    {
+        _glass?.Dispose();
+        _glass = null;
+
+        int w = WheelGeometry.BitmapWidthPx;
+        int h = WheelGeometry.BitmapHeightPx;
+
+        if (string.Equals(_backdrop, "dark", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(_backdrop, "light", StringComparison.OrdinalIgnoreCase))
+        {
+            _glass = GlassSurface.Synthetic(_backdrop, w, h);
+        }
+        else
+        {
+            var work = _monitor?.Work ?? new Native.RECT { Left = 0, Top = 0, Right = w * 4, Bottom = h * 4 };
+            var (wx, wy) = WheelGeometry.FlipEdge(_cursorX, _cursorY, work);
+            var (ox, oy) = WheelGeometry.WindowOrigin(wx, wy);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            _glass = GlassSurface.CaptureFromScreen(ox, oy, w, h);
+            clock.Stop();
+            if (_glass == null)
+                _evidence.Line("glass capture FAILED -> solid fallback (DRM/safe desktop/no interactive desktop)");
+            else
+                _evidence.Line($"glass captured in {clock.Elapsed.TotalMilliseconds:F1} ms " +
+                               "(one-off per drag; every repaint reuses this surface)");
+        }
+
+        if (_glass != null)
+            _evidence.Line($"glass ready source={_glass.Source} meanLuma={_glass.MeanLuma:F0} " +
+                           $"glow={(WheelDesign.IsLightBackdrop(_glass.MeanLuma) ? "teal(light backdrop)" : "mint(dark backdrop)")}");
     }
 
     /// <summary>環狀切換選中扇區並重畫（規格 §4.3：←→↑↓）。</summary>
@@ -132,9 +191,8 @@ internal sealed class WheelPresenter
     {
         get
         {
-            double cx = _originX + WheelGeometry.BoxOriginInBitmapPx + WheelGeometry.BoxPx / 2.0;
-            double cy = _originY + WheelGeometry.BoxOriginInBitmapPx + WheelGeometry.BoxPx / 2.0;
-            return ((int)Math.Round(cx), (int)Math.Round(cy));
+            int c = WheelGeometry.CenterInBitmapPx;
+            return (_originX + c, _originY + c);
         }
     }
 
@@ -143,6 +201,13 @@ internal sealed class WheelPresenter
         if (!_layer.IsVisible) return;
         _layer.Hide();
         _evidence.Line("wheel hidden");
+    }
+
+    /// <summary>釋放底材。輪盤收起後就沒有理由留著一張模糊桌布（約 0.5 MB）。</summary>
+    public void ReleaseGlass()
+    {
+        _glass?.Dispose();
+        _glass = null;
     }
 
     /// <summary>
@@ -163,6 +228,19 @@ internal sealed class WheelPresenter
         _evidence.Line($"wheel frame dumped to {path} ({flat.Width}x{flat.Height}, flattened onto #202226)");
     }
 
+    /// <summary>
+    /// 同上，但**保留 alpha**。這是驗 alpha 語意紅線唯一的方式：
+    /// 扁平化之後「圓盤本體是否 alpha=255」「圓盤外是否為純圖層」都看不出來，
+    /// 而這兩件事正是這個設計能被正確合成的全部理由（見類別註解）。
+    /// </summary>
+    public void DumpRawTo(string path)
+    {
+        using var frame = Compose(out _, out _);
+        frame.Save(path, ImageFormat.Png);
+        _evidence.Line($"wheel frame (raw ARGB, alpha preserved) dumped to {path} " +
+                       $"({frame.Width}x{frame.Height})");
+    }
+
     private void Repaint()
     {
         using var bmp = Compose(out int ox, out int oy);
@@ -177,114 +255,350 @@ internal sealed class WheelPresenter
         using var g = Graphics.FromImage(bmp);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.CompositingMode = CompositingMode.SourceOver;
+        g.CompositingQuality = CompositingQuality.HighQuality;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         // ClearType 是次像素渲染、不寫 alpha；在 layered window 上會出現黑邊。必須用灰階反鋸齒。
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
         g.Clear(Color.Transparent);
 
         var work = _monitor?.Work ?? new Native.RECT { Left = 0, Top = 0, Right = w * 4, Bottom = h * 4 };
-        var (boxX, boxY) = WheelGeometry.FlipEdge(_cursorX, _cursorY, WheelGeometry.BoxPx, work);
-        (originX, originY) = WheelGeometry.WindowOrigin(boxX, boxY);
+        var (wheelX, wheelY) = WheelGeometry.FlipEdge(_cursorX, _cursorY, work);
+        (originX, originY) = WheelGeometry.WindowOrigin(wheelX, wheelY);
 
-        int boxOriginInBmp = WheelGeometry.BoxOriginInBitmapPx;
-        // 翻邊後點陣圖內的游標位置會跟著位移
-        float cursorInBmpX = _cursorX - originX;
-        float cursorInBmpY = _cursorY - originY;
+        float c = WheelGeometry.CenterInBitmapPx;
+        float r = WheelGeometry.DiameterPx / 2f;
 
-        float cx = boxOriginInBmp + WheelGeometry.BoxPx / 2f;
-        float cy = boxOriginInBmp + WheelGeometry.BoxPx / 2f;
+        // 玻璃（柔暈＋投影＋圓盤本體）。扇區、文字、膠囊都疊在它上面。
+        DrawGlass(g, c, c, r);
 
-        DrawGhostCard(g, cursorInBmpX, cursorInBmpY);
+        // 鬼影卡畫在玻璃**之後**：它落在圓盤外，但會與柔暈重疊，
+        // 若先畫就會被柔暈染上一層薄荷／深青（卡片是前景 UI，不該被背景暈影響）。
+        DrawGhostCard(g, WheelGeometry.CursorInBitmapPx, WheelGeometry.CursorInBitmapPx);
 
-        if (_targets.Count == 0)
-        {
-            DrawEmptyWheel(g, cx, cy);
-        }
-        else
-        {
-            DrawWheel(g, cx, cy);
-        }
+        if (_targets.Count == 0) DrawEmptyWheel(g, c, c, r);
+        else DrawWheel(g, c, c, r);
 
-        DrawCenter(g, cx, cy);
-        DrawPreview(g, boxOriginInBmp, cy + WheelGeometry.BoxPx / 2f);
+        DrawCenter(g, c, c);
+        DrawKeycap(g, c, c + r);
+        DrawPreview(g, c, c + r);
         return bmp;
     }
 
-    private void DrawWheel(Graphics g, float cx, float cy)
+    // ==================================================================
+    // 玻璃：柔暈／投影（純圖層）＋ 圓盤本體（不透明）
+    // ==================================================================
+
+    private void DrawGlass(Graphics g, float cx, float cy, float r)
+    {
+        double luma = _glass?.MeanLuma ?? 0.0;
+        Color glow = WheelDesign.Glow(luma);
+        double strength = WheelDesign.GlowStrength(luma);
+
+        // 1) 柔暈（由外而內疊加，累積值收斂到設計的強度）。
+        //    設計值：每圈 0.016 + 0.004*(14−k)，累積 ≈ 1 − e^(−0.588) ≈ 0.44。
+        double maxAcc = 1.0 - Math.Exp(-0.588 * strength);
+        DrawSoftRing(g, cx, cy, r + WheelDesign.GlowStartPx,
+                     WheelDesign.GlowRings * WheelDesign.GlowStepPx, WheelDesign.GlowRings, maxAcc, glow);
+
+        // 2) 柔投影（讓玻璃浮起來，而不是貼在桌布上）。淺色桌布要更重。
+        int shadowMax = WheelDesign.ShadowMax(luma);
+        DrawSoftRing(g, cx, cy, r, 26.0, 13, shadowMax / 255.0, Color.Black);
+
+        // 3) 圓盤本體：**不透明**。順序＝先鋪模糊桌布、再疊薄罩，兩者都不透明 ⇒ alpha 恆為 255。
+        using var disc = new GraphicsPath();
+        disc.AddEllipse(cx - r, cy - r, r * 2, r * 2);
+        if (_targets.Count > 0 && _selected >= 0 && _selected < _targets.Count)
+        {
+            // 選中扇區會凸出圓盤 4px（原型如此）。圓盤判定必須包含它，否則整條描邊會被裁掉。
+            float rr = r + WheelDesign.SelExpandPx;
+            double step = 360.0 / _targets.Count;
+            double sweep = WheelDesign.SweepDeg(_targets.Count);
+            float start = (float)(WheelGeometry.StartDeg + _selected * step + (step - sweep) / 2.0);
+            disc.AddPie(cx - rr, cy - rr, rr * 2, rr * 2, start, (float)sweep);
+        }
+
+        if (_glass != null)
+        {
+            using var tex = new TextureBrush(_glass.Blurred, WrapMode.Clamp);
+            g.FillPath(tex, disc);
+        }
+        else
+        {
+            using var solid = new SolidBrush(Color.FromArgb(255, 16, 19, 24));
+            g.FillPath(solid, disc);
+        }
+        using (var veil = new SolidBrush(WheelDesign.Veil))
+            g.FillPath(veil, disc);
+    }
+
+    /// <summary>
+    /// 由外而內疊出柔和的環狀漸層。<paramref name="spanPx"/> 是衰減的厚度，
+    /// <paramref name="maxAcc"/> 是最內側的**累積**不透明度（0–1）。
+    /// 每一圈的不透明度由「目標累積值」反推，所以疊出來的曲線與設計值一致，不會愈疊愈濃。
+    /// </summary>
+    private static void DrawSoftRing(Graphics g, float cx, float cy, float r, double spanPx,
+                                     int steps, double maxAcc, Color colour)
+    {
+        if (spanPx <= 0 || steps <= 0 || maxAcc <= 0) return;
+        double acc = 0;
+        for (int j = steps; j >= 1; j--)
+        {
+            double d = spanPx * j / steps;
+            double t = 1.0 - d / spanPx;
+            double target = maxAcc * t * t;
+            if (target <= acc) continue;
+            double a = 1.0 - (1.0 - target) / (1.0 - acc);
+            if (a <= 0.002) continue;
+            int alpha = Math.Clamp((int)Math.Round(a * 255), 0, 255);
+            float rr = r + (float)d;
+            using var brush = new SolidBrush(Color.FromArgb(alpha, colour));
+            g.FillEllipse(brush, cx - rr, cy - rr, rr * 2, rr * 2);
+            acc = 1.0 - (1.0 - acc) * (1.0 - a);
+        }
+    }
+
+    // ==================================================================
+    // 扇區與標籤
+    // ==================================================================
+
+    private void DrawWheel(Graphics g, float cx, float cy, float r)
     {
         int count = _targets.Count;
-        float sweep = (float)WheelGeometry.SweepDeg(count);
-        float r = WheelGeometry.DiameterPx / 2f;
+        double step = 360.0 / count;
+        double sweep = WheelDesign.SweepDeg(count);
+        float half = (float)((step - sweep) / 2.0);
 
+        // ① 外緣兩條髮絲線。**必須畫在扇區之前**：原型是 SVG 疊在玻璃之上，
+        //    不透明的選中扇區會蓋掉外緣線；畫在之後會橫切選中扇區，
+        //    與它的描邊之間夾一道填色細縫，看起來像「兩條線」（實測踩過）。
+        using (var rim = new Pen(WheelDesign.Rim, WheelDesign.RimPx))
+            g.DrawEllipse(rim, cx - r + WheelDesign.RimPx / 2f, cy - r + WheelDesign.RimPx / 2f,
+                          (r - WheelDesign.RimPx / 2f) * 2, (r - WheelDesign.RimPx / 2f) * 2);
+        using (var hair = new Pen(WheelDesign.InnerHair, WheelDesign.InnerHairPx))
+        {
+            float hr = r - 3.4f;
+            g.DrawEllipse(hair, cx - hr, cy - hr, hr * 2, hr * 2);
+        }
+
+        // ② 扇區
         for (int i = 0; i < count; i++)
         {
             bool sel = i == _selected;
-            float rr = r + (sel ? WheelGeometry.SelectedExtraPx : 0);
-            using var brush = new SolidBrush(Palette[i % Palette.Length]);
-            g.FillPie(brush, cx - rr, cy - rr, rr * 2, rr * 2,
-                (float)WheelGeometry.StartDeg + i * sweep, sweep - 1.5f);
+            float start = (float)(WheelGeometry.StartDeg + i * step + half);
+            if (sel)
+            {
+                float rr = r + WheelDesign.SelExpandPx;
+                using (var pen = new Pen(WheelDesign.SelStroke, WheelDesign.SelStrokePx))
+                {
+                    g.DrawPie(pen, cx - rr, cy - rr, rr * 2, rr * 2, start, (float)sweep);
+                    // DrawPie 只畫外框：補上扇形本體（填到描邊的內緣，不要留 1px 的透明細縫）
+                    using var fillBg = new SolidBrush(WheelDesign.SelFill);
+                    float ri = rr - WheelDesign.SelStrokePx / 2f;
+                    g.FillPie(fillBg, cx - ri, cy - ri, ri * 2, ri * 2, start, (float)sweep);
+                }
+            }
+            else
+            {
+                using var fill = new SolidBrush(i % 2 == 0 ? WheelDesign.FillA : WheelDesign.FillB);
+                g.FillPie(fill, cx - r, cy - r, r * 2, r * 2, start, (float)sweep);
+            }
         }
 
-        // 選中扇區加一圈白邊，讓「外擴」看得出來
-        {
-            float rr = r + WheelGeometry.SelectedExtraPx;
-            using var pen = new Pen(Color.FromArgb(230, 255, 255, 255), 2f);
-            g.DrawPie(pen, cx - rr, cy - rr, rr * 2, rr * 2,
-                (float)WheelGeometry.StartDeg + _selected * sweep, sweep - 1.5f);
-        }
-
-        using var font = MakeFont(9f);
-        using var text = new SolidBrush(Color.White);
+        // ③ 標籤（未選中的變暗，讓選中更明確）
+        using var font = MakeFontPx(WheelDesign.LabelFontPx(count));
+        using var bright = new SolidBrush(WheelDesign.Label);
+        using var dim = new SolidBrush(Color.FromArgb(
+            (int)Math.Round(255 * WheelDesign.LabelDimOpacity), WheelDesign.Label));
         using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        float ratio = WheelDesign.LabelRadiusRatio(count);
         for (int i = 0; i < count; i++)
         {
             double mid = WheelGeometry.SectorMidDeg(i, count) * Math.PI / 180.0;
-            float lx = cx + (float)(Math.Cos(mid) * r * 0.66);
-            float ly = cy + (float)(Math.Sin(mid) * r * 0.66);
-            g.DrawString(_targets[i], font, text, new RectangleF(lx - 40, ly - 10, 80, 20), format);
+            float lx = cx + (float)(Math.Cos(mid) * r * ratio);
+            float ly = cy + (float)(Math.Sin(mid) * r * ratio);
+            g.DrawString(_targets[i], font, i == _selected ? bright : dim,
+                         new RectangleF(lx - 40, ly - 12, 80, 24), format);
         }
     }
 
-    private void DrawEmptyWheel(Graphics g, float cx, float cy)
+    private void DrawEmptyWheel(Graphics g, float cx, float cy, float r)
     {
-        float r = WheelGeometry.DiameterPx / 2f;
-        using var brush = new SolidBrush(Color.FromArgb(230, 90, 94, 104));
+        using var brush = new SolidBrush(Color.FromArgb(120, 150, 156, 170));
         g.FillEllipse(brush, cx - r, cy - r, r * 2, r * 2);
+        using var rim = new Pen(WheelDesign.Rim, WheelDesign.RimPx);
+        g.DrawEllipse(rim, cx - r, cy - r, r * 2, r * 2);
     }
+
+    // ==================================================================
+    // 中心：來源縮圖穿透 ＋ 白膠囊
+    // ==================================================================
 
     private void DrawCenter(Graphics g, float cx, float cy)
     {
-        float r = (float)WheelGeometry.CenterRadiusPx;
-        using var brush = new SolidBrush(Color.FromArgb(244, 24, 26, 32));
-        g.FillEllipse(brush, cx - r, cy - r, r * 2, r * 2);
+        float ri = (float)WheelGeometry.CenterRadiusPx;
 
+        // 來源縮圖（真實的優先，取不到才用佔位漸層）。整個裁在圓孔內。
+        var saved = g.Clip;
+        using (var hole = new GraphicsPath())
+        {
+            hole.AddEllipse(cx - ri, cy - ri, ri * 2, ri * 2);
+            g.SetClip(hole, CombineMode.Intersect);
+            if (_sourceThumbnail != null)
+            {
+                // 置中裁切（cover）：短邊填滿圓孔，長邊置中。
+                float scale = Math.Max(ri * 2 / _sourceThumbnail.Width, ri * 2 / _sourceThumbnail.Height);
+                float dw = _sourceThumbnail.Width * scale, dh = _sourceThumbnail.Height * scale;
+                g.DrawImage(_sourceThumbnail, cx - dw / 2, cy - dh / 2, dw, dh);
+            }
+            else
+            {
+                DrawThumbnailPlaceholder(g, cx, cy, ri);
+            }
+            g.Clip = saved;
+        }
+
+        using (var ring = new Pen(WheelDesign.ThumbRing, 1f))
+            g.DrawEllipse(ring, cx - ri + 0.5f, cy - ri + 0.5f, (ri - 0.5f) * 2, (ri - 0.5f) * 2);
+
+        DrawCapsule(g, cx, cy);
+    }
+
+    /// <summary>縮圖取不到時的佔位圖（漸層＋兩層山）。**只是佔位**，真實產品會放來源檔的縮圖。</summary>
+    private static void DrawThumbnailPlaceholder(Graphics g, float cx, float cy, float ri)
+    {
+        using (var bg = new LinearGradientBrush(new RectangleF(cx - ri, cy - ri, ri * 2, ri * 2),
+                                                WheelDesign.ThumbTop, WheelDesign.ThumbBottom, 90f))
+            g.FillRectangle(bg, cx - ri, cy - ri, ri * 2, ri * 2);
+
+        void Ridge(Color colour, float baseY, float peak, float width)
+        {
+            using var path = new GraphicsPath();
+            path.AddPolygon(new[]
+            {
+                new PointF(cx - width, baseY),
+                new PointF(cx - width * 0.35f, baseY - peak),
+                new PointF(cx, baseY - peak * 0.55f),
+                new PointF(cx + width * 0.45f, baseY - peak * 1.05f),
+                new PointF(cx + width, baseY),
+                new PointF(cx + width, cy + ri * 1.6f),
+                new PointF(cx - width, cy + ri * 1.6f)
+            });
+            using var brush = new SolidBrush(colour);
+            g.FillPath(brush, path);
+        }
+
+        // 後山較亮、前山較暗（原型的山頂正好被膠囊蓋住，這裡刻意壓低並分兩層，見 91 號文件 §8.2）
+        Ridge(WheelDesign.ThumbRidgeBack, cy + ri * 0.10f, ri * 0.62f, ri * 1.5f);
+        Ridge(WheelDesign.ThumbRidgeFront, cy + ri * 0.42f, ri * 0.70f, ri * 1.6f);
+    }
+
+    /// <summary>中心膠囊：白底半透明、深色字 <c>原格式 → 目標格式</c>（字 17px、padding 5·16、alpha .85）。</summary>
+    private void DrawCapsule(Graphics g, float cx, float cy)
+    {
         string label = _targets.Count == 0
             ? _sourceFormat
             : $"{_sourceFormat} → {_targets[_selected]}";
-        using var font = MakeFont(_targets.Count == 0 ? 10f : 12f);
-        using var text = new SolidBrush(Color.White);
+
+        using var font = MakeFontPx(WheelDesign.CapFontPx);
+        var size = g.MeasureString(label, font);
+        float w = Math.Max(WheelDesign.CapMinWidthPx, size.Width + WheelDesign.CapPadXPx * 2);
+        float h = size.Height + WheelDesign.CapPadYPx * 2;
+        float x = cx - w / 2f, y = cy - h / 2f, rad = h / 2f;
+
+        // 柔和下投影（由外而內疊）
+        for (int k = 5; k >= 1; k--)
+        {
+            using var sp = RoundedRect(new RectangleF(x - k, y - k + 3f + k * 0.6f, w + k * 2, h + k * 2), rad + k);
+            using var sb = new SolidBrush(Color.FromArgb(9, 0, 0, 0));
+            g.FillPath(sb, sp);
+        }
+        using (var path = RoundedRect(new RectangleF(x, y, w, h), rad))
+        using (var brush = new SolidBrush(WheelDesign.CapBg))
+            g.FillPath(brush, path);
+
+        using var fg = new SolidBrush(WheelDesign.CapFg);
         using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(label, font, text, new RectangleF(cx - r, cy - r, r * 2, r * 2), format);
+        g.DrawString(label, font, fg, new RectangleF(x, y, w, h), format);
     }
 
-    private void DrawPreview(Graphics g, float boxOrigin, float boxBottom)
+    // ==================================================================
+    // 輪盤下方：鍵帽 ＋ 說明 ＋ 檔名預覽
+    // ==================================================================
+
+    /// <summary>
+    /// 白色鍵帽 ＋ 說明文字，位置由輪盤下緣往下排（**不可硬編 y**：
+    /// 硬編會讓說明文字被點陣圖下緣切掉，第一版就是這樣壞的）。
+    /// 觸發鍵在輪盤可見期間恆為按住狀態（見 <see cref="DragDetector"/>），所以這塊永遠顯示。
+    /// </summary>
+    private void DrawKeycap(Graphics g, float cx, float wheelBottom)
+    {
+        using var keyFont = MakeFontPx(WheelDesign.KeyFontPx);
+        var keySize = g.MeasureString(TriggerKeyLabel, keyFont);
+        float kw = keySize.Width + WheelDesign.KeyPadXPx * 2;
+        float kh = WheelGeometry.KeycapPx;
+        float kx = cx - kw / 2f;
+        float ky = wheelBottom + WheelGeometry.KeyGapPx;
+
+        for (int k = 4; k >= 1; k--)
+        {
+            using var sp = RoundedRect(new RectangleF(kx - k, ky - k + 2f + k * 0.5f, kw + k * 2, kh + k * 2), 8f + k);
+            using var sb = new SolidBrush(Color.FromArgb(12, 0, 0, 0));
+            g.FillPath(sb, sp);
+        }
+        using (var path = RoundedRect(new RectangleF(kx, ky, kw, kh), 8f))
+        using (var brush = new SolidBrush(WheelDesign.KeyPill))
+            g.FillPath(brush, path);
+
+        using var fg = new SolidBrush(WheelDesign.KeyPillFg);
+        using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        g.DrawString(TriggerKeyLabel, keyFont, fg, new RectangleF(kx, ky, kw, kh), format);
+
+        // 說明文字：白字身 ＋ 暗色描邊（原型的純白字在淺色桌布上會整個消失）
+        float captionTop = ky + kh + WheelGeometry.CaptionGapPx;
+        using var capFont = MakeFontPx(WheelDesign.KeyCapFontPx);
+        using var outline = new Pen(WheelDesign.KeyCaptionOutline, WheelDesign.KeyCaptionOutlinePx)
+        {
+            LineJoin = LineJoin.Round
+        };
+        using var capPath = new GraphicsPath();
+        using var capFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        capPath.AddString(WheelDesign.KeyCaptionText, capFont.FontFamily, (int)capFont.Style, capFont.Size,
+                          new PointF(0, 0), capFormat);
+        var bounds = capPath.GetBounds();
+        using (var shift = new Matrix())
+        {
+            // 把「墨跡中心」平移到目標位置：水平＝圓心，垂直＝說明文字帶的中心
+            shift.Translate(cx - (bounds.Left + bounds.Width / 2f),
+                            captionTop + WheelGeometry.CaptionPx / 2f - (bounds.Top + bounds.Height / 2f));
+            capPath.Transform(shift);
+        }
+        g.DrawPath(outline, capPath);
+        using (var capFill = new SolidBrush(WheelDesign.KeyCaptionFill))
+            g.FillPath(capFill, capPath);
+    }
+
+    private void DrawPreview(Graphics g, float cx, float wheelBottom)
     {
         string? line = _notice ?? _preview?.Invoke(_selected);
         if (string.IsNullOrEmpty(line)) return;
 
-        using var font = MakeFont(9f);
+        float py = wheelBottom + WheelGeometry.KeyGapPx + WheelGeometry.KeycapPx +
+                   WheelGeometry.CaptionGapPx + WheelGeometry.CaptionPx + WheelGeometry.PreviewGapPx;
+        using var font = MakeFontPx(11f);
         using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
         var size = g.MeasureString(line, font);
-        float pillW = size.Width + 18;
-        float pillH = 20;
-        float px = boxOrigin + WheelGeometry.BoxPx / 2f - pillW / 2f;
-        float py = boxBottom - WheelGeometry.GlowPx + 2f;
+        float pillW = Math.Max(120f, size.Width + 20f);
+        float pillH = WheelGeometry.PreviewPx;
+        float px = cx - pillW / 2f;
 
-        var pill = _notice != null ? Color.FromArgb(232, 150, 40, 40) : Color.FromArgb(232, 18, 20, 26);
-        using var brush = new SolidBrush(pill);
-        using var path = RoundedRect(new RectangleF(px, py, pillW, pillH), 6f);
-        g.FillPath(brush, path);
+        var pill = _notice != null
+            ? Color.FromArgb(230, WheelDesign.NoticeFill)
+            : Color.FromArgb(214, 10, 13, 18);
+        using (var path = RoundedRect(new RectangleF(px, py, pillW, pillH), pillH / 2f))
+        using (var brush = new SolidBrush(pill))
+            g.FillPath(brush, path);
 
-        using var text = new SolidBrush(Color.White);
+        using var text = new SolidBrush(Color.FromArgb(238, 255, 255, 255));
         g.DrawString(line, font, text, new RectangleF(px, py, pillW, pillH), format);
     }
 
@@ -314,14 +628,14 @@ internal sealed class WheelPresenter
             new PointF(rect.Right - 10, rect.Top + 10)
         });
 
-        Color accent = _targets.Count > 0 ? Palette[_selected % Palette.Length] : Color.FromArgb(120, 124, 134);
+        Color accent = _targets.Count > 0 ? WheelDesign.SelStroke : Color.FromArgb(120, 124, 134);
         using var accentBrush = new SolidBrush(accent);
         g.FillRectangle(accentBrush, rect.X + 5, rect.Bottom - 9, rect.Width - 10, 4);
     }
 
     private static GraphicsPath RoundedRect(RectangleF r, float radius)
     {
-        float d = radius * 2;
+        float d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
         var p = new GraphicsPath();
         p.AddArc(r.X, r.Y, d, d, 180, 90);
         p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
@@ -331,10 +645,13 @@ internal sealed class WheelPresenter
         return p;
     }
 
-    /// <summary>Segoe UI 是 Windows 的標準介面字型；找不到時退回泛用無襯線字型而非崩潰。</summary>
-    private static Font MakeFont(float points)
+    /// <summary>
+    /// Segoe UI 是 Windows 的標準介面字型；找不到時退回泛用無襯線字型而非崩潰。
+    /// **單位是像素**：設計稿的 15px／12.7px 是畫面像素，用 points 會隨 DPI 飄掉。
+    /// </summary>
+    private static Font MakeFontPx(float px)
     {
-        try { return new Font("Segoe UI", points, FontStyle.Bold, GraphicsUnit.Point); }
-        catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, points, FontStyle.Bold, GraphicsUnit.Point); }
+        try { return new Font("Segoe UI", px, FontStyle.Bold, GraphicsUnit.Pixel); }
+        catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, px, FontStyle.Bold, GraphicsUnit.Pixel); }
     }
 }

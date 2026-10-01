@@ -148,7 +148,7 @@ internal sealed class ProgressPresenter : IDisposable
     /// </summary>
     public static Bitmap Compose(string text, int done, int total, bool finished, int failed, int alpha)
     {
-        using var font = MakeFont(15f);
+        using var font = MakeFontPx(15f);
         // 寬度依文字量測：規格 §7.1 的失敗訊息（`broken.png 無法解碼`）比 `✓ 1` 長得多，
         // 固定寬度會把它裁掉 —— 那就等於使用者看不到原因。
         int width;
@@ -165,11 +165,14 @@ internal sealed class ProgressPresenter : IDisposable
         g.Clear(Color.Transparent);
 
         int a = Math.Clamp(alpha, 0, 255);
+        // 同一個產品裡的「錯誤紅」只有一個來源（視覺方向 D 的 WheelDesign）。
         Color pill = failed > 0
-            ? Color.FromArgb((int)(236 * a / 255), 150, 40, 40)
+            ? Color.FromArgb((int)(236 * a / 255), WheelDesign.NoticeFill)
             : Color.FromArgb((int)(236 * a / 255), 24, 26, 32);
 
-        using (var path = RoundedRect(new RectangleF(1, 1, width - 2, BitmapHeight - 2), 12f))
+        // 圓角改成整顆藥丸（半高）：與方向 D 的膠囊／鍵帽／預覽列同一套語彙。
+        // 原本固定 12px，在同一個畫面裡與輪盤的元件不是同一種形狀語言。
+        using (var path = RoundedRect(new RectangleF(1, 1, width - 2, BitmapHeight - 2), (BitmapHeight - 2) / 2f))
         using (var brush = new SolidBrush(pill))
         {
             g.FillPath(brush, path);
@@ -219,10 +222,15 @@ internal sealed class ProgressPresenter : IDisposable
         return path;
     }
 
-    private static Font MakeFont(float points)
+    /// <summary>
+    /// **單位是像素**，與 <see cref="WheelPresenter"/> 一致。原本用 Point：
+    /// 在 96 DPI 下 15pt ＝ 20px（比輪盤的 17px 膠囊字還大），而且會隨 DPI 縮放——
+    /// 150 % 縮放時同一張 54px 高的卡片會裝不下。
+    /// </summary>
+    private static Font MakeFontPx(float px)
     {
-        try { return new Font("Segoe UI", points, FontStyle.Bold, GraphicsUnit.Point); }
-        catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, points, FontStyle.Bold, GraphicsUnit.Point); }
+        try { return new Font("Segoe UI", px, FontStyle.Bold, GraphicsUnit.Pixel); }
+        catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, px, FontStyle.Bold, GraphicsUnit.Pixel); }
     }
 
     public void Dispose() => _layer.TickRequested -= Tick;

@@ -132,6 +132,9 @@ internal sealed class Options
           --cycle-test <N>          show/hide the hit layer N times and exit
           --wheel-demo <X> <Y>      raise both layers and show the wheel at (X,Y) (diagnostic)
           --wheel-dump <path>       with --wheel-demo: write the painted frame as PNG and exit
+          --wheel-dump-raw <path>   with --wheel-demo: same frame but with alpha preserved
+                                    (the only way to check the alpha contract: the glass body
+                                    must be alpha 255, everything outside must be a pure layer)
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
           --wheel-targets <a,b,c>   with --wheel-demo: target format list (default PNG,JPG,WEBP,BMP)
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
@@ -150,6 +153,10 @@ internal sealed class Options
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
                                     inject a payload into the post-DragEnter path (diagnostic) and exit
+          --wheel-backdrop <screen|dark|light>
+                                    glass backdrop source (default screen = the real desktop);
+                                    dark/light use a synthetic wallpaper so visual checks are
+                                    reproducible and never touch the user's screen
           --quiet                   do not echo events to the console
         """;
 
@@ -180,6 +187,14 @@ internal sealed class Options
     public int? WheelDemoX;
     public int? WheelDemoY;
     public string? WheelDump;
+    /// <summary>同 <see cref="WheelDump"/>，但**保留 alpha**（驗 alpha 語意紅線用）。</summary>
+    public string? WheelDumpRaw;
+    /// <summary>
+    /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
+    /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
+    /// 深淺兩端的可讀性也必須能重跑（見 WheelDesign 的光暈策略）。
+    /// </summary>
+    public string WheelBackdrop = "screen";
     public string WheelSource = "HEIC";
     public string[] WheelTargets = Array.Empty<string>();
     public int WheelSelected;
@@ -223,6 +238,7 @@ internal sealed class Options
                 case "--raise": o.ForceRaiseHitLayer = true; break;
                 case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
                 case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
+                case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -274,6 +290,9 @@ internal sealed class Options
                         o.WheelDemoX = wx; o.WheelDemoY = wy; i += 2;
                     }
                     break;
+                case "--wheel-backdrop":
+                    if (++i < args.Length) o.WheelBackdrop = args[i].Trim().ToLowerInvariant();
+                    break;
                 case "--quiet": o.Quiet = true; break;
                 case "--log":
                     if (++i < args.Length) o.LogPath = args[i];
@@ -291,6 +310,25 @@ internal sealed class Options
         }
         return o;
     }
+
+    /// <summary>
+    /// 觸發鍵 → **鍵帽上顯示的名字**。鍵帽畫的是實體按鍵（`space`／`shift`），不是 VK 代碼；
+    /// 認不得的鍵就照實印代碼，不假裝認得。
+    /// </summary>
+    public static string VirtualKeyLabel(uint vk) => vk switch
+    {
+        0x20 => "space",
+        0x0D => "enter",
+        0x09 => "tab",
+        0x10 => "shift",
+        0x11 => "ctrl",
+        0x12 => "alt",
+        0x1B => "esc",
+        >= 0x70 and <= 0x87 => $"F{vk - 0x6F}",
+        >= 0x30 and <= 0x39 => ((char)vk).ToString(),
+        >= 0x41 and <= 0x5A => ((char)vk).ToString().ToLowerInvariant(),
+        _ => $"0x{vk:X2}"
+    };
 
     /// <summary>接受 0xNN 十六進位或少量具名虛擬鍵；未知值一律退回預設並由呼叫端記錄。</summary>
     public static uint ParseVirtualKey(string text)
@@ -397,7 +435,8 @@ internal static class App
         // 格式能力探測也要**預先做**：第一次使用 WPF/WIC 會載入 PresentationCore，
         // 若等到酬載進來才做，那筆成本會直接落在「酬載 → 顯示」的 100 ms 預算上。
         var catalog = BuildCatalog(evidence);
-        var presenter = new WheelPresenter(evidence, visual);
+        var presenter = new WheelPresenter(evidence, visual, opt.WheelBackdrop);
+        presenter.TriggerKeyLabel = Options.VirtualKeyLabel(opt.TriggerKey);
 
         // M1f：設定（規格 §8）——預設值即規格值，檔案壞掉／超範圍都會退回並說明，不靜默。
         _settings = SettingsStore.Load(null, evidence.Line);
@@ -556,7 +595,8 @@ internal static class App
         guard.OnCaptured();                       // 升起命中層，並用真正的保險 #3 計時
 
         using var visual = new VisualLayer(evidence);
-        var presenter = new WheelPresenter(evidence, visual);
+        var presenter = new WheelPresenter(evidence, visual, opt.WheelBackdrop);
+        presenter.TriggerKeyLabel = Options.VirtualKeyLabel(opt.TriggerKey);
         var catalog = BuildCatalog(evidence);
         // 示範用的目標清單同樣來自**實測能力**（而且原格式自動排除）——
         // 示範畫面一樣不可以承諾做不到的事。
@@ -577,6 +617,12 @@ internal static class App
         if (opt.WheelDump != null)
         {
             presenter.DumpTo(opt.WheelDump);
+            if (opt.WheelDumpRaw != null) presenter.DumpRawTo(opt.WheelDumpRaw);
+            return 0;
+        }
+        if (opt.WheelDumpRaw != null)
+        {
+            presenter.DumpRawTo(opt.WheelDumpRaw);
             return 0;
         }
         return RunMessageLoop(evidence);
@@ -1033,20 +1079,28 @@ internal static class App
             Report($"{c.Why} (got {got}, want {c.Expected})", got == c.Expected);
         }
 
+        // 2026-10-01（方向 D）：FlipEdge 改為回傳**輪盤本體**的左上角（以前是「框」，
+        // 框含外擴＋8px 陰影留白，於是輪盤本體實際落在游標 +32，與規格 §4.3 的 +18 不符）。
+        // D 的柔暈外緣 ≈ 39.4px，留白由 MarginPx 往外長；視窗原點仍是游標 − 24（驗收腳本不變）。
         var work = new Native.RECT { Left = 0, Top = 0, Right = 2560, Bottom = 1032 };
-        var (fx, fy) = WheelGeometry.FlipEdge(2500, 1000, WheelGeometry.BoxPx, work);
-        Report($"flip at bottom-right -> ({fx},{fy}), want (2234,734)", fx == 2234 && fy == 734);
+        var (fx, fy) = WheelGeometry.FlipEdge(2500, 1000, work);
+        Report($"flip at bottom-right -> ({fx},{fy}), want (2262,762)", fx == 2262 && fy == 762);
 
-        var (gx, gy) = WheelGeometry.FlipEdge(100, 100, WheelGeometry.BoxPx, work);
+        var (gx, gy) = WheelGeometry.FlipEdge(100, 100, work);
         Report($"no flip near the top-left -> ({gx},{gy}), want (118,118)", gx == 118 && gy == 118);
 
         var tiny = new Native.RECT { Left = 0, Top = 0, Right = 200, Bottom = 200 };
-        var (hx, hy) = WheelGeometry.FlipEdge(100, 100, WheelGeometry.BoxPx, tiny);
-        Report($"clamped when the work area is smaller than the wheel -> ({hx},{hy}), want (0,0)", hx == 0 && hy == 0);
+        var (hx, hy) = WheelGeometry.FlipEdge(100, 100, tiny);
+        Report($"clamped when the work area is smaller than the wheel -> ({hx},{hy}), want (42,42)",
+               hx == WheelGeometry.MarginPx && hy == WheelGeometry.MarginPx);
 
-        Report($"wheel box = {WheelGeometry.BoxPx} px (want 248)", WheelGeometry.BoxPx == 248);
-        Report($"bitmap = {WheelGeometry.BitmapWidthPx}x{WheelGeometry.BitmapHeightPx} (want 304x330)",
-               WheelGeometry.BitmapWidthPx == 304 && WheelGeometry.BitmapHeightPx == 330);
+        Report($"wheel diameter = {WheelGeometry.DiameterPx} px (want 220)", WheelGeometry.DiameterPx == 220);
+        Report($"margin around the wheel = {WheelGeometry.MarginPx} px (want 42)",
+               WheelGeometry.MarginPx == 42);
+        Report($"bitmap = {WheelGeometry.BitmapWidthPx}x{WheelGeometry.BitmapHeightPx} (want 304x349)",
+               WheelGeometry.BitmapWidthPx == 304 && WheelGeometry.BitmapHeightPx == 349);
+        Report($"cursor sits {WheelGeometry.CursorInBitmapPx} px into the bitmap (want 24: origin = cursor-24)",
+               WheelGeometry.CursorInBitmapPx == 24);
 
         foreach (var line in out_) Console.WriteLine(line);
         if (opt.LogPath is { Length: > 0 })

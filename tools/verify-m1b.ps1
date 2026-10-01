@@ -19,11 +19,14 @@ param(
   [int]$DemoX = 900,
   [int]$DemoY = 400,
   # The visual-layer window is anchored at (cursor - PadPx), NOT at the cursor:
-  # the wheel box sits at cursor+(18,18) inside a bitmap that also has to contain the
-  # 32 px ghost card centred on the cursor. WheelGeometry.PadPx owns that value.
+  # the wheel body sits at cursor+(18,18) and the bitmap carries WheelGeometry.MarginPx
+  # (42 px) of clearance around the wheel for the glass glow, plus a bottom strip for the
+  # keycap hint, the caption and the output-name preview. WheelGeometry.PadPx owns that value.
+  # 2026-10-01 (direction D): width and PadPx are unchanged; the height grew from 330 to 349
+  # because the keycap + caption strip was added below the wheel.
   [int]$PadPx = 24,
   [int]$DemoW = 304,
-  [int]$DemoH = 330,
+  [int]$DemoH = 349,
   [string]$LogDir = "$env:TEMP\sidecar-verify",
   # S8 is human-guided: it prints instructions, waits this long, then inspects the log.
   [int]$S8WindowSeconds = 90

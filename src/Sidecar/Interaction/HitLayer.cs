@@ -32,7 +32,10 @@ internal sealed class HitLayer : IDisposable
     /// <summary>拖曳**進行中**觀察到的酬載（檔名清單）。來源＝OLE `IDropTarget::DragEnter`。</summary>
     public event Action<int, string[]>? PayloadObserved;
 
-    /// <summary>OLE 路徑確認的放手。與 `WM_DROPFILES` 交叉確認用（檔案清單權威仍是後者）。</summary>
+    /// <summary>
+    /// 放手。**這條路才是實際會來的**（2026-10-01 量測：註冊 IDropTarget 之後 `WM_DROPFILES`
+    /// 不再送達，見建構子的註記），所以它同時是「放手」與「檔案清單」的權威來源。
+    /// </summary>
     public event Action<int>? OleDropObserved;
 
     /// <summary>拖曳途中的游標位置（螢幕座標）。來源＝OLE `IDropTarget::DragOver`。</summary>
@@ -117,7 +120,16 @@ internal sealed class HitLayer : IDisposable
 
         _handles = handles;
         // OLE 拖放目標：拖曳**進行中**的酬載只有這條路拿得到（規格 §4.3 的 DragEnter）。
-        // 與 DragAcceptFiles／WM_DROPFILES 並存：後者仍是「放手」的檔案清單權威。
+        //
+        // ⚠ 2026-10-01 量測更正（原本這裡寫「與 DragAcceptFiles／WM_DROPFILES 並存，後者是檔案清單權威」）：
+        //    一旦註冊了 IDropTarget，**WM_DROPFILES 就不會再來**——合成 OLE 拖放（tools/dragsim）
+        //    在本 commit 之後只出現 `*** OLE DROP RECEIVED (IDropTarget)`，而同一支 DragSim 對
+        //    上一顆 commit（125070a，尚無 RegisterDragDrop）跑出的是 `*** DROP RECEIVED on hit#0`。
+        //    也就是說：放手事件的檔案清單**現在由 OLE 這條路提供**，DragAcceptFiles 只是保險，
+        //    而 verify-m1a 的 S4.2（斷言 WM_DROPFILES 那行）自那時起就是紅的，只因後續回歸都以
+        //    「S4 INCONCLUSIVE（缺 -DragSim）」帶過而沒被看見。真實 shell 拖曳（explorer 當來源）
+        //    是否仍會補上 WM_DROPFILES **未驗**，需人工 S4m。詳見
+        //    docs/aegis/work/2026-10-01-wheel-impl/90-evidence.md §6。
         for (int i = 0; i < _handles.Length; i++)
         {
             var target = new DropTarget(i, _evidence.Line, OnPayloadObserved, OnOleDropObserved, OnDragOverObserved);

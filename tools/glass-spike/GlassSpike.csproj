@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <AssemblyName>GlassSpike</AssemblyName>
+    <RootNamespace>GlassSpike</RootNamespace>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <!--
+      x86 也可以編，但 spike 只在 x64 上量測（與 src/Sidecar 一致）。
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!--
+      獨立 spike：不加入任何方案（本 repo 沒有 .sln，全部靠 dotnet build <csproj> 直接編）。
+      **不新增任何 PackageReference**：System.Drawing（GDI+）由 UseWindowsForms 帶進來的
+      Microsoft.WindowsDesktop.App.Ref 提供，本機已有，離線可還原。
+      沒有任何 ProjectReference，所以動不到 src/Sidecar。
+    -->
+  </PropertyGroup>
+
+</Project>
