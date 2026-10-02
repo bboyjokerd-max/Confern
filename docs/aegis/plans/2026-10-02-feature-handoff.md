@@ -269,3 +269,45 @@ A 與 B 都能滿足規格；差別是「那一下點擊要不要被吃掉」。
    同一套 alpha。上限顯示 8 列＋「…還有 N 筆」，避免清單長到蓋住整個畫面。
 5. 驗收：headless dump（`--progress-dump-detail`）＋ 一條「真的讓某個檔案轉檔失敗」的端到端斷言
    （m1d 已經有壞檔 fixture），斷言畫面資料裡**每個失敗列都有檔名、都有中文原因**。
+
+---
+
+## 待辦 5 進度（2026-10-02）：資料與渲染完成，接線待裁決
+
+提交 `1abc0fa`（新增 `tools/verify-m1h.ps1` 31 項；動到 `ConversionTypes`／`ConversionClient`／
+`WorkerServer`／`ProgressPresenter`／`Program`）。**完成的是不需要裁決的那一半。**
+
+- `ConversionResult.Reason` 成為原因的單一擁有者，`UserMessage` 由它組出 ⇒ 規格 §7.1 的訊息
+  **一字未變**（`m1f` 34/34、`m1d` 54/54 就是回歸證據，是跑出來的不是看出來的）。
+- **管道新增 `sourcePath`**（`WorkerServer` → `ConversionClient` → 快照 `FailureFiles`）：
+  UI 端原本只有一個拼好的字串，要拆回「檔名／原因」只能猜界線——那正是這個專案一直在付學費
+  消滅的第二個真相來源。認不出前綴時退化成「整串當原因、保留檔名」（**這條退路未測**）。
+- `ProgressPresenter`：`PillRect`／`Contains`／`IsExpanded`／`ToggleDetail()`／`static ComposeDetail`。
+- `Program`：`--progress-dump-detail`／`-raw`／`--progress-detail-selftest`；**帶 `--wheel-payload`
+  時不走無頭 dump**，改由真實 worker 轉檔後 dump——否則行程提前結束、驗收只看得到合成列，
+  會是靜默假通過。
+- 假故障（每個都先紅再恢復成綠）：固定寬度 → 5 項紅；上限 8→7 → 紅；靜默丟掉最後一列 → 紅；
+  拿掉中文原因 → 紅。第一項還逼出一個真問題：**寬度不足時文字是折行不是截斷**，固定行高會把
+  第二行裁掉，已用 `NoWrap + EllipsisCharacter` 明確處理並註解記錄。
+
+### 驗收
+
+`m1h` **31/31**、`m1f` **34/34**、`m1b` **50/50（All）**、`m1c` **20/20**、`m1d` **54/54**、
+`m1g` **25/25**，全部 exit 0（exe `16:57:48`；我另外確認「比 exe 新的原始碼檔＝空」，所以不是
+增量假象）。**`m1a` 未跑**：它注入合成滑鼠鍵盤，而這一片沒有動到它覆蓋的路徑。
+證據 dump 在 `docs/aegis/work/2026-10-02-failure-list/`。
+
+### 尚未驗到（不要當成已驗）
+
+沒有接線 ⇒ **點擊怎麼送進來完全未驗**；字形檢查量的是墨跡與字寬，**不是字形遮罩比對**
+（缺字只會被間接抓到）；`FromMessage` 前綴認不出來的退路未測；面板沿用藥丸既有行為，
+**沒有螢幕邊界處理**；`WorkerMessage.sourcePath` 的成功路徑沒有斷言。
+
+### 四個待裁決（寫在進度筆記給使用者看，實作前不動）
+
+D1 點擊用專屬視窗（建議）還是既有鉤子；D2 有失敗時游標停在藥丸上就不淡出（建議）；
+D3 面板圓角統一成 `min(高度/2, 18px)`（建議）還是維持現狀；D4 極長檔名加上限＋中間省略（建議）。
+成功路徑的 2 秒淡出四個決定都不影響。
+
+另記一則：獨立的視覺檢查說「錯誤紅太刺眼、與冷鋼／薄荷定位不符」——**不採納**，
+那是凍結的 `WheelDesign.NoticeFill`，全產品錯誤色只有一個來源。不知情的審美意見不是證據。
