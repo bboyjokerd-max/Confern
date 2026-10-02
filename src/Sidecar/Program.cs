@@ -75,16 +75,22 @@ internal static class Program
             return App.RunProgressDump(opt.ProgressDump, dumpEvidence);
         }
 
+        // M1f：改設定並存檔（規格 §8）。設定頁按「儲存」走的就是同一條路，
+        // 所以這條路必須能被無頭驗證——否則設定頁的驗證只能靠人眼看。
+        if (!string.IsNullOrEmpty(opt.SettingsSet))
+        {
+            Native.AttachParentConsole();
+            using var setEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunSettingsSet(opt, setEvidence);
+        }
+
         // M1f：設定檔的範圍驗證（§8）——超範圍要夾回並說出來，壞檔要退回預設而不是讓程式起不來。
         if (!string.IsNullOrEmpty(opt.SettingsProbe))
         {
             Native.AttachParentConsole();
             using var settingsEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
             Settings loaded = SettingsStore.Load(opt.SettingsProbe, settingsEvidence.Line);
-            settingsEvidence.Line($"settings probe result: jpgQuality={loaded.JpgQuality} " +
-                                  $"webpQuality={loaded.WebpQuality} capture={loaded.CaptureTimeoutSeconds} " +
-                                  $"trigger={loaded.TriggerKey} collision={loaded.NamingCollision} " +
-                                  $"hotkey={loaded.EmergencyHotkey} diagnostics={loaded.Diagnostics}");
+            settingsEvidence.Line($"settings probe result: {SettingsStore.Describe(loaded)}");
             settingsEvidence.Line("settings probe done: failed=0");
             return 0;
         }
@@ -157,6 +163,10 @@ internal sealed class Options
                                     glass backdrop source (default screen = the real desktop);
                                     dark/light use a synthetic wallpaper so visual checks are
                                     reproducible and never touch the user's screen
+          --settings-file <path>    use this settings file (default %LOCALAPPDATA%\Sidecar\settings.json)
+          --settings-set k=v;k=v    change settings and save them, then exit (spec 8); keys that are not
+                                    accepted are reported and exit with code 4 instead of being ignored
+          --settings-probe <path>   load that settings file, print the clamped result and exit
           --quiet                   do not echo events to the console
         """;
 
@@ -216,6 +226,18 @@ internal sealed class Options
     public bool ProgressTrace = false;
     /// <summary>--settings-probe <path>：載入指定的設定檔並印出夾制後的結果（驗證 §8 的範圍規則）。</summary>
     public string SettingsProbe = "";
+    /// <summary>
+    /// --settings-file <path>：這次執行要用的設定檔（一般執行與 `--settings-set` 都用它）。
+    /// 空＝`%LOCALAPPDATA%\Sidecar\settings.json`。存在的理由＝驗證必須能**隔離使用者的真實設定**，
+    /// 否則一個改過設定的人會讓「預設值」的斷言隨環境浮動。
+    /// </summary>
+    public string SettingsFile = "";
+    /// <summary>--settings-set k=v;k=v：改設定並存檔（設定頁按「儲存」走同一條路）。空＝不動作。</summary>
+    public string SettingsSet = "";
+    /// <summary>--trigger-key 是否由命令列明確指定（決定它與設定檔的優先順序）。</summary>
+    public bool TriggerKeyFromCli;
+    /// <summary>--watchdog-seconds 是否由命令列明確指定（同上）。</summary>
+    public bool WatchdogFromCli;
     public int WheelSimulateCycles;
 
     /// <summary>
@@ -298,13 +320,19 @@ internal sealed class Options
                     if (++i < args.Length) o.LogPath = args[i];
                     break;
                 case "--trigger-key":
-                    if (++i < args.Length) o.TriggerKey = ParseVirtualKey(args[i]);
+                    if (++i < args.Length) { o.TriggerKey = ParseVirtualKey(args[i]); o.TriggerKeyFromCli = true; }
                     break;
                 case "--cycle-test":
                     if (++i < args.Length && int.TryParse(args[i], out int n) && n > 0) o.CycleTest = n;
                     break;
                 case "--watchdog-seconds":
-                    if (++i < args.Length && int.TryParse(args[i], out int s) && s > 0) o.WatchdogSeconds = s;
+                    if (++i < args.Length && int.TryParse(args[i], out int s) && s > 0) { o.WatchdogSeconds = s; o.WatchdogFromCli = true; }
+                    break;
+                case "--settings-file":
+                    if (++i < args.Length) o.SettingsFile = args[i];
+                    break;
+                case "--settings-set":
+                    if (++i < args.Length) o.SettingsSet = args[i];
                     break;
             }
         }
@@ -396,9 +424,18 @@ internal static class App
             return 0;
         }
 
+        // M1f：設定（規格 §8）必須在**建立偵測器之前**載入——觸發鍵與接收層逾時都來自它。
+        // 優先順序：命令列（診斷用）> 設定檔 > 規格預設值；預設值即規格值，檔案壞掉／超範圍都會說明。
+        _settings = SettingsStore.Load(string.IsNullOrEmpty(opt.SettingsFile) ? null : opt.SettingsFile, evidence.Line);
+        uint triggerVk = opt.TriggerKeyFromCli ? opt.TriggerKey : SettingsStore.ResolveTriggerVk(_settings, evidence.Line);
+        int watchdogMs = opt.WatchdogFromCli ? opt.WatchdogSeconds * 1000 : _settings.CaptureTimeoutSeconds * 1000;
+        evidence.Line($"settings in effect: trigger=VK 0x{triggerVk:X2} watchdog={watchdogMs} ms " +
+                      $"(trigger from {(opt.TriggerKeyFromCli ? "command line" : "settings file")}, " +
+                      $"watchdog from {(opt.WatchdogFromCli ? "command line" : "settings file")})");
+
         using var hit = new HitLayer(evidence, monitors, Native.OverlayAlpha);
-        using var guard = new ReleaseGuard(evidence, hit, opt.WatchdogSeconds * 1000);
-        var detector = new DragDetector(evidence, opt.TriggerKey, opt.AssumeExplorerForeground);
+        using var guard = new ReleaseGuard(evidence, hit, watchdogMs);
+        var detector = new DragDetector(evidence, triggerVk, opt.AssumeExplorerForeground);
 
         // OLE 拖放必須先初始化，否則 RegisterDragDrop 會回 CO_E_NOTINITIALIZED。
         // 主執行緒有 [STAThread]，所以不會撞 RPC_E_CHANGED_MODE。結果一律寫進證據——失敗時
@@ -436,10 +473,7 @@ internal static class App
         // 若等到酬載進來才做，那筆成本會直接落在「酬載 → 顯示」的 100 ms 預算上。
         var catalog = BuildCatalog(evidence);
         var presenter = new WheelPresenter(evidence, visual, opt.WheelBackdrop);
-        presenter.TriggerKeyLabel = Options.VirtualKeyLabel(opt.TriggerKey);
-
-        // M1f：設定（規格 §8）——預設值即規格值，檔案壞掉／超範圍都會退回並說明，不靜默。
-        _settings = SettingsStore.Load(null, evidence.Line);
+        presenter.TriggerKeyLabel = Options.VirtualKeyLabel(triggerVk);
 
         // 規格 §7.1：上次崩潰／斷電留下的 `.tmp-*` 必須在啟動時清掉，並且**說出來**。
         int recoveredTemps = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
@@ -740,6 +774,44 @@ internal static class App
 
     /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
     private static Settings? _settings;
+
+    /// <summary>
+    /// M1f：`--settings-set k=v;k=v`（規格 §8）。設定頁按「儲存」走同一條路，所以它必須能被無頭驗證。
+    /// 不接受的鍵／值一律**說出來**並以結束碼 4 收場——靜默只會讓使用者以為設定生效了。
+    /// </summary>
+    internal static int RunSettingsSet(Options opt, Evidence evidence)
+    {
+        string path = string.IsNullOrEmpty(opt.SettingsFile) ? SettingsStore.DefaultPath() : opt.SettingsFile;
+        Settings next = SettingsStore.Load(path, evidence.Line);
+        int applied = 0;
+        var rejected = new List<string>();
+
+        foreach (string pair in opt.SettingsSet.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0)
+            {
+                evidence.Line($"settings: reject '{pair}' (expected key=value)");
+                rejected.Add(pair);
+                continue;
+            }
+            if (SettingsStore.TryApply(next, pair[..eq], pair[(eq + 1)..], evidence.Line, out Settings updated))
+            {
+                next = updated;
+                applied++;
+            }
+            else
+            {
+                rejected.Add(pair);
+            }
+        }
+
+        if (applied > 0) SettingsStore.Save(next, path, evidence.Line);
+
+        evidence.Line($"settings set result: {SettingsStore.Describe(next)}");
+        evidence.Line($"settings set done: applied={applied} rejected={rejected.Count} path={path}");
+        return rejected.Count == 0 ? 0 : 4;
+    }
 
     /// <summary>
     /// 把進度那一行畫成 PNG（不需要畫面）。✓／✗ 這類符號若字型缺字會變成方框，

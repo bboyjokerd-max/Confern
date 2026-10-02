@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Sidecar;
 
 /// <summary>
@@ -38,36 +40,295 @@ internal sealed record Settings
     };
 }
 
+/// <summary>
+/// 觸發鍵的解析結果。<c>Name</c> 是可寫回檔案的正式寫法，<c>Warning</c> 是**規格要求的提示**
+/// （§8：選 Shift 要警告「Shift 在檔案總管拖曳時代表移動」）——提示是模型的事，不是 UI 自己編的。
+/// </summary>
+internal sealed record TriggerKeyInfo(uint Vk, string Name, string? Warning);
+
 internal static class SettingsStore
 {
+    /// <summary>
+    /// 檔案是給人看的（文件也教使用者直接改它），所以縮排輸出。欄位名不區分大小寫：
+    /// 「大小寫打得不一樣」不該變成靜默退回預設。
+    /// </summary>
+    private static readonly JsonSerializerOptions Json = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        // 這個檔案是給人看、也教使用者直接改的，所以不要轉義 `+`、中文之類的字元
+        // （預設編碼器會把 `Ctrl+Alt+Shift+Q` 寫成 `Ctrl\u002BAlt\u002BShift\u002BQ`）。
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    /// <summary>規格 §8 的九個鍵。**唯一擁有者**：未知鍵警告、`--settings-set`、設定頁都走這裡。</summary>
+    public static readonly string[] KnownKeys =
+    {
+        nameof(Settings.JpgQuality), nameof(Settings.WebpQuality), nameof(Settings.TriggerKey),
+        nameof(Settings.StartWithWindows), nameof(Settings.Language), nameof(Settings.NamingCollision),
+        nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics)
+    };
+
     public static string DefaultPath() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sidecar", "settings.json");
+
+    /// <summary>一行說完目前生效的設定。日誌、probe、設定頁摘要共用，避免三份不同說法。</summary>
+    public static string Describe(Settings s) =>
+        $"jpgQuality={s.JpgQuality} webpQuality={s.WebpQuality} capture={s.CaptureTimeoutSeconds} " +
+        $"trigger={s.TriggerKey} collision={s.NamingCollision} hotkey={s.EmergencyHotkey} " +
+        $"diagnostics={s.Diagnostics} startWithWindows={s.StartWithWindows} language={s.Language}";
 
     public static Settings Load(string? path, Action<string> log)
     {
         path ??= DefaultPath();
-        Settings loaded;
         if (!File.Exists(path))
         {
             log($"settings: no file at {path}; using spec defaults (jpgQuality=85, trigger=Space, capture=30s)");
             return new Settings();
         }
+
+        string text;
         try
         {
-            loaded = System.Text.Json.JsonSerializer.Deserialize<Settings>(File.ReadAllText(path)) ?? new Settings();
+            text = File.ReadAllText(path);
         }
         catch (Exception ex)
         {
-            // 壞掉的設定檔**不可以**讓程式起不來，也不可以靜默忽略
+            // 讀不到**不可以**讓程式起不來，也不可以靜默忽略
+            log($"settings: {path} is unreadable ({ex.GetType().Name}: {ex.Message}) -> using spec defaults");
+            return new Settings();
+        }
+
+        WarnUnknownKeys(text, path, log);
+
+        Settings loaded;
+        try
+        {
+            loaded = JsonSerializer.Deserialize<Settings>(text, Json) ?? new Settings();
+        }
+        catch (Exception ex)
+        {
             log($"settings: {path} is unreadable ({ex.GetType().Name}: {ex.Message}) -> using spec defaults");
             return new Settings();
         }
 
         Settings normalized = loaded.Normalized(out List<string> notes);
         foreach (string note in notes) log($"settings: clamped {note}");
-        log($"settings: loaded from {path} jpgQuality={normalized.JpgQuality} " +
-            $"webpQuality={normalized.WebpQuality} trigger={normalized.TriggerKey} " +
-            $"capture={normalized.CaptureTimeoutSeconds}s diagnostics={normalized.Diagnostics}");
+        log($"settings: loaded from {path} {Describe(normalized)}");
         return normalized;
     }
+
+    /// <summary>
+    /// 未知的鍵要**說出來**：打錯一個字母就靜默退回預設，是最難查的那種「設定沒生效」。
+    /// </summary>
+    private static void WarnUnknownKeys(string text, string path, Action<string> log)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                log($"settings: {path} is valid JSON but not an object -> keys not checked");
+                return;
+            }
+            foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
+            {
+                bool known = KnownKeys.Any(k => string.Equals(k, prop.Name, StringComparison.OrdinalIgnoreCase));
+                if (!known) log($"settings: WARNING unknown key '{prop.Name}' in {path} is ignored (typo?)");
+            }
+        }
+        catch (Exception ex)
+        {
+            log($"settings: {path} is not valid JSON ({ex.GetType().Name}) -> keys not checked");
+        }
+    }
+
+    /// <summary>
+    /// 存檔（設定頁與 `--settings-set` 共用）。三個保證：
+    /// ①**先夾制再寫**，檔案裡永遠不會出現規格外值；
+    /// ②走 <see cref="AtomicWriter"/> 這個唯一的原子寫入擁有者，且**允許覆寫**——設定檔是我們自己的，
+    /// 覆寫是意圖；使用者的輸出檔仍受「永不覆寫」紅線保護；
+    /// ③失敗**不留 `.tmp-*`**、**不靜默**（記錄後往外丟，結束碼由呼叫端決定）。
+    /// </summary>
+    public static void Save(Settings settings, string? path, Action<string> log)
+    {
+        path ??= DefaultPath();
+        Settings normalized = settings.Normalized(out List<string> notes);
+        foreach (string note in notes) log($"settings: clamped {note} before saving");
+
+        string? dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(normalized, Json);
+        try
+        {
+            // 登記進臨時檔日誌：萬一在存檔途中斷電，啟動時的回收仍然找得到那個殘檔。
+            AtomicWriter.Write(path, s => s.Write(bytes, 0, bytes.Length),
+                               new TempJournal(TempJournal.DefaultPath()), overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            log($"settings: SAVE FAILED to {path} ({ex.GetType().Name}: {ex.Message})");
+            throw;
+        }
+        log($"settings: saved to {path} {Describe(normalized)}");
+    }
+
+    /// <summary>
+    /// `key=value` → 新設定。**唯一擁有者**（`--settings-set` 與設定頁共用）。回傳 false 代表這個鍵或值
+    /// 不接受，呼叫端必須**把它說出來**；靜默忽略會讓使用者以為設定生效了。
+    /// </summary>
+    public static bool TryApply(Settings current, string key, string value, Action<string> log, out Settings next)
+    {
+        next = current;
+        string v = value.Trim();
+        switch (key.Trim().ToLowerInvariant())
+        {
+            case "jpgquality":
+                if (!int.TryParse(v, out int jq)) { log($"settings: reject jpgQuality='{value}' (not an integer)"); return false; }
+                next = current with { JpgQuality = jq };
+                return true;
+            case "webpquality":
+                if (!int.TryParse(v, out int wq)) { log($"settings: reject webpQuality='{value}' (not an integer)"); return false; }
+                next = current with { WebpQuality = wq };
+                return true;
+            case "capturetimeoutseconds" or "capture":
+                if (!int.TryParse(v, out int cs)) { log($"settings: reject captureTimeoutSeconds='{value}' (not an integer)"); return false; }
+                next = current with { CaptureTimeoutSeconds = cs };
+                return true;
+            case "triggerkey":
+                if (!TryResolveTriggerKey(v, out TriggerKeyInfo info, out string why))
+                {
+                    log($"settings: reject triggerKey='{value}' ({why})");
+                    return false;
+                }
+                if (info.Warning != null) log($"settings: WARNING {info.Warning}");
+                next = current with { TriggerKey = info.Name };
+                return true;
+            case "startwithwindows":
+                if (!bool.TryParse(v, out bool sw)) { log($"settings: reject startWithWindows='{value}' (not true/false)"); return false; }
+                next = current with { StartWithWindows = sw };
+                return true;
+            case "diagnostics":
+                if (!bool.TryParse(v, out bool dg)) { log($"settings: reject diagnostics='{value}' (not true/false)"); return false; }
+                next = current with { Diagnostics = dg };
+                return true;
+            case "language":
+                string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"
+                            : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ? "zh-Hant"
+                            : v.Equals("en", StringComparison.OrdinalIgnoreCase) ? "en" : "";
+                if (lang == "") { log($"settings: reject language='{value}' (spec 8: system, zh-Hant, en)"); return false; }
+                next = current with { Language = lang };
+                return true;
+            case "emergencyhotkey":
+                if (v == "") { log("settings: reject emergencyHotkey='' (spec 8: changeable, or off)"); return false; }
+                next = current with { EmergencyHotkey = v };
+                return true;
+            case "namingcollision":
+                // 規格 §8：MVP 固定自動編號 `(1)`，不可改（覆寫／詢問列為未來選項）。
+                log($"settings: reject namingCollision='{value}' (spec 8: fixed to auto-suffix in the MVP)");
+                return false;
+            default:
+                log($"settings: reject unknown key '{key}'");
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// 觸發鍵名 → VK。**不接受的就說原因**——`Options.ParseVirtualKey` 對未知值會靜默退回空白鍵，
+    /// 那在命令列診斷上可以接受，在設定檔上不行（使用者會以為改成功了）。
+    /// 規格 §8 允許「空白鍵 / Ctrl+Shift / Shift / 自訂單鍵」；**組合鍵（含 `+`）尚未實作**，
+    /// 這裡明講拒絕，不假裝接受。
+    /// </summary>
+    public static bool TryResolveTriggerKey(string text, out TriggerKeyInfo info, out string reason)
+    {
+        info = new TriggerKeyInfo(0, "", null);
+        reason = "";
+        string t = (text ?? "").Trim();
+        if (t == "") { reason = "empty"; return false; }
+
+        if (t.Contains('+'))
+        {
+            reason = "modifier combinations are not implemented yet (spec 8 lists Ctrl+Shift; tracked as an open gap)";
+            return false;
+        }
+
+        if (t.StartsWith("0x", StringComparison.OrdinalIgnoreCase) &&
+            uint.TryParse(t.AsSpan(2), System.Globalization.NumberStyles.HexNumber, null, out uint hex) &&
+            hex is > 0 and <= 0xFE)
+        {
+            info = new TriggerKeyInfo(hex, $"0x{hex:X2}", null);
+            return true;
+        }
+
+        string upper = t.ToUpperInvariant();
+        if (upper.StartsWith("VK_")) upper = upper[3..];
+
+        uint vk = upper switch
+        {
+            "SPACE" => 0x20,
+            "TAB" => 0x09,
+            "ENTER" or "RETURN" => 0x0D,
+            "ESCAPE" or "ESC" => 0x1B,
+            "CAPITAL" or "CAPSLOCK" => 0x14,
+            "SHIFT" => 0x10,
+            "CTRL" or "CONTROL" => 0x11,
+            "ALT" or "MENU" => 0x12,
+            "BACKSPACE" => 0x08,
+            "INSERT" => 0x2D,
+            "DELETE" => 0x2E,
+            "HOME" => 0x24,
+            "END" => 0x23,
+            "PAGEUP" => 0x21,
+            "PAGEDOWN" => 0x22,
+            "UP" => 0x26,
+            "DOWN" => 0x28,
+            "LEFT" => 0x25,
+            "RIGHT" => 0x27,
+            _ => 0
+        };
+
+        if (vk == 0 && upper.Length == 1 && char.IsAsciiLetterOrDigit(upper[0]))
+            vk = upper[0];
+
+        if (vk == 0 && upper.Length is 2 or 3 && upper[0] == 'F' &&
+            int.TryParse(upper.AsSpan(1), out int fn) && fn is >= 1 and <= 24)
+            vk = (uint)(0x70 + fn - 1);
+
+        if (vk == 0) { reason = "not a key name this build knows"; return false; }
+
+        // 規格 §8 明文的警告：單獨 Shift 在檔案總管拖曳時代表「移動」，可能誤操作。
+        string? warning = vk == 0x10
+            ? "Shift is also Explorer's drag-modifier: holding it while dragging means MOVE, which can surprise the user"
+            : null;
+
+        info = new TriggerKeyInfo(vk, NameOf(vk), warning);
+        return true;
+    }
+
+    /// <summary>解析設定檔裡的觸發鍵；解析不了就**明講**並用預設，不讓程式起不來。</summary>
+    public static uint ResolveTriggerVk(Settings settings, Action<string> log)
+    {
+        if (TryResolveTriggerKey(settings.TriggerKey, out TriggerKeyInfo info, out string why)) return info.Vk;
+        log($"settings: WARNING triggerKey='{settings.TriggerKey}' unusable ({why}) -> using Space");
+        return 0x20;
+    }
+
+    /// <summary>VK → 寫回檔案的正式名稱（與鍵帽顯示名一致；認不得的就寫代碼，不假裝認得）。</summary>
+    public static string NameOf(uint vk) => vk switch
+    {
+        0x20 => "Space",
+        0x09 => "Tab",
+        0x0D => "Enter",
+        0x1B => "Escape",
+        0x14 => "CapsLock",
+        0x10 => "Shift",
+        0x11 => "Ctrl",
+        0x12 => "Alt",
+        0x08 => "Backspace",
+        >= 0x70 and <= 0x87 => $"F{vk - 0x6F}",
+        >= 0x30 and <= 0x39 => ((char)vk).ToString(),
+        >= 0x41 and <= 0x5A => ((char)vk).ToString(),
+        _ => $"0x{vk:X2}"
+    };
 }

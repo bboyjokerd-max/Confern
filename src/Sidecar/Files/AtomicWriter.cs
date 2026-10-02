@@ -16,7 +16,13 @@ internal static class AtomicWriter
     }
 
     /// <summary>把內容寫進暫存檔，flush 到磁碟，再 rename 到目標。任何失敗都不留暫存檔。</summary>
-    public static void Write(string targetPath, Action<Stream> writeContent, TempJournal? journal = null)
+    /// <param name="overwrite">
+    /// 轉檔輸出**永不覆寫**（規格 §5 的紅線，預設 false，靠 <c>File.Move(overwrite: false)</c> 保證）。
+    /// 只有「程式自己的檔案」（設定檔）才傳 true——那裡覆寫是意圖，不是意外；而且仍然走同一條
+    /// 原子寫入路徑，不另寫第二套（否則「不留 .tmp-*」這個保證會變成兩份要各自維護）。
+    /// </param>
+    public static void Write(string targetPath, Action<Stream> writeContent, TempJournal? journal = null,
+                             bool overwrite = false)
     {
         string temp = TempPathFor(targetPath);
         try
@@ -30,7 +36,7 @@ internal static class AtomicWriter
                 stream.Flush(flushToDisk: true);
             }
 
-            File.Move(LongPath.Prepare(temp), LongPath.Prepare(targetPath), overwrite: false);
+            File.Move(LongPath.Prepare(temp), LongPath.Prepare(targetPath), overwrite: overwrite);
         }
         catch
         {
