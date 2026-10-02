@@ -311,3 +311,62 @@ D3 面板圓角統一成 `min(高度/2, 18px)`（建議）還是維持現狀；D
 
 另記一則：獨立的視覺檢查說「錯誤紅太刺眼、與冷鋼／薄荷定位不符」——**不採納**，
 那是凍結的 `WheelDesign.NoticeFill`，全產品錯誤色只有一個來源。不知情的審美意見不是證據。
+
+---
+
+## 待辦 5 · D1＋D2 實作規格（2026-10-02 定案，接線用）
+
+使用者已核准 D1＝**專屬可點視窗**、D2＝**失敗藥丸游標停留時不淡出**。以下是可直接照做的規格。
+
+### 為什麼是局部改動
+
+`Program.cs:673` 的 `progressLayer = new VisualLayer(evidence)` 是**藥丸專屬**的實例（輪盤用 670 那個），
+所以「換容器」不會波及輪盤。現有 `VisualLayer` 對外只有 6 個成員被 `ProgressPresenter` 用到：
+`Show(int,int,Bitmap)`／`Hide()`／`IsVisible`／`Frames`／`StartTick(int)`／`TickRequested`。
+
+⇒ 抽出這 6 個成員的小介面，`VisualLayer`（**原封不動**）與新的 `PillWindow` 共同實作，
+`ProgressPresenter` 只依賴介面。
+
+### `PillWindow` 的規格
+
+- 類名 `ConfernPillWindow`；**頂層** `WS_POPUP`；exstyle `WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`，
+  **絕對不加** `WS_EX_TRANSPARENT`（那正是目前點不到的原因）。
+- 繪製沿用 `UpdateLayeredWindow`（與 `VisualLayer` 同一條路徑），**沒有新套件**。
+- 訊息：`WM_LBUTTONUP` → 回呼（`ToggleDetail()`）；`WM_MOUSEACTIVATE` → `MA_NOACTIVATE`（不搶焦點）；
+  `WM_MOUSEMOVE` ＋ `TrackMouseEvent(TME_LEAVE)` → 進入／離開（**D2 唯一的實作方式**）。
+- 保留 `WndProc` 委派以免被 GC 回收（`TrayIcon.cs:60` 已有同樣的註解與做法）。
+- 與訊息迴圈同執行緒（藥丸本來就在主執行緒建立）。
+
+### 幾何：仍然只有一份
+
+- 視窗位置與大小＝**同一個 bitmap 的尺寸**，由 `ProgressPresenter` 決定（收合＝藥丸；展開＝藥丸＋面板
+  合成在同一張 bitmap 上的堆疊），呼叫端不得自己算第二份。
+- 展開時的合成也要能 **headless dump**（新增一個 `expanded` 變體），否則展開狀態的版面
+  只能靠肉眼，而這個專案已經證明「靠肉眼」會在裁切與折行上出錯。
+
+### 展開後的生命週期（規格沒寫，這裡定案）
+
+- 點藥丸＝展開；再點一次（藥丸或面板上任何位置）＝收合。
+- 收合狀態：有失敗時**游標停在藥丸上就不淡出**，離開後照原本的 5 秒；成功路徑維持 2 秒不變。
+- 展開狀態：游標停在上面就不淡出；游標離開後 5 秒淡出。
+- **不做 Esc**（我們不取焦點，收不到鍵盤）；**不做點擊外部關閉**（視窗只收到自己範圍內的點擊）。
+  這是刻意的取捨：多一個隱形的全局鍵盤鉤子比多一個 5 秒計時器危險得多。
+
+### 驗收（可失敗、且不靠自證）
+
+1. **真實合成點擊**（SendInput）落在藥丸上：`IsExpanded` 翻轉、視窗尺寸變成合成後的大小、
+   面板的墨跡真的出現在畫面上（抓那一塊螢幕像素來量，不是讀我們自己的 log）。
+2. **點在藥丸外不得展開**（`IsExpanded` 仍為 false）。
+3. **不搶焦點**：點擊前後的前景視窗必須是同一個（`m1g` S15.19 已有同樣手法可抄）。
+4. **停留不淡出**：合成滑鼠移入後，超過原本的淡出時間視窗仍在且 alpha 未降。
+5. **一份幾何**：視窗矩形必須等於回報的 `PillRect`（或展開後的合成矩形），不得各自為政。
+6. **無畫面自測**：`--pill-selftest` 對真實的 `WndProc` 送 `WM_LBUTTONUP`（不必真的動滑鼠）
+   ⇒ 走的是同一條訊息路徑，可當第 1 項之外的獨立證據。
+7. 假故障演練：`WM_LBUTTONUP` 改成不做任何事 ⇒ 第 1 項必須紅；移除 `MA_NOACTIVATE` ⇒ 第 3 項紅；
+   移除 `TrackMouseEvent` ⇒ 第 4 項紅。
+
+### 這一片的硬要求
+
+純 ASCII 的 `.ps1`（PS 5.1 會把中文註解吃成 ANSI，這個專案已經踩過）；先殺 `Confern`；
+建置後確認 exe 時間戳有變**且 `src\` 底下沒有比 exe 新的檔案**；不加新套件；
+不動 `WheelDesign`／光暈／扇形圓角；不 commit；不改 `docs/`。
