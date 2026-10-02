@@ -106,16 +106,41 @@ internal static class WheelDesign
 
     public static Color Glow(double meanLuma) => IsLightBackdrop(meanLuma) ? GlowOnLight : GlowOnDark;
 
-    /// <summary>光暈強度倍率。淺色底要更強才看得見（初版 2.6 被嫌像灰髒污，調柔為 1.8）。</summary>
-    public static double GlowStrength(double meanLuma) => IsLightBackdrop(meanLuma) ? 1.8 : 1.0;
-
     /// <summary>盤外柔投影的最大不透明度（0–255）。</summary>
     public static int ShadowMax(double meanLuma) => IsLightBackdrop(meanLuma) ? 130 : 110;
 
-    /// <summary>光暈環的圈數與每圈外擴（px）。</summary>
+    // ================= 光暈的強度與厚度（2026-10-01 依設計稿實測） =================
+    //
+    // 量測方式＝色度（G−R）反推「已合成的 alpha」：薄荷光暈 G−R＝78、淺底深青暈 G−R＝74，
+    // 灰桌布 ≈ 0，所以 (G−R)/78 × 255 就是該點的光暈 alpha，不受桌布明暗起伏干擾。
+    // ⚠ 量到的是**合成後**的 alpha（含投影壓暗），不是圖層自己的 alpha；
+    //   換算圖層 alpha 時忘了除以 (1−投影) 就會高估，很容易誤判成「實作太濃」。
+    //
+    // 實測（盤緣外距離 → 合成 alpha）：
+    //   深色底：設計稿 +6px 108、+14px 65、+26px 21；舊實作 +6px 88、+14px 49、+26px 10
+    //           ⇒ **相符**（實作略窄），深色分支不需改。
+    //   淺色底：設計稿 +6px 76、+14px 48；舊實作（×1.8）134、69 ⇒ **約 1.76 倍過濃**。
+    // 淺色 ×1.8 是使用者對 §8.4 問題②核可的「淺底加亮」，保留；
+    // 但它是「實機看起來變成一圈亮環」的主要嫌疑，另案向使用者確認。
+
+    /// <summary>盤緣處的**累積**不透明度（0–255）。</summary>
+    public const int GlowRimAlphaDark = 113;
+    public const int GlowRimAlphaLight = 166;
+
+    public static int GlowRimAlpha(double meanLuma) =>
+        IsLightBackdrop(meanLuma) ? GlowRimAlphaLight : GlowRimAlphaDark;
+
+    /// <summary>
+    /// 柔暈從盤緣外幾 px 才開始。設計稿在盤緣外留一圈空隙（spike 的 GlowInsideDisc 把
+    /// 盤內＋選中外擴那 4px 的光暈歸零）；不留的話光暈會貼著玻璃邊，看起來像一條亮環。
+    /// </summary>
+    public const float GlowStartPx = 3f;
+
+    /// <summary>柔暈衰減厚度（px）。設計稿實測約在盤緣外 39px 處歸零。</summary>
+    public const float GlowSpanPx = 36.4f;
+
+    /// <summary>光暈疊幾圈。**只影響階梯的細緻度，不影響總量**（總量由 <see cref="GlowRimAlpha"/> 決定）。</summary>
     public const int GlowRings = 14;
-    public const float GlowStepPx = 2.6f;
-    public const float GlowStartPx = 3.0f;
 
     // ================= 中心：來源縮圖 ＋ 膠囊 =================
 

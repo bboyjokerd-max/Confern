@@ -292,13 +292,12 @@ internal sealed class WheelPresenter
     {
         double luma = _glass?.MeanLuma ?? 0.0;
         Color glow = WheelDesign.Glow(luma);
-        double strength = WheelDesign.GlowStrength(luma);
 
-        // 1) 柔暈（由外而內疊加，累積值收斂到設計的強度）。
-        //    設計值：每圈 0.016 + 0.004*(14−k)，累積 ≈ 1 − e^(−0.588) ≈ 0.44。
-        double maxAcc = 1.0 - Math.Exp(-0.588 * strength);
+        // 1) 柔暈（由外而內疊加）。強度與厚度都是**實測設計稿**得來的值（見 WheelDesign 的註記）。
+        //    從盤緣外 GlowStartPx 才開始，否則光暈會貼著玻璃邊變成一條亮環。
+        double rimAcc = WheelDesign.GlowRimAlpha(luma) / 255.0;
         DrawSoftRing(g, cx, cy, r + WheelDesign.GlowStartPx,
-                     WheelDesign.GlowRings * WheelDesign.GlowStepPx, WheelDesign.GlowRings, maxAcc, glow);
+                     WheelDesign.GlowSpanPx, WheelDesign.GlowRings, rimAcc, glow);
 
         // 2) 柔投影（讓玻璃浮起來，而不是貼在桌布上）。淺色桌布要更重。
         int shadowMax = WheelDesign.ShadowMax(luma);
@@ -333,27 +332,30 @@ internal sealed class WheelPresenter
 
     /// <summary>
     /// 由外而內疊出柔和的環狀漸層。<paramref name="spanPx"/> 是衰減的厚度，
-    /// <paramref name="maxAcc"/> 是最內側的**累積**不透明度（0–1）。
-    /// 每一圈的不透明度由「目標累積值」反推，所以疊出來的曲線與設計值一致，不會愈疊愈濃。
+    /// <paramref name="maxAcc"/> 是**在盤緣（距離 0）的累積不透明度**（0–1）。
+    /// 每一圈的不透明度由「目標累積值」反推，所以疊出來的曲線與設計值一致，不會愈疊愈濃；
+    /// 最內一圈畫在距離 0（＝圓盤本身，會被不透明的玻璃蓋掉，只是讓累積值在盤緣剛好等於
+    /// <paramref name="maxAcc"/>）。目標值隨距離二次衰減。
     /// </summary>
     private static void DrawSoftRing(Graphics g, float cx, float cy, float r, double spanPx,
                                      int steps, double maxAcc, Color colour)
     {
         if (spanPx <= 0 || steps <= 0 || maxAcc <= 0) return;
         double acc = 0;
-        for (int j = steps; j >= 1; j--)
+        for (int j = steps; j >= 0; j--)
         {
             double d = spanPx * j / steps;
             double t = 1.0 - d / spanPx;
             double target = maxAcc * t * t;
             if (target <= acc) continue;
-            double a = 1.0 - (1.0 - target) / (1.0 - acc);
-            if (a <= 0.002) continue;
-            int alpha = Math.Clamp((int)Math.Round(a * 255), 0, 255);
+            int alpha = Math.Clamp((int)Math.Round((target - acc) / (1.0 - acc) * 255), 0, 255);
+            if (alpha == 0) continue;
             float rr = r + (float)d;
             using var brush = new SolidBrush(Color.FromArgb(alpha, colour));
             g.FillEllipse(brush, cx - rr, cy - rr, rr * 2, rr * 2);
-            acc = 1.0 - (1.0 - acc) * (1.0 - a);
+            // 記帳要用**實際畫出的整數 alpha**：用未四捨五入的值記帳，
+            // 十幾圈累積下來總量會短少一到兩成（實測盤緣 52 只畫出 40）。
+            acc = 1.0 - (1.0 - acc) * (1.0 - alpha / 255.0);
         }
     }
 

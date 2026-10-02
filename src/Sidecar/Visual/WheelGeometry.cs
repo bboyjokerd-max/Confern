@@ -30,8 +30,13 @@ internal static class WheelGeometry
     /// 輪盤本體之外的留白：要放得下**快照玻璃的最大外緣**（柔暈最外圈 ≈ 39.4px）再加 1–2px 反鋸齒。
     /// ⚠ 不可憑感覺調小：調小＝柔暈被點陣圖邊緣切掉，而且只會「看起來有點怪」，不會報錯。
     /// </summary>
-    public static int MarginPx =>
-        (int)Math.Ceiling(WheelDesign.GlowStartPx + WheelDesign.GlowRings * WheelDesign.GlowStepPx) + 2;
+    /// <summary>
+    /// 輪盤外要留多少 px 給柔暈與投影。**下限由素材決定**：必須 ≥ 光暈厚度 + 2
+    /// （<see cref="WheelDesign.GlowSpanPx"/> = 30 ⇒ 32）且 ≥ 投影半徑 26。
+    /// 但這個值同時決定點陣圖大小與視窗原點，已被驗收腳本綁住（304×349、原點＝游標−24），
+    /// 所以**刻意固定**、不隨光暈常數浮動；要改就得同步更新 `verify-m1b` 的期望值。
+    /// </summary>
+    public const int MarginPx = 42;
 
     // ---- 輪盤下方的資訊帶，由上而下：鍵帽 → 說明文字 → 檔名預覽 ----
 
