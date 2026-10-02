@@ -188,6 +188,89 @@ internal static class Native
     public static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, StringBuilder? lpszFile, uint cch);
     [DllImport("shell32.dll")] public static extern void DragFinish(IntPtr hDrop);
 
+    // ================= M1g：托盤圖示（規格 §8 的托盤入口） =================
+    //
+    // 托盤是**唯一**會長期活著、由 shell 主動回呼的視窗訊息來源。它與覆蓋層無關，
+    // 所以訊息常數掛在 WM_APP 家族（0x8004 起），與設定頁的 0x8003 相接：
+
+    /// <summary>托盤回呼（lParam ＝ 滑鼠訊息，見 <see cref="TrayCallback*"/>）。</summary>
+    public const uint WM_APP_TRAY = 0x8004;
+
+    /// <summary>要求托盤執行某個命令（wParam ＝ <see cref="TrayCommand*"/>）。</summary>
+    public const uint WM_APP_TRAY_COMMAND = 0x8005;
+
+    /// <summary>托盤選單命令的代碼。走訊息而不是直接呼叫，讓「選單點擊」與自測共用同一條分派。</summary>
+    public const int TrayCommandOpenSettings = 1;
+    public const int TrayCommandTogglePause = 2;
+    public const int TrayCommandExit = 3;
+
+    /// <summary>托盤回呼的滑鼠訊息（放在 <c>WM_APP_TRAY</c> 的 lParam）。</summary>
+    public const int TrayCallbackLeftDoubleClick = 0x0203;   // WM_LBUTTONDBLCLK
+    public const int TrayCallbackRightUp = 0x0205;           // WM_RBUTTONUP
+
+    /// <summary>
+    /// 訊息專用視窗的父視窗。**托盤刻意不用它**：它建立的視窗收不到
+    /// <c>TaskbarCreated</c> 的廣播（那個廣播只送給頂層視窗），而 explorer 重啟後
+    /// 重新加入圖示正是托盤最經典的 bug——用了它等於把那個 bug 寫進來。
+    /// 常數仍然留在這裡，讓「為什麼不用」是一件查得到的事。
+    /// </summary>
+    public static readonly IntPtr HWND_MESSAGE = new(-3);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct NOTIFYICONDATAW
+    {
+        public uint cbSize; public IntPtr hWnd; public uint uID; public uint uFlags;
+        public uint uCallbackMessage; public IntPtr hIcon;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string szTip;
+        public uint dwState; public uint dwStateMask;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szInfo;
+        public uint uVersion;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string szInfoTitle;
+        public uint dwInfoFlags; public Guid guidItem; public IntPtr hBalloonIcon;
+    }
+
+    public const uint NIM_ADD = 0x00000000;
+    public const uint NIM_MODIFY = 0x00000001;
+    public const uint NIM_DELETE = 0x00000002;
+    public const uint NIF_MESSAGE = 0x00000001;
+    public const uint NIF_ICON = 0x00000002;
+    public const uint NIF_TIP = 0x00000004;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);
+
+    /// <summary>
+    /// explorer 重啟／當掉重開時，shell 會廣播這個訊息要求所有托盤重新加入圖示。
+    /// 訊息代碼是**動態**的，每次開機都可能不同，所以只能在執行期註冊取得。
+    /// </summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint RegisterWindowMessageW(string lpString);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreatePopupMenu();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool AppendMenuW(IntPtr hMenu, uint uFlags, IntPtr uIDNewItem, string? lpNewItem);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool ModifyMenuW(IntPtr hMenu, uint uPosition, uint uFlags, IntPtr uIDNewItem, string? lpNewItem);
+    [DllImport("user32.dll")]
+    public static extern bool DestroyMenu(IntPtr hMenu);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int TrackPopupMenu(IntPtr hMenu, uint uFlags, int x, int y, int nReserved,
+        IntPtr hWnd, IntPtr prcRect);
+
+    public const uint MF_STRING = 0x00000000;
+    public const uint TPM_RETURNCMD = 0x0100;
+    public const uint TPM_RIGHTBUTTON = 0x0002;
+
+    /// <summary>
+    /// 托盤選單前的 <c>SetForegroundWindow</c> 與選單後的「空訊息」是 MSDN 明文要求的兩步，
+    /// 少任一步選單都會卡在畫面上（點別的地方不會關）。
+    /// </summary>
+    public const uint WM_NULL = 0x0000;
+
     // ---- 低階 hook ----
     // WH_MOUSE_LL / WH_KEYBOARD_LL **不需要管理員權限**：它們在安裝它們的行程中執行，
     // 不像 WH_GETMESSAGE 需要注入目標行程。回呼在安裝執行緒（＝有訊息迴圈的 UI 執行緒）上被呼叫。
@@ -232,6 +315,8 @@ internal static class Native
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    /// <summary>托盤選單跳出來之前必須把焦點交給自己（MSDN 的要求，少了它選單會卡住）。</summary>
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 

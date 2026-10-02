@@ -183,7 +183,10 @@ Check 'S14.27 the page thread logs through the main thread, not around it' (
 $appLog = Join-Path $uiWork 'in-app.log'
 Get-Process -Name Confern -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
-$app = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-live', '--quiet', '--log', $appLog) -PassThru -WindowStyle Hidden
+# --no-autostart: --settings-ui-live is the RESIDENT path (tray included), and the resident path
+# applies the startWithWindows setting, whose spec default is ON. Without this flag this run would
+# write the user's Run key with a path into bin\Release -- checked, not assumed: it did.
+$app = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-live', '--no-autostart', '--quiet', '--log', $appLog) -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 5
 $appAlive = -not $app.HasExited
 if ($appAlive) { $app.Kill(); $app.WaitForExit(5000) | Out-Null }
@@ -260,8 +263,8 @@ $cfgOn = Join-Path $uiWork 'diag-on.json'
 Invoke-Sidecar @('--settings-set', 'diagnostics=false', '--settings-file', $cfgOff) 'set-diag-off' | Out-Null
 Invoke-Sidecar @('--settings-set', 'diagnostics=true', '--settings-file', $cfgOn) 'set-diag-on' | Out-Null
 
-$runOff = Invoke-Sidecar @('--settings-file', $cfgOff, '--wheel-payload', $diagSrc, '--progress-trace') 'diag-off-run'
-$runOn = Invoke-Sidecar @('--settings-file', $cfgOn, '--wheel-payload', $diagSrc, '--progress-trace') 'diag-on-run'
+$runOff = Invoke-Sidecar @('--settings-file', $cfgOff, '--no-autostart', '--wheel-payload', $diagSrc, '--progress-trace') 'diag-off-run'
+$runOn = Invoke-Sidecar @('--settings-file', $cfgOn, '--no-autostart', '--wheel-payload', $diagSrc, '--progress-trace') 'diag-on-run'
 $ticksOff = ([regex]::Matches($runOff.Text, 'progress tick')).Count
 $ticksOn = ([regex]::Matches($runOn.Text, 'progress tick')).Count
 Check 'S14.34 diagnostics OFF keeps essential events but drops the detail lines' (

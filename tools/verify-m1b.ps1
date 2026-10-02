@@ -140,8 +140,12 @@ function Get-PayloadRun([string]$payload, [string]$tag) {
   Stop-AllSidecar
   $log = Join-Path $LogDir "m1b-s7-$tag.log"
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  # --no-autostart: --wheel-payload goes all the way through the resident path (it really converts,
+  # then serves the message loop), which is where the startWithWindows setting is applied. Its spec
+  # default is ON, so without this flag every regression run would write the user's Run key with a
+  # path into bin\Release.
   $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--wheel-payload', $payload, '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+    '--wheel-payload', $payload, '--no-autostart', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
   return [pscustomobject]@{ Exit = $proc.ExitCode; Lines = (Get-LogLines $log) }
 }
 
@@ -345,7 +349,7 @@ function Invoke-S7 {
   $log = Join-Path $LogDir 'm1b-s7-cycles.log'
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
   $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--wheel-simulate-cycles', '3', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
+    '--wheel-simulate-cycles', '3', '--no-autostart', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru -Wait
   $lines = Get-LogLines $log
   Check "S7.11 simulate cycles exit 0" ($proc.ExitCode -eq 0)
   Check "S7.12 simulate cycles: no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
@@ -408,7 +412,7 @@ function Invoke-S7 {
   $log = Join-Path $LogDir 'm1b-s7-hover.log'
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
   $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--wheel-hover-selftest', '--quiet', '--watchdog-seconds', '300', '--log', $log) -PassThru -Wait
+    '--wheel-hover-selftest', '--no-autostart', '--quiet', '--watchdog-seconds', '300', '--log', $log) -PassThru -Wait
   $lines = Get-LogLines $log
   Check "S7.31 hover self-test exits 0" ($proc.ExitCode -eq 0)
   Check "S7.32 hover self-test has no FAIL line" (-not (Test-LogCase $lines 'FAIL'))
@@ -458,8 +462,10 @@ function Invoke-S8([int]$Window) {
 
   $log = Join-Path $LogDir 'm1b-s8.log'
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  # --no-autostart: this is a resident run, and a resident run applies the startWithWindows setting
+  # (spec 8, default ON). Without the flag a regression run would write the user's Run key.
   $proc = Start-Process -FilePath $Exe -ArgumentList @(
-    '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
+    '--no-autostart', '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
   Start-Sleep -Milliseconds 1500
   $proc.Refresh()
   if ($proc.HasExited) { Check "S8.0 app is alive and idle before the gesture" $false; return }

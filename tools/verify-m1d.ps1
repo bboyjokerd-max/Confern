@@ -210,7 +210,7 @@ if ($offeredLine) {
 $workerLog = Join-Path $env:LOCALAPPDATA 'Confern\worker.log'
 $before = if (Test-Path -LiteralPath $workerLog) { (Get-Item -LiteralPath $workerLog).Length } else { 0 }
 $payloadLog = Join-Path $logDir 'payload.log'
-$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $srcJpg, '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
+$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $srcJpg, '--no-autostart', '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
 $payloadText = (Get-Content -LiteralPath $payloadLog -Encoding UTF8) -join "`n"
 Check 'S12.10a payload path converts through the worker' ($payloadText -match 'conversion finished: finished=True ok=1 failed=0') ''
 Check 'S12.10b progress is ONE window updated in place' ($payloadText -match 'progress instrument: updates=(\d+) frames=(\d+)') ''
@@ -258,7 +258,7 @@ if ($releaseLine) {
 # The failure contract must therefore be asserted through the payload/UI path as
 # well, or the same drift can return with every check still green.
 $failPayloadLog = Join-Path $logDir 'payload-failure.log'
-$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $corrupt, '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
+$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $corrupt, '--no-autostart', '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
 $failText = (Get-Content -LiteralPath $failPayloadLog -Encoding UTF8) -join "`n"
 $failPill = Get-PillLine $failText
 Check 'S12.15a the pill shows the reason, not a bare count' ($failPill.Contains($MSG_DECODE)) "pill='$failPill'"

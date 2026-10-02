@@ -158,7 +158,11 @@ function Stop-AllSidecar {
 function Start-Sidecar([string[]]$Argv, [string]$Name) {
   $log = Join-Path $LogDir "$Name.log"
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
-  $proc = Start-Process -FilePath $Exe -ArgumentList ($Argv + @('--quiet', '--log', $log)) -PassThru
+  # --no-autostart: a resident run applies the startWithWindows setting (spec 8), whose spec default
+  # is ON. Without this flag a regression run would write the user's Run key with a path into
+  # bin\Release -- a system change nobody asked for. The flag is passed here, once, so every
+  # resident launch in this file is isolated from it.
+  $proc = Start-Process -FilePath $Exe -ArgumentList ($Argv + @('--no-autostart', '--quiet', '--log', $log)) -PassThru
   Start-Sleep -Milliseconds 1500
   return [pscustomobject]@{ Process = $proc; Log = $log }
 }

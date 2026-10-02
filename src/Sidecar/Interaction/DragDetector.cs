@@ -46,13 +46,52 @@ internal sealed class DragDetector
         }
     }
 
+    /// <summary>
+    /// 保險 #5 是否已經扣下。**一旦 true 就不再清除**——「直到重啟」的實作就是這個閂。
+    ///
+    /// 與 <see cref="ReleaseGuard.KillSwitchLatched"/> 是同一個決定的兩半：托盤的暫停與保險 #5
+    /// 共用 <see cref="IsDisabled"/> 這一個狀態，但**復原的權力不共用**。少了它，使用者按下
+    /// 緊急停用之後，點一下托盤的「繼續轉換」就能把捕捉重新武裝起來，而規格 §4.2.2 的保險 #5
+    /// 是「直到重啟」——那條保證會只剩文件上有寫。
+    /// </summary>
+    public bool KillSwitchLatched { get; private set; }
+
     /// <summary>緊急停用（保險 #5）：此後不再進入 Armed／Capturing，直到重啟。</summary>
     public void Disable()
     {
-        IsDisabled = true;
-        _triggerDown = false;
-        SetState(DetectorState.Idle);
-        _evidence.Line("detector DISABLED (no capture until restart)");
+        KillSwitchLatched = true;
+        SetPaused(true, "kill switch (insurance #5), one-way until restart");
+    }
+
+    /// <summary>
+    /// 托盤「暫停／繼續轉換」用的來回切換。**與保險 #5 是同一個停用狀態**
+    /// （<see cref="IsDisabled"/>），不是第二套機制——托盤的暫停若另立一個旗標，
+    /// 就會出現「按了保險 #5 之後托盤說可以繼續」這種兩個開關互相矛盾的情況。
+    ///
+    /// 為什麼保險 #5 不直接改成可回復：規格 §4.2.2 的保險 #5 明文是「直到重啟」，
+    /// 那是一條安全保證；托盤的暫停是使用者的日常開關。兩者共用狀態，但語意各自保留——
+    /// 所以**復原**這一側要擋掉已經扣下的保險 #5（<see cref="KillSwitchLatched"/>）。
+    /// </summary>
+    public void SetPaused(bool paused, string why = "tray pause/resume")
+    {
+        if (!paused && KillSwitchLatched)
+        {
+            _evidence.Line($"detector: REFUSED to resume ({why}): the kill switch latched capture off until restart");
+            return;
+        }
+
+        if (IsDisabled == paused)
+        {
+            _evidence.Line($"detector: pause={paused} requested but it is already in that state; nothing to do");
+            return;
+        }
+
+        IsDisabled = paused;
+        _triggerDown = false;                  // 停用或復原時都不保留上一個按鍵狀態
+        if (paused) SetState(DetectorState.Idle);
+        _evidence.Line(paused
+            ? $"detector DISABLED ({why}: no capture until resumed)"
+            : $"detector ENABLED again ({why})");
     }
 
     /// <summary>

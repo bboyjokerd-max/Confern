@@ -129,6 +129,25 @@ internal static class Program
             return App.RunConvert(opt, convertEvidence);
         }
 
+        // M1g：托盤圖示的自測（待辦 4）。與設定頁的自測一樣必須在單一實例守衛之前——
+        // 否則「已經有一個 Confern 在跑」時，診斷會被守衛擋掉，而這正是使用者最有機會
+        // 想跑它的時候。
+        if (opt.TraySelfTest)
+        {
+            Native.AttachParentConsole();
+            using var trayEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunTraySelfTest(opt, trayEvidence);
+        }
+
+        // M1g：開機自動啟動的探測（規格 §8 的 StartWithWindows）。**只碰指定的子機碼**，
+        // 永不碰真正的 Run 機碼——理由見 Autostart 的類別註解。
+        if (!string.IsNullOrEmpty(opt.AutostartProbe))
+        {
+            Native.AttachParentConsole();
+            using var startupEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunAutostartProbe(opt.AutostartProbe, startupEvidence);
+        }
+
         // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
         // 因此這裡不留下任何需要清理的檔案鎖。
         using var mutex = new Mutex(initiallyOwned: true, $@"Local\{ProductInfo.Name}.SingleInstance", out bool isFirst);
@@ -197,6 +216,15 @@ internal sealed class Options
           --settings-ui-live        start the overlay AND open the settings page (saving applies at once)
           --settings-ui-dump <png>  render the settings page to a PNG and exit (visual evidence)
           --settings-ui-selftest    open the settings page, verify it opens/closes and exits (diagnostic)
+          --tray-selftest           create the tray icon, verify registration/menu/tooltip, run each menu
+                                    command through the shared dispatch, then prove the shell let it go
+          --autostart-probe <subkey>
+                                    exercise the start-with-Windows entry against that HKCU subkey
+                                    (enable -> read back -> disable); never touches the real Run key
+          --tray-exit-after <ms>    resident run: ask the tray to quit after N ms (acceptance runs must
+                                    not inject input, and a resident app has to be asked to leave)
+          --no-autostart            resident run: do NOT apply startWithWindows (spec 8). Verification
+                                    runs use this so a regression run never changes the user's Run key
           --quiet                   do not echo events to the console
         """;
 
@@ -281,6 +309,39 @@ internal sealed class Options
     /// 而且**不會讓行程結束不掉**）。最後那一項人眼看不到，卻是設定頁最現實的失效模式。
     /// </summary>
     public bool SettingsUiSelfTest;
+    /// <summary>
+    /// --tray-selftest：托盤圖示的自測（待辦 4）。托盤最現實的失效模式是**靜默的**——
+    /// 圖示根本沒出現在通知區域，而程式一切正常。所以每一項都必須能被斷言：
+    /// 有沒有註冊、選單幾項、提示文字是什麼、三個命令各自有沒有走到、關掉之後 shell 還留不留著它。
+    /// </summary>
+    public bool TraySelfTest;
+    /// <summary>
+    /// --autostart-probe &lt;subkey&gt;：在指定的 HKCU 子機碼上完整跑一次
+    /// 「不存在 → 啟用 → 讀回 → 停用 → 不存在」。
+    /// **存在的理由就是「不要動使用者的真機碼」**：驗收若直接寫真正的 Run 機碼，
+    /// 每一次回歸都會悄悄改掉使用者的開機啟動設定。
+    /// </summary>
+    public string AutostartProbe = "";
+    /// <summary>
+    /// --tray-exit-after &lt;ms&gt;：常駐執行 N 毫秒後，**透過托盤的「結束」命令**要求正常關機。
+    ///
+    /// 存在的理由：常駐程式不會自己結束，而驗收腳本不得注入任何合成輸入（使用者可能正在用電腦），
+    /// 也不該用 Kill 假裝「正常結束」——那會跳過全部 Dispose，正好掩蓋掉這一項要驗的東西。
+    /// 走的是與選單「結束」同一條路徑，所以它驗到的就是使用者按下去會發生的事。
+    /// </summary>
+    public int TrayExitAfterMs;
+    /// <summary>
+    /// --no-autostart：常駐模式**不套用** `StartWithWindows`（規格 §8）。
+    ///
+    /// 為什麼需要一個「明確說不要」的旗標：`StartWithWindows` 的預設是 on，所以任何一個用預設值
+    /// 啟動常駐模式的行程都會寫使用者的 Run 機碼。驗收腳本啟動的正是這種行程——若不把它們
+    /// 隔開，跑一次回歸就會在使用者的開機啟動清單裡留下一個指向 `bin\Release` 的項目，
+    /// 而那是**使用者沒有要求過**的系統變更。
+    ///
+    /// 反過來說，這裡刻意不是「偵測到旗標就不要」的自動判斷：那種規則沒有人說得清楚，
+    /// 而「這個行程會不會改我的系統設定」必須是一件查得出來的事。
+    /// </summary>
+    public bool NoAutostart;
     /// <summary>--trigger-key 是否由命令列明確指定（決定它與設定檔的優先順序）。</summary>
     public bool TriggerKeyFromCli;
     /// <summary>--watchdog-seconds 是否由命令列明確指定（同上）。</summary>
@@ -292,6 +353,17 @@ internal sealed class Options
     /// 它**不**驗證 OLE 管線本身（那需要真實拖曳），只驗證拿到酬載之後的行為。
     /// </summary>
     public string? WheelPayload;
+
+    /// <summary>
+    /// 自測專用：同一組旗標但指向另一個設定檔。存在的理由只有一個——
+    /// 自測會走**真正的**「開啟設定」路徑，而它絕不可以編輯使用者真正的設定檔。
+    /// </summary>
+    public Options ForSelfTest(string settingsFile)
+    {
+        var copy = (Options)MemberwiseClone();   // Options 不是 record，所以沒有 with
+        copy.SettingsFile = settingsFile;
+        return copy;
+    }
 
     public static Options Parse(string[] args)
     {
@@ -387,6 +459,14 @@ internal sealed class Options
                     if (++i < args.Length) o.SettingsUiDump = args[i];
                     break;
                 case "--settings-ui-selftest": o.SettingsUiSelfTest = true; break;
+                case "--tray-selftest": o.TraySelfTest = true; break;
+                case "--autostart-probe":
+                    if (++i < args.Length) o.AutostartProbe = args[i];
+                    break;
+                case "--tray-exit-after":
+                    if (++i < args.Length && int.TryParse(args[i], out int exitMs) && exitMs > 0) o.TrayExitAfterMs = exitMs;
+                    break;
+                case "--no-autostart": o.NoAutostart = true; break;
             }
         }
         return o;
@@ -552,10 +632,19 @@ internal static class App
             guard.SetVisibleTimeout(updated.CaptureTimeoutSeconds * 1000);
             evidence.SetDiagnostics(updated.Diagnostics);
             presenter.TriggerKeyLabel = Options.VirtualKeyLabel(appliedVk);
+
+            // 規格 §8 的 `StartWithWindows`：設定頁存檔時是唯一的另一個寫入點。
+            // --no-autostart 也要擋住在這裡（否則「隔離過的常駐行程」還是能被設定頁打開開關）。
+            ApplyStartWithWindows(opt.NoAutostart ? null : updated.StartWithWindows, evidence);
+
             evidence.Line($"settings ui: applied {SettingsStore.Describe(updated)} " +
                           $"(trigger=VK 0x{appliedVk:X2}, watchdog={updated.CaptureTimeoutSeconds * 1000} ms)");
         }
         visual.SettingsChanged += ApplyFromSettingsUi;
+
+        // M1g：開機自動啟動的擁有者（規格 §8，待辦 4）。整個常駐路徑只有這一個實例，
+        // 而且只有它會寫 Run 機碼。
+        _startup = Autostart.Default(evidence.Line);
 
         if (opt.SettingsUiLive)
         {
@@ -573,6 +662,54 @@ internal static class App
                 });
             evidence.Line($"settings ui: opened in the running app (--settings-ui-live, path={uiPath}); " +
                           "saving in the window applies immediately");
+        }
+
+        // 規格 §8 的 `StartWithWindows`（待辦 4）。**只有常駐程式套用它**——`--settings-set`
+        // 是純設定檔編輯器，碰 Run 機碼會讓每一次自動化驗收都悄悄改掉使用者的開機啟動設定。
+        //
+        // 「常駐程式」在這裡的定義是「跑得到這一行」：`--cycle-test`、`--wheel-demo`、
+        // `--dump-monitors` 之類在更上面就 return 了，所以它們永遠不會碰 Run 機碼；
+        // 而 `--wheel-payload`、`--wheel-hover-selftest`、`--raise`、`--settings-ui-live`
+        // 會走到這裡——它們是真的把接收層與訊息迴圈跑起來的診斷模式。
+        // 這件事是**量出來的**，不是推論的：m1b 的 `--wheel-payload`、
+        // m1f 的 `--settings-ui-live` 都真的在使用者的 Run 機碼留下了一筆 `Confern`。
+        // 驗收腳本因此一律帶 `--no-autostart`（見 tools/*.ps1）。
+        ApplyStartWithWindows(opt.NoAutostart ? null : _settings?.StartWithWindows ?? false, evidence);
+
+        // 托盤用 using：離開這個方法（＝行程正在收尾）時一定要把圖示從 shell 拿掉、
+        // 把 HICON／HMENU 釋放掉。行程結束時 shell 也會清，但那只在「正常結束」時成立，
+        // 而 Dispose 是**我們自己做得到**的那一半。
+        using TrayIcon tray = new(
+            evidence,
+            onOpenSettings: () => OpenSettingsFromTray(opt, evidence, visual, _settings, LogFromSettingsUiThread),
+            // 注意這條回呼**不碰 tray 變數**：它自己就是 tray 的建構引數，編譯器不允許在那裡
+            // 讀取一個還沒賦值的區域變數（CS0165，而且那是真的——回呼有可能在指派完成前被叫到）。
+            // 圖示顯示的狀態改由 TrayIcon 在回呼跑完之後**問這裡**（見 TrayIcon.Dispatch）：
+            // 傳進去的是一個查詢，不是一份快照，所以它永遠問得到最新的事實。
+            onTogglePause: () => SetCapturePaused(!_capturePaused, guard, detector, evidence),
+            isCaptureDisabled: () => guard.CaptureDisabled || detector.IsDisabled,
+            // 這條也刻意不碰 tray（同上，而且連 using 的隱藏賦值都算在建構式求值之後）：
+            // 結束時要的是「正常關機」，而托盤的 Dispose 由 using 負責，不需要在這裡讀那個變數。
+            onExit: () => RequestCleanExit(evidence, guard));
+
+        // 驗收用的「請它自己結束」：計時器在執行緒池上，所以只**張貼**托盤命令，不直接呼叫回呼
+        // （直接呼叫會從錯誤的執行緒碰到托盤的視窗與選單）。關機路徑因此與選單的「結束」完全同一條。
+        if (opt.TrayExitAfterMs > 0)
+        {
+            IntPtr trayHwnd = tray.WindowHandle;
+            if (trayHwnd == IntPtr.Zero)
+            {
+                evidence.Line("tray: --tray-exit-after requested but the tray window does not exist; nothing will quit the app");
+            }
+            else
+            {
+                evidence.Line($"tray: --tray-exit-after {opt.TrayExitAfterMs} ms (asks the tray to quit through the menu path)");
+                var exitTimer = new System.Threading.Timer(
+                    _ => Native.PostMessageW(trayHwnd, Native.WM_APP_TRAY_COMMAND,
+                                             new IntPtr(Native.TrayCommandExit), IntPtr.Zero),
+                    null, opt.TrayExitAfterMs, Timeout.Infinite);
+                AppDomain.CurrentDomain.ProcessExit += (_, _) => exitTimer.Dispose();
+            }
         }
 
         // 規格 §7.1：上次崩潰／斷電留下的 `.tmp-*` 必須在啟動時清掉，並且**說出來**。
@@ -876,6 +1013,15 @@ internal static class App
     private static Settings? _settings;
 
     /// <summary>
+    /// 開機自動啟動的唯一擁有者（待辦 4）。常駐路徑建立它，診斷路徑建立的是**別的**子機碼
+    /// （<c>--autostart-probe</c>）或根本沒有（單一入口讓「誰會寫 Run 機碼」是查得出來的事）。
+    /// </summary>
+    private static Autostart? _startup;
+
+    /// <summary>托盤目前的暫停狀態。與 <see cref="ReleaseGuard.CaptureDisabled"/> 同義，只是給日誌用。</summary>
+    private static bool _capturePaused;
+
+    /// <summary>
     /// 設定頁在 WPF 執行緒上按下「儲存」之後放的結果，由主執行緒取走並套用。
     /// 交接用參考賦值 ＋ <see cref="Interlocked.Exchange{T}(ref T, T)"/>：設定是 record（參考型別），
     /// 這種交接不需要鎖，也不會讓主執行緒讀到半套的狀態。
@@ -1057,6 +1203,363 @@ internal static class App
         evidence.Line($"settings set result: {SettingsStore.Describe(next)}");
         evidence.Line($"settings set done: applied={applied} rejected={rejected.Count} path={path}");
         return rejected.Count == 0 ? 0 : 4;
+    }
+
+    // =====================================================================================
+    // M1g：托盤圖示 ＋ 開機自動啟動（規格 §8，待辦 4）
+    // =====================================================================================
+
+    /// <summary>
+    /// 套用「開機時自動啟動」（規格 §8）。**唯一呼叫端是常駐路徑**（啟動時、以及設定頁存檔時）。
+    ///
+    /// 為什麼 `--settings-set` 不呼叫它：那條路是純粹的設定檔編輯器，而驗收腳本會大量使用它。
+    /// 若它會寫 Run 機碼，每一次自動化回歸都會悄悄改掉使用者的開機啟動設定——
+    /// 而這種副作用在事後幾乎不可能被發現（使用者只會覺得「電腦開機後自己跑出一個程式」）。
+    /// </summary>
+    /// <param name="enabled">
+    /// true＝寫入、false＝移除、<b>null＝完全不要碰</b>（<c>--no-autostart</c>）。
+    /// 三個狀態刻意做成可空：把「不要碰」寫成 false 會讓它變成「把使用者的項目刪掉」，
+    /// 那是完全不同的兩件事。
+    /// </param>
+    private static void ApplyStartWithWindows(bool? enabled, Evidence evidence)
+    {
+        if (enabled == null)
+        {
+            evidence.Line("autostart: skipped (--no-autostart; the Run key is not read or written by this run)");
+            return;
+        }
+        if (_startup == null)
+        {
+            // 走到這裡代表有人從非常駐路徑呼叫它；說出來，不要靜默地什麼都不做。
+            evidence.Line("autostart: skipped (no Autostart owner in this run mode)");
+            return;
+        }
+        try
+        {
+            if (enabled.Value) _startup.Enable();
+            else _startup.Disable();
+        }
+        catch (Exception ex)
+        {
+            // Run 機碼壞掉／被政策鎖住不可以讓程式起不來，但一定要說。
+            evidence.Line($"autostart: applying startWithWindows={enabled} failed ({ex.GetType().Name}: {ex.Message})");
+        }
+        evidence.Line($"autostart: {_startup.Describe()}");
+    }
+
+    /// <summary>
+    /// 托盤的「開啟設定」。
+    ///
+    /// 走的是與 `--settings-ui-live` **完全相同**的那條路（<see cref="SettingsUi.Open"/> 的
+    /// 同一組回呼）：儲存之後仍然當場套用。設定頁在自己的 STA 執行緒上，這裡只是排隊後返回，
+    /// 所以不會擋住主訊息迴圈（托盤的選單與訊息都靠它）。
+    ///
+    /// <paramref name="log"/>：設定頁那條執行緒產生的日誌行的去處。正式路徑一律排進
+    /// <see cref="_settingsUiLog"/> 由主執行緒代寫（<see cref="Evidence.Line"/> 沒有上鎖，
+    /// 兩條執行緒同時寫會互相插斷）；自測只有主執行緒會用到它，所以直接寫證據檔。
+    /// </summary>
+    private static void OpenSettingsFromTray(Options opt, Evidence evidence, VisualLayer visual,
+                                             Settings? current, Action<string> log)
+    {
+        string uiPath = string.IsNullOrEmpty(opt.SettingsFile) ? SettingsStore.DefaultPath() : opt.SettingsFile;
+        if (SettingsUi.IsOpen)
+        {
+            // 第二次開啟會被設定頁拒絕（兩個視窗會互相覆蓋存檔），所以連要求都不要送。
+            evidence.Line($"tray: command -> open settings, but the settings page is already open (path={uiPath})");
+            return;
+        }
+
+        evidence.Line($"tray: command -> open settings (path={uiPath})");
+        // 要編輯的設定用**主執行緒手上那一份**（呼叫端傳進來的）。不重新載入是刻意的：
+        // 重新載入會多讀一次預設路徑，於是自測的暫存路徑與被讀的路徑會是兩個不同的檔案。
+        Settings editing = current ?? SettingsStore.Load(uiPath, evidence.Line);
+        SettingsUi.Open(editing, uiPath,
+            saved =>
+            {
+                _pendingSettings = saved;         // 交接點：ApplyFromSettingsUi 會在主執行緒取走
+                visual.RequestSettingsApply();
+            },
+            log);
+        evidence.Line("tray: settings ui requested (the window opens on its own STA thread; saving applies at once)");
+    }
+
+    /// <summary>
+    /// 設定頁那條 WPF 執行緒排過來的日誌行。**只排隊，不寫檔**——<see cref="Evidence.Line"/>
+    /// 沒有上鎖，由主執行緒代寫是唯一安全的做法（見 <see cref="_settingsUiLog"/>）。
+    /// </summary>
+    private static void LogFromSettingsUiThread(string line) => _settingsUiLog.Enqueue(line);
+
+    /// <summary>
+    /// 托盤的「暫停轉換 / 繼續轉換」。
+    ///
+    /// **不是第二套停用機制**：狀態就是 <see cref="ReleaseGuard.CaptureDisabled"/>（保險 #5 的同一個狀態）
+    /// 與 <see cref="DragDetector.IsDisabled"/>。這裡只負責把兩者一起切換、並且把結果寫進日誌——
+    /// 兩者若各切一半，會出現「接收層不再升起、但偵測器還以為自己活著」這種一半停用的狀態。
+    /// </summary>
+    private static void SetCapturePaused(bool paused, ReleaseGuard guard, DragDetector detector,
+                                         Evidence evidence)
+    {
+        if (guard.CaptureDisabled != detector.IsDisabled)
+            evidence.Line("WARNING tray: guard and detector disagreed about the pause state; " +
+                          $"reasserting the guard's value (guard={guard.CaptureDisabled}, detector={detector.IsDisabled})");
+
+        if (paused)
+        {
+            // 托盤的暫停＝**可以復原的那一種**。刻意不叫 guard.OnKillSwitch()：那會把
+            // `*** KILL SWITCH ***` 印在托盤暫停的日誌上（m1a 的 S3.8 正是斷言那一行，
+            // 於是那條斷言會被托盤的暫停滿足），也會把「直到重啟」的閂扣上。
+            guard.Pause("tray pause");
+            detector.SetPaused(true, "tray pause");
+        }
+        else
+        {
+            // 緊急停用之後這裡會被拒絕（見 ReleaseGuard.Resume）——那正是規格 §4.2.2 要的。
+            guard.Resume();
+            detector.SetPaused(false, "tray resume");
+        }
+
+        // 真相只有一個：記下的是兩個擁有者**實際**的狀態，不是使用者剛按下的意圖。
+        // 意圖與結果不同時（緊急停用之後要求繼續），日誌裡必須看得出差別。
+        _capturePaused = guard.CaptureDisabled || detector.IsDisabled;
+        evidence.Line($"tray: capture paused={_capturePaused} (requested={paused}) " +
+                      $"(guard.CaptureDisabled={guard.CaptureDisabled}, detector.IsDisabled={detector.IsDisabled}, " +
+                      $"killSwitchLatched={guard.KillSwitchLatched})");
+    }
+
+    /// <summary>
+    /// 托盤的「結束」。
+    ///
+    /// 用的是**這個程式既有的乾淨結束路徑**：<c>PostQuitMessage</c> 讓主訊息迴圈
+    /// （<see cref="RunMessageLoop"/>）的 <c>GetMessageW</c> 回 0 而自然離開，
+    /// 於是 <c>RunCore</c> 的 <c>using</c> 依序釋放 hooks／runner／兩層覆蓋層／托盤。
+    /// 刻意不呼叫 <c>Environment.Exit</c>：那會跳過全部 <c>Dispose</c>，
+    /// 留下 worker 行程與沒有從 shell 拿掉的托盤圖示。
+    /// </summary>
+    private static void RequestCleanExit(Evidence evidence, ReleaseGuard guard)
+    {
+        evidence.Line("tray: command -> exit requested; taking the normal shutdown path (posting the quit request)");
+
+        // 收層與停用先做：結束路徑上不留下任何還武裝著的保險（保險 #3 的定時器此刻可能正在跑）。
+        guard.OnUserResolved("tray exit");
+        // 這裡刻意用 Pause 而不是 OnKillSwitch：正常結束不是緊急停用，不該印 `*** KILL SWITCH ***`
+        // （那會讓「日誌裡有 KILL SWITCH」不再等於「熱鍵真的被按過」），也不需要扣那個閂。
+        guard.Pause("clean shutdown");
+        Native.PostQuitMessage(0);
+        evidence.Line("tray: quit request posted (the message loop will exit and every using-block will dispose)");
+    }
+
+    /// <summary>
+    /// M1g：`--tray-selftest`——托盤圖示的自測。
+    ///
+    /// 為什麼需要它：托盤最現實的失效模式**全部是靜默的**。圖示根本沒出現在通知區域、
+    /// 選單少一項、提示文字沒跟著暫停狀態換、關掉之後 shell 還留著一個幽靈圖示——
+    /// 這些都不會讓程式壞掉，只會讓使用者覺得「這個程式好像沒在跑」。
+    /// 這裡逐項斷言，任何一項不成立就回 1，過程全部寫進證據日誌（每行都以 `tray:` 開頭）。
+    ///
+    /// 三個命令一律經過 <see cref="TrayIcon.InvokeCommand"/>——與真實選單點擊**同一條分派**。
+    /// 自測若能走一條只有它自己會走的路，它驗到的就只是自測自己。
+    /// </summary>
+    internal static int RunTraySelfTest(Options opt, Evidence evidence)
+    {
+        int failed = 0;
+        int checks = 0;
+        void Report(string name, bool ok, string detail = "")
+        {
+            checks++;
+            if (!ok) failed++;
+            evidence.Line($"tray: {(ok ? "PASS" : "FAIL")} {name}" +
+                          (detail.Length > 0 ? $"  [{detail}]" : string.Empty));
+        }
+
+        // 自測**絕不可以**寫到使用者真正的設定檔（下面的設定頁檢查會走真正的開啟路徑）。
+        // 沒給路徑時用暫存檔；自己產生的暫存檔才清掉，操作者指定的路徑不動。
+        bool tempSettings = string.IsNullOrEmpty(opt.SettingsFile);
+        string settingsPath = tempSettings
+            ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-tray-selftest.json")
+            : opt.SettingsFile;
+        // 換成暫存路徑的那一份選項，供下面的「開啟設定」使用（Options 不是 record，所以是複製）
+        Options trayOpt = opt.ForSelfTest(settingsPath);
+        Settings settings = SettingsStore.Load(File.Exists(settingsPath) ? settingsPath : null, evidence.Line);
+        using var visual = new VisualLayer(evidence);          // 設定頁的「排隊＋叫醒」需要它
+
+        // 自測用的守衛與偵測器：**與正式路徑同一組型別、同一組呼叫**（SetCapturePaused）。
+        // 沒有螢幕，所以命中層是零個視窗——HideNow 會以真實狀態判斷「沒有東西要收」而直接返回，
+        // 這正是它在正式路徑上每次被叫到時的第一個判斷。
+        using var hit = new HitLayer(evidence, Array.Empty<MonitorEntry>());
+        using var guard = new ReleaseGuard(evidence, hit);
+        var detector = new DragDetector(evidence, Program.DefaultTriggerKey);
+        bool pausing = false;          // 自測用的暫停狀態（與正式回呼同一組呼叫）
+
+        using var tray = new TrayIcon(
+            evidence,
+            // 走**真正的**「托盤開啟設定」路徑。這條要求只是排隊後返回（設定頁跑在自己的 STA
+            // 執行緒上），所以它不會把托盤的訊息迴圈擋住——而「選單按下去整個程式就卡住」
+            // 正是這裡最值得驗、又最不容易發現的失效模式。
+            onOpenSettings: () => OpenSettingsFromTray(trayOpt, evidence, visual, settings, evidence.Line),
+            // 與常駐路徑同一個查詢（見那裡的理由）：圖示顯示事實，不是意圖。
+            isCaptureDisabled: () => guard.CaptureDisabled || detector.IsDisabled,
+            // 與正式路徑同一件事：翻轉狀態、讓守衛與偵測器一起停用／復原。圖示自己的提示文字
+            // 由 TrayIcon 在分派命令時同步（所以這裡不必、也不可以碰 tray 這個變數，見正式路徑的註解）。
+            onTogglePause: () =>
+            {
+                pausing = !pausing;
+                SetCapturePaused(pausing, guard, detector, evidence);
+                evidence.Line($"tray: dispatch toggle-pause paused={pausing}");
+            },
+            onExit: () => evidence.Line("tray: dispatch exit"));
+
+        Report("icon created", tray.IsCreated, $"menu items={TrayIcon.MenuItemCount}");
+
+        // 提示文字：產品名稱來自 ProductInfo（唯一擁有者），狀態是 ASCII 的 running/paused。
+        Report("tooltip names the product and the state",
+               tray.Tooltip == $"{ProductInfo.Name} - running",
+               $"tooltip='{tray.Tooltip}' expected='{ProductInfo.Name} - running'");
+        Report("menu has exactly the three spec items", TrayIcon.MenuItemCount == 3,
+               $"count={TrayIcon.MenuItemCount}");
+        Report("menu labels are the spec labels",
+               tray.LabelsMatchSpec(),
+               $"'{TrayIcon.MenuOpenSettings}' / '{TrayIcon.MenuPause}' / '{TrayIcon.MenuExit}'");
+        Report("the shell holds the icon", tray.ProbeShellStillHasIcon(), "NIM_MODIFY accepted");
+
+        // 三個命令各自走一次（與真實選單點擊同一條分派）。
+        tray.InvokeCommand(TrayCommand.OpenSettings);
+        tray.InvokeCommand(TrayCommand.TogglePause);
+        tray.InvokeCommand(TrayCommand.Exit);
+        // 命令是 posted message，排到擁有視窗的那條執行緒上；跑一下訊息讓它們落地。
+        for (int i = 0; i < 5; i++) Native.PumpMessages();
+
+        Report("pause state reached the icon", tray.IsPaused && tray.Tooltip == $"{ProductInfo.Name} - paused",
+               $"tooltip='{tray.Tooltip}'");
+        Report("the menu label follows the pause state",
+               tray.LabelsMatchSpec(),
+               $"menu1 expected '{TrayIcon.MenuResume}' while paused");
+        tray.InvokeCommand(TrayCommand.TogglePause);
+        for (int i = 0; i < 5; i++) Native.PumpMessages();
+        Report("resume returns to the running state",
+               !tray.IsPaused && tray.Tooltip == $"{ProductInfo.Name} - running",
+               $"tooltip='{tray.Tooltip}'");
+
+        // 保險 #5 之後，托盤**不可以**把捕捉偷偷武裝回來（規格 §4.2.2：「直到重啟」）。
+        // 這條檢查會失敗的那個版本＝把 Resume 寫成無條件復原的那一版（托盤的暫停直接叫
+        // OnKillSwitch、繼續直接叫 Resume）；那種寫法看起來完全正常，只有這裡問得出來。
+        guard.OnKillSwitch();
+        detector.Disable();
+        // 兩次分派：第一次是「暫停」（此時已經停用，是 no-op），第二次才是「繼續」——
+        // 也就是被拒絕的那一次。刻意走 InvokeCommand，與真實選單點擊同一條分派。
+        tray.InvokeCommand(TrayCommand.TogglePause);
+        tray.InvokeCommand(TrayCommand.TogglePause);
+        for (int i = 0; i < 5; i++) Native.PumpMessages();
+        Report("kill switch stays latched: the tray cannot resume capture",
+               guard.CaptureDisabled && detector.IsDisabled,
+               $"guard.CaptureDisabled={guard.CaptureDisabled} detector.IsDisabled={detector.IsDisabled} " +
+               $"latched={guard.KillSwitchLatched}");
+        Report("the icon tells the truth after a refused resume", tray.IsPaused,
+               $"tray.IsPaused={tray.IsPaused} tooltip='{tray.Tooltip}'");
+
+        // 「托盤的開啟設定真的開得了設定頁」。自測裡的呼叫端不會把日誌寫進 Evidence
+        // （那是設定頁那條執行緒的事），所以這裡直接問 SettingsUi 的狀態。
+        var sw = Stopwatch.StartNew();
+        while (!SettingsUi.IsOpen && sw.ElapsedMilliseconds < 5000) Thread.Sleep(25);
+        bool uiOpen = SettingsUi.IsOpen;
+        Report("the open-settings command reached the settings page", uiOpen,
+               $"SettingsUi.IsOpen={SettingsUi.IsOpen} after {sw.ElapsedMilliseconds} ms");
+        SettingsUi.Close();
+        var swClose = Stopwatch.StartNew();
+        while (SettingsUi.IsOpen && swClose.ElapsedMilliseconds < 3000) Thread.Sleep(25);
+        Report("the settings page closes again (the process can exit)", !SettingsUi.IsOpen,
+               $"SettingsUi.IsOpen={SettingsUi.IsOpen} after {swClose.ElapsedMilliseconds} ms");
+
+        // 關掉之後 shell 不可以還留著它。ProbeShellStillHasIcon 在 Dispose 之後一律回 false
+        // （它本身就是「還留著嗎」），所以這裡同時檢查 NIM_DELETE 有回報成功。
+        tray.Dispose();
+        Report("the shell no longer holds the icon after dispose",
+               !tray.ProbeShellStillHasIcon(), "ProbeShellStillHasIcon() == false");
+
+        if (tempSettings && File.Exists(settingsPath))
+        {
+            // 這個暫存檔是自測自己產生的（設定頁的 Save 路徑可能會寫它），所以自己清掉。
+            try { File.Delete(settingsPath); } catch (IOException) { /* 清不掉不改變判定 */ }
+        }
+
+        evidence.Line($"tray: selftest done: checks={checks} failed={failed} ok={failed == 0}");
+        return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// M1g：`--autostart-probe &lt;subkey&gt;`——在指定的 HKCU 子機碼上完整走一次
+    /// 「不存在 → 啟用 → 讀回 → 停用 → 不存在」。
+    ///
+    /// **只碰被指定的子機碼**。真正的 Run 機碼不會被這個入口動到，理由見 <see cref="Autostart"/>：
+    /// 驗收若直接寫真機碼，每一次回歸都會悄悄改掉使用者的開機啟動設定。
+    /// </summary>
+    internal static int RunAutostartProbe(string subkeyPath, Evidence evidence)
+    {
+        int failed = 0;
+        int checks = 0;
+        void Report(string name, bool ok, string detail = "")
+        {
+            checks++;
+            if (!ok) failed++;
+            evidence.Line($"autostart: {(ok ? "PASS" : "FAIL")} {name}" +
+                          (detail.Length > 0 ? $"  [{detail}]" : string.Empty));
+        }
+
+        if (string.IsNullOrWhiteSpace(subkeyPath))
+        {
+            evidence.Line("autostart: FAIL no subkey given (--autostart-probe <subkey>)");
+            return 1;
+        }
+        if (subkeyPath.StartsWith(@"Software\Microsoft\Windows\CurrentVersion\Run", StringComparison.OrdinalIgnoreCase))
+        {
+            // 防手滑：這個入口的整個存在理由就是「不要碰真機碼」。
+            evidence.Line($"autostart: REFUSED — '{subkeyPath}' is the real Run key; " +
+                          "use a scratch subkey (this entry exists so acceptance runs cannot change the user's autostart)");
+            return 1;
+        }
+
+        var autostart = new Autostart(subkeyPath, evidence.Line);
+        string expected = autostart.ExpectedValue();
+        evidence.Line($"autostart: probe subkey=HKCU\\{subkeyPath} expected={expected}");
+        Report("the expected value is a quoted absolute path to this exe",
+               expected.Length > 2 && expected.StartsWith('"') && expected.EndsWith('"') &&
+               expected.Contains(ProductInfo.Slug, StringComparison.OrdinalIgnoreCase),
+               expected);
+        Report("absent before the probe", autostart.CurrentValue() == null && !autostart.IsEnabled(),
+               $"current={(autostart.CurrentValue() ?? "(absent)")}");
+
+        autostart.Enable();
+        string after = autostart.CurrentValue() ?? "(absent)";
+        Report("enabled and the value round-trips", after == expected && autostart.IsEnabled(), $"current={after}");
+
+        // 反向對照：值存在但路徑不對時必須回報「未啟用」。少了這一條，「只看值存不存在」的實作
+        // 也會通過，而那正是「換了安裝位置之後畫面顯示已啟用、開機卻跑舊 exe」的成因。
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(subkeyPath, writable: true);
+            key?.SetValue(ProductInfo.Name, "\"C:\\somewhere\\else\\stale.exe\"",
+                          Microsoft.Win32.RegistryValueKind.String);
+        }
+        catch (Exception ex)
+        {
+            evidence.Line($"autostart: could not write the stale-path control value ({ex.GetType().Name}: {ex.Message})");
+        }
+        Report("a stale path does not read as enabled", !autostart.IsEnabled(),
+               $"current={autostart.CurrentValue() ?? "(absent)"}");
+
+        autostart.Enable();          // 覆寫回正確值（Enable 必須能改掉一個錯的值）
+        Report("enable repairs a stale value", autostart.CurrentValue() == expected && autostart.IsEnabled(),
+               $"current={autostart.CurrentValue() ?? "(absent)"}");
+
+        autostart.Disable();
+        Report("disabled and the value is gone", autostart.CurrentValue() == null && !autostart.IsEnabled(),
+               $"current={(autostart.CurrentValue() ?? "(absent)")}");
+
+        autostart.Disable();         // no-op，不是錯誤
+        Report("disabling twice is a no-op, not an error", autostart.CurrentValue() == null,
+               "second Disable() logged 'already disabled'");
+
+        evidence.Line($"autostart: probe done: checks={checks} failed={failed} ok={failed == 0}");
+        return failed == 0 ? 0 : 1;
     }
 
     /// <summary>

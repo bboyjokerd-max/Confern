@@ -120,13 +120,78 @@ internal sealed class ReleaseGuard : IDisposable
         HideNow(Native.HideReasonManual);
     }
 
+    /// <summary>
+    /// 保險 #5 是否已經扣下。**一旦 true 就永不清除**（直到行程結束）——「直到重啟」這句話的實作。
+    ///
+    /// 托盤的暫停／繼續共用 <see cref="CaptureDisabled"/> 這一個狀態（見 <see cref="Pause"/>），
+    /// 但**不可以**共用復原的權力：少了這個閂，使用者按下緊急停用之後再點一次托盤的
+    /// 「繼續轉換」，就會悄悄把捕捉重新武裝起來，而規格 §4.2.2 的保險 #5 明文是「直到重啟」。
+    /// 那會讓一條安全保證只剩文件上有寫。
+    /// </summary>
+    public bool KillSwitchLatched { get; private set; }
+
     /// <summary>保險 #5：緊急停用熱鍵（Ctrl+Alt+Shift+Q）。收層並停用捕捉直到重啟。</summary>
     public void OnKillSwitch()
     {
-        CaptureDisabled = true;
+        KillSwitchLatched = true;
         _evidence.Line("*** KILL SWITCH: capture disabled until restart ***");
+        SetCaptureDisabled(true, "kill switch", Native.HideReasonKillSwitch);
+    }
+
+    /// <summary>
+    /// 暫停捕捉（托盤的「暫停轉換」）。與保險 #5 是**同一個狀態**，但**不是同一個語意**：
+    /// 這是可以復原的，而且不會留下 <see cref="KillSwitchLatched"/>。
+    ///
+    /// 為什麼不能直接叫 <see cref="OnKillSwitch"/>（第一版就是那樣寫的）：那會讓托盤的暫停
+    /// 印出 `*** KILL SWITCH ***`——一來日誌說謊（m1a 的 S3.8 正是斷言那一行，於是那條斷言
+    /// 會被托盤的暫停滿足），二來「直到重啟」與「可以再按繼續」兩個說法互相矛盾。
+    /// </summary>
+    public void Pause(string why)
+    {
+        if (CaptureDisabled)
+        {
+            _evidence.Line($"guard: pause requested ({why}) but capture was already disabled; nothing to do");
+            return;
+        }
+        SetCaptureDisabled(true, why, Native.HideReasonManual);
+    }
+
+    /// <summary>
+    /// 重新允許捕捉（托盤的「繼續轉換」）。**緊急停用之後一律拒絕**。
+    ///
+    /// 為什麼被拒絕時要大聲寫日誌：使用者按了按鈕卻什麼都沒發生，正是他最需要日誌解釋的時刻；
+    /// 沉默會讓他以為程式壞了，而不是「保險 #5 照規格要求重啟才復原」。
+    /// </summary>
+    public void Resume()
+    {
+        if (KillSwitchLatched)
+        {
+            _evidence.Line("guard: REFUSED to resume: the kill switch (insurance #5) latched capture off " +
+                           "until restart; restart the program to capture again");
+            return;
+        }
+        if (!CaptureDisabled)
+        {
+            _evidence.Line("guard: resume requested but capture was not disabled; nothing to do");
+            return;
+        }
+        SetCaptureDisabled(false, "tray resume", Native.HideReasonManual);
+    }
+
+    /// <summary>
+    /// 停用或復原捕捉的**唯一實作**（兩條路徑共用，否則兩個方向會漂移）。
+    /// 停用時一定要收層：留下一個沒有人能收掉的覆蓋層才是真正的災難。
+    /// </summary>
+    private void SetCaptureDisabled(bool disabled, string why, int hideReason)
+    {
+        CaptureDisabled = disabled;
+        _evidence.Line(disabled
+            ? $"guard: capture DISABLED ({why})"
+            : $"guard: capture ENABLED again ({why})");
+        if (!disabled) return;
+
         StopTimers();
-        HideNow(Native.HideReasonKillSwitch);
+        HideNow(hideReason);
     }
 
     private void StopTimers()
