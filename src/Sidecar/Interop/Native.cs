@@ -178,7 +178,24 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll", SetLastError = true)] public static extern int GetWindowLongW(IntPtr hWnd, int nIndex);
-    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>
+    /// 同步送一則訊息（等對方處理完才回來）。藥丸的自測用它把 <c>WM_LBUTTONUP</c>
+    /// 送進**真實的 WndProc**：呼叫端不在訊息迴圈裡，用張貼的訊息會變成「送出去但還沒處理」，
+    /// 而那種「還沒」在下一個斷言裡看起來就像失敗。真實使用者的點擊由系統送達，不受此影響。
+    /// </summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>
+    /// 視窗在螢幕上的矩形（含不可見的部分）。它是「視窗實際多大」唯一的客觀來源，
+    /// 所以「視窗矩形＝我們回報的矩形」這條斷言問的是作業系統，不是我們自己的變數。
+    /// </summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
     // 刻意不引入 FindWindowW：實測它對 WS_EX_TOOLWINDOW + 隱藏的視窗一律回 0（T3 驗證），
     // 拿它驗殘留會變成永遠通過的假檢查；需要列舉時用 EnumWindows + GetClassNameW。
 
@@ -304,6 +321,45 @@ internal static class Native
     public const uint WM_LBUTTONUP = 0x0202;
     public const uint WM_RBUTTONDOWN = 0x0204;
     public const uint WM_RBUTTONUP = 0x0205;
+    /// <summary>游標離開追蹤中的視窗（<see cref="TrackMouseEvent"/> 的 <c>TME_LEAVE</c>）。</summary>
+    public const uint WM_MOUSELEAVE = 0x02A3;
+    /// <summary>點擊一個視窗時，系統先問「要不要啟用它」。藥丸回 <see cref="MA_NOACTIVATE"/>。</summary>
+    public const uint WM_MOUSEACTIVATE = 0x0021;
+
+    /// <summary>
+    /// 「啟動我，但不要改變前景視窗」。藥丸視窗**必須**回這個：使用者的焦點不該因為
+    /// 他想看清楚是哪幾個檔案失敗而跑到一個覆蓋層上（那會讓正在輸入的視窗失焦）。
+    /// </summary>
+    public const int MA_NOACTIVATE = 3;
+
+    /// <summary><c>TrackMouseEvent</c> 的參數（D2 唯一的實作方式：進入／離開）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TRACKMOUSEEVENT
+    {
+        public uint cbSize; public uint dwFlags; public IntPtr hwndTrack; public uint dwHoverTime;
+    }
+
+    public const uint TME_LEAVE = 0x00000002;
+
+    /// <summary>
+    /// 要求系統在游標離開 <c>hwndTrack</c> 時送一次 <see cref="WM_MOUSELEAVE"/>。
+    ///
+    /// 為什麼非它不可：`WM_MOUSEMOVE` 只在**游標移動**時到達，游標停住不動時什麼都不會來。
+    /// 「游標停在藥丸上就不淡出」因此不能靠最後一次移動的時間戳推論（游標靜止時那個推論
+    /// 會以為使用者離開了）——必須由系統在真正離開的那一刻告訴我們。
+    /// </summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
+
+    /// <summary>
+    /// 把滑鼠捕捉交給某個視窗。藥丸在按下滑鼠時捕捉，否則「按下之後手指飄出藥丸才放開」
+    /// 會讓放開事件落在別的視窗上，使用者看到的是「我點了它卻沒反應」。
+    /// </summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetCapture(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ReleaseCapture();
     public const uint WM_KEYDOWN = 0x0100;
     public const uint WM_KEYUP = 0x0101;
     public const uint WM_SYSKEYDOWN = 0x0104;

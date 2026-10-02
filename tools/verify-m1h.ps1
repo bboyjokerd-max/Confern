@@ -550,6 +550,465 @@ if ($variantsOk) {
 Check 'S16.50 no leftover Confern process (the exe would otherwise be locked for the next run)' `
   (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0) ''
 
+# =============================================================================
+#  S16.51+ : D1 (a dedicated clickable window) and D2 (the pill does not fade
+#  while the cursor rests on it). 2026-10-02.
+#
+#  APPENDED, never inserted. The previous slice inserted 19 checks into the middle
+#  of this file's numbering and silently pushed the old S16.24-S16.30 down to
+#  S16.44-S16.50, so every document citing those ids now points at different
+#  checks. A check id is an address people cite for years: new ones go at the end.
+#
+#  Why S16.50 above is the process check and the new checks come after it: the
+#  injected runs below START processes, so the "no leftover process" fact has to
+#  be established first. Nothing was renumbered or moved to make room.
+#
+#  Why these checks are shaped the way they are:
+#   * A synthetic click is the only evidence that the user can actually reach the
+#     pill (it proves window position, z-order and the ABSENCE of
+#     WS_EX_TRANSPARENT). A log line saying "we toggled" proves none of that.
+#   * Every assertion proves its own PREMISE first: that the pill was on screen,
+#     that the click landed on OUR window, that the foreground window was known.
+#     An assertion whose premise silently failed verifies nothing while looking
+#     green -- and the previous slice found two of its own doing exactly that.
+#   * The fade timings are read from the app's log (holdMs=, "hiding after"), not
+#     copied into this file, so changing the hold deliberately cannot silently
+#     turn an assertion into decoration.
+#
+#  ASCII-only on purpose (PS 5.1 reads BOM-less scripts as ANSI and a CJK comment
+#  silently swallows the next statement -- that already caused a false pass here).
+# =============================================================================
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class PillProbe {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int max);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
+    public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; }
+
+  [DllImport("user32.dll", SetLastError=true)]
+  public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+  public const uint MOVE = 0x0001, LEFTDOWN = 0x0002, LEFTUP = 0x0004;
+  public const uint ABSOLUTE = 0x8000;
+
+  public static uint MouseAbsolute(int x, int y, uint flags) {
+    int sw = GetSystemMetrics(0), sh = GetSystemMetrics(1);
+    var inp = new INPUT[1];
+    inp[0].type = 0;
+    inp[0].mi.dx = (int)Math.Round((double)x * 65535.0 / (sw - 1));
+    inp[0].mi.dy = (int)Math.Round((double)y * 65535.0 / (sh - 1));
+    inp[0].mi.dwFlags = flags | ABSOLUTE;
+    return SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+  }
+  public static bool Click(int x, int y) {
+    uint a = MouseAbsolute(x, y, MOVE);
+    uint b = MouseAbsolute(x, y, LEFTDOWN);
+    uint c = MouseAbsolute(x, y, LEFTUP);
+    return a == 1 && b == 1 && c == 1;
+  }
+  public static bool MoveTo(int x, int y) { return MouseAbsolute(x, y, MOVE) == 1; }
+
+  /// "class=ConfernPillWindow hwnd=0x1234 pid=5678 rect=L,T,W,H visible=True exstyle=0x80088"
+  /// Returns an EMPTY string when no such window exists: the caller must treat "no window" as
+  /// a measured fact, never as an empty string that silently compares equal to something.
+  public static string FindWindowByClass(string cls) {
+    string found = null;
+    EnumProc cb = delegate(IntPtr h, IntPtr p) {
+      var sb = new StringBuilder(256); GetClassNameW(h, sb, 256);
+      if (sb.ToString() != cls) return true;
+      RECT r; GetWindowRect(h, out r);
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      found = string.Format("class={0} hwnd=0x{1:X} pid={2} rect={3},{4},{5},{6} visible={7} exstyle=0x{8:X}",
+        cls, h.ToInt64(), pid, r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top,
+        IsWindowVisible(h), GetWindowLongW(h, -20));
+      return false;
+    };
+    EnumWindows(cb, IntPtr.Zero); GC.KeepAlive(cb);
+    return found == null ? "" : found;
+  }
+
+  /// "pid=1234 class=Notepad hwnd=0x1234" -- the foreground window as the OS sees it right now.
+  public static string ForegroundInfo() {
+    IntPtr h = GetForegroundWindow();
+    if (h == IntPtr.Zero) return "pid=0 class=(none) hwnd=0x0";
+    var sb = new StringBuilder(256); GetClassNameW(h, sb, 256);
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    return string.Format("pid={0} class={1} hwnd=0x{2:X}", pid, sb.ToString(), h.ToInt64());
+  }
+
+  /// What window is under this point? Used to prove a synthetic click lands on OUR pill
+  /// rather than on whatever happens to be on the desktop behind it.
+  public static string WindowAtPoint(int x, int y) {
+    var pt = new POINT(); pt.X = x; pt.Y = y;
+    IntPtr h = WindowFromPoint(pt);
+    if (h == IntPtr.Zero) return "hwnd=0x0 class=(none) pid=0";
+    var sb = new StringBuilder(256); GetClassNameW(h, sb, 256);
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    return string.Format("hwnd=0x{0:X} class={1} pid={2}", h.ToInt64(), sb.ToString(), pid);
+  }
+}
+'@
+
+# The pill's window class. Read from the product side is not possible inside the script,
+# and hard-coding it here is intentional: if the class is renamed the window cannot be found
+# and every check below fails loudly (it cannot pass by accident).
+$pillClass = 'ConfernPillWindow'
+
+function Get-PillWindow {
+  $line = [PillProbe]::FindWindowByClass($pillClass)
+  if (-not $line) { return $null }
+  $o = @{ Line = $line }
+  $m = [regex]::Match($line, 'hwnd=0x([0-9A-F]+) pid=(\d+) rect=(-?\d+),(-?\d+),(\d+),(\d+) visible=(\w+) exstyle=0x([0-9A-F]+)')
+  if (-not $m.Success) { return $o }
+  $o.Hwnd    = [Convert]::ToInt64($m.Groups[1].Value, 16)
+  $o.Pid     = [int]$m.Groups[2].Value
+  $o.X       = [int]$m.Groups[3].Value
+  $o.Y       = [int]$m.Groups[4].Value
+  $o.W       = [int]$m.Groups[5].Value
+  $o.H       = [int]$m.Groups[6].Value
+  $o.Visible = $m.Groups[7].Value -eq 'True'
+  $o.ExStyle = [Convert]::ToInt64($m.Groups[8].Value, 16)
+  return $o
+}
+
+# The pill's own log lines. `--pill-interactive` writes the anchor and the rectangle it drew,
+# so the script never has to guess where the pill is (and the window probe above confirms it).
+function Get-LogField([string]$text, [string]$name) {
+  $m = [regex]::Match($text, [regex]::Escape($name) + '=(\d+)')
+  if ($m.Success) { return [int]$m.Groups[1].Value }
+  return -1
+}
+function Get-ShownRect([string]$text) {
+  $m = [regex]::Match($text, 'pill interactive: shown rect=(-?\d+),(-?\d+),(\d+),(\d+)')
+  if (-not $m.Success) { return $null }
+  return @{ X = [int]$m.Groups[1].Value; Y = [int]$m.Groups[2].Value
+            W = [int]$m.Groups[3].Value; H = [int]$m.Groups[4].Value }
+}
+function Wait-ForShownRect([string]$log, [int]$timeoutMs) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.ElapsedMilliseconds -lt $timeoutMs) {
+    $t = (Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n"
+    $r = Get-ShownRect $t
+    if ($null -ne $r) { return $r }
+    Start-Sleep -Milliseconds 50
+  }
+  return $null
+}
+function Start-PillRun([string]$tag, [int]$ms) {
+  $log = Join-Path $logDir "pill-live-$tag.log"
+  $p = Start-Process -FilePath $Exe -ArgumentList @(
+    '--pill-interactive', "$ms", '--quiet', '--log', $log) -PassThru -WindowStyle Hidden
+  return @{ Proc = $p; Log = $log }
+}
+function Stop-PillRun($run) {
+  try { if (-not $run.Proc.HasExited) { $run.Proc.Kill(); $run.Proc.WaitForExit(5000) | Out-Null } } catch { }
+}
+function Get-PillLog($run) {
+  return ((Get-Content -LiteralPath $run.Log -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n")
+}
+
+"=== S16.51-S16.54 D1: the expanded state is dumped and its ink is measured from pixels ==="
+# The expanded state is the only thing this feature produces, and "the rectangle got bigger"
+# proves nothing about what is inside it. So the app writes the composite (flat + alpha) and
+# the exact strings it handed to GDI+ -- and the checks below compare the three with each other.
+$pillFlat = Join-Path $Work 'pill-expanded.png'
+$pillRaw = Join-Path $Work 'pill-expanded-raw.png'
+$pillJson = Join-Path $Work 'pill-expanded.json'
+$pillShot = Join-Path $Work 'pill-shot.png'
+$pillLog = Join-Path $logDir 'pill-selftest.log'
+$pd = Start-Process -FilePath $Exe -ArgumentList @(
+  '--pill-selftest',
+  '--pill-selftest-dump', $pillFlat,
+  '--pill-selftest-dump-raw', $pillRaw,
+  '--pill-selftest-dump-json', $pillJson,
+  '--pill-selftest-shot', $pillShot,
+  '--quiet', '--log', $pillLog) -PassThru -Wait -WindowStyle Hidden
+$pdText = (Get-Content -LiteralPath $pillLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n"
+
+# The app's own self-test runs first: if it is red, the dumps below are describing a broken build.
+Check 'S16.51 the pill self-test (WM_LBUTTONUP through the real WndProc) passes every check' `
+  ($pd.ExitCode -eq 0 -and $pdText -match 'pill: selftest done: checks=10 failed=0 ok=True') `
+  "exit=$($pd.ExitCode)"
+
+$pdLine = [regex]::Match($pdText,
+  'pill dump line: variant=expanded width=(\d+) height=(\d+) rows=(\d+) laidOutRows=(\d+) pillInBitmap=(-?\d+),(-?\d+),(\d+),(\d+) window=(-?\d+),(-?\d+),(\d+),(\d+) at=(-?\d+),(-?\d+),(\d+),(\d+)')
+$pdW = if ($pdLine.Success) { [int]$pdLine.Groups[1].Value } else { 0 }
+$pdH = if ($pdLine.Success) { [int]$pdLine.Groups[2].Value } else { 0 }
+$pdRows = if ($pdLine.Success) { [int]$pdLine.Groups[3].Value } else { 0 }
+$pdLaid = if ($pdLine.Success) { [int]$pdLine.Groups[4].Value } else { 0 }
+$pdPillW = if ($pdLine.Success) { [int]$pdLine.Groups[7].Value } else { 0 }
+$pdPillH = if ($pdLine.Success) { [int]$pdLine.Groups[8].Value } else { 0 }
+$pdWinH = if ($pdLine.Success) { [int]$pdLine.Groups[12].Value } else { 0 }
+$pdExists = (Test-Path -LiteralPath $pillFlat) -and (Test-Path -LiteralPath $pillRaw)
+$mFlat = if (Test-Path -LiteralPath $pillRaw) { Measure-Ink $pillRaw } else { $null }
+
+# THE VACUITY GUARD FOR EVERYTHING BELOW: "the file exists" also describes an empty bitmap.
+# The premise asserted here is that a composite with a panel under a pill was really rendered,
+# and that its geometry is the geometry the app reported.
+Check 'S16.52 the expanded composite really was rendered (premise: rows, a pill band and a panel band)' `
+  ($pdLine.Success -and $pdExists -and ($null -ne $mFlat) -and
+   ($pdRows -ge 2) -and ($pdLaid -ge 2) -and ($pdW -gt 0) -and ($pdH -gt 0) -and
+   ($pdPillH -gt 0) -and ($pdH -ge ($pdPillH * 2)) -and
+   ($mFlat.Width -eq $pdW) -and ($mFlat.Height -eq $pdH)) `
+  "logged=${pdW}x${pdH} rows=$pdRows laidOutRows=$pdLaid pillBand=${pdPillW}x${pdPillH} png=$(if ($null -ne $mFlat) { "$($mFlat.Width)x$($mFlat.Height)" } else { 'missing' })"
+
+if ($null -ne $mFlat) {
+  # The panel's fill is WheelDesign.NoticeFill (150,40,40) -- the ONLY error red in the product --
+  # and the pills/panel text is (245,247,250). Counting both separates "the panel was drawn" from
+  # "something was drawn", and the y split proves the panel is BELOW the pill (one bitmap, stacked).
+  $fill = 0; $ink = 0; $panelFill = 0
+  $bmp = [System.Drawing.Bitmap]::FromFile($pillRaw)
+  try {
+    for ($y = 0; $y -lt $bmp.Height; $y++) {
+      for ($x = 0; $x -lt $bmp.Width; $x++) {
+        $p = $bmp.GetPixel($x, $y)
+        if ($p.A -gt 200) {
+          if ($p.R -gt 120 -and $p.R -lt 180 -and $p.G -lt 70 -and $p.B -lt 70) {
+            $fill++
+            if ($y -ge $pdPillH) { $panelFill++ }
+          }
+          if ($p.R -gt 230 -and $p.G -gt 230 -and $p.B -gt 230) { $ink++ }
+        }
+      }
+    }
+  } finally { $bmp.Dispose() }
+  Check 'S16.53 the expanded composite pixels really contain the error-red panel below the pill AND text ink' `
+    (($fill -gt 5000) -and ($panelFill -gt 2000) -and ($ink -gt 100)) `
+    "errorRedFill=$fill belowPill=$panelFill whiteInk=$ink (pill band is $pdPillH px tall)"
+
+  # The strings handed to GDI+ are the only honest evidence for "the rows say what the panel shows":
+  # a screenshot cannot tell a shortened row from a clipped one, and a log line saying "we drew 2 rows"
+  # is a self-report. This file is the layout result itself.
+  $jsonOk = (Test-Path -LiteralPath $pillJson)
+  $pj = if ($jsonOk) { Get-Content -LiteralPath $pillJson -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+  $pjRows = if ($null -ne $pj) { @($pj.panelRows) } else { @() }
+  $pjWidths = 0
+  if ($pjRows.Count -gt 0) {
+    $pjWidths = (@($pjRows | Where-Object { $_.laidOutWidth -gt 0 -and $_.laidOutLength -gt 0 }).Count)
+  }
+  Check 'S16.54 the JSON dump agrees with the PNG: same geometry, same row count, every row laid out' `
+    ($jsonOk -and ($null -ne $pj) -and ($pj.width -eq $pdW) -and ($pj.height -eq $pdH) -and
+     ($pjRows.Count -eq $pdLaid) -and ($pjRows.Count -ge 2) -and ($pjWidths -eq $pjRows.Count)) `
+    "json=$(if ($null -ne $pj) { "$($pj.width)x$($pj.height)" } else { 'missing' }) rows=$($pjRows.Count) logged=$pdLaid withWidth=$pjWidths"
+} else {
+  Inconclusive 'S16.53-S16.54 expanded composite pixels' 'the alpha-preserving composite dump is missing'
+}
+
+"=== S16.55-S16.58 D1/D2 with REAL synthetic input (SendInput) ==="
+"    NOTE: from here on this script injects synthetic mouse input into the real desktop."
+"    Nothing else may run at the same time; the cursor is left where the last run put it."
+$fgBeforeInjection = [PillProbe]::ForegroundInfo()
+"    foreground before any injection: $fgBeforeInjection"
+
+# ---------------------------------------------------------------------------
+# S16.55: a real click on the pill expands it, a real click on it again collapses it,
+# and neither of them steals the foreground window.
+# ---------------------------------------------------------------------------
+$runA = Start-PillRun 'click' 9000
+$shownA = Wait-ForShownRect $runA.Log 4000
+$clickOk = $false; $clickDetail = 'the pill never reported a rectangle (premise failed)'
+$fgUnchanged = $false; $fgDetail = 'not measured'
+$shrinkOk = $false
+if ($null -ne $shownA) {
+  # PREMISE: the pill must be on screen AND the window under the click point must be OUR window.
+  # Without this, a click could land on the desktop and the check would be measuring nothing.
+  $winA = Get-PillWindow
+  $cxA = $shownA.X + [int]($shownA.W / 2)
+  $cyA = $shownA.Y + [int]($shownA.H / 2)
+  $atA = [PillProbe]::WindowAtPoint($cxA, $cyA)
+  $premiseA = ($null -ne $winA) -and $winA.Visible -and ($winA.W -eq $shownA.W) -and ($winA.H -eq $shownA.H)
+  "    click run: shown=$($shownA.X),$($shownA.Y),$($shownA.W)x$($shownA.H) window=$(if ($null -ne $winA) { "$($winA.X),$($winA.Y),$($winA.W)x$($winA.H) visible=$($winA.Visible)" } else { 'none' })"
+  "    window under the click point: $atA"
+  if (-not $premiseA) {
+    Stop-PillRun $runA
+    Inconclusive 'S16.55-S16.58 real synthetic click and cursor dwell' 'the pill window was not on screen at the click point (premise failed)'
+  } else {
+    $fgBefore = [PillProbe]::ForegroundInfo()
+    $beforeState = (Get-PillLog $runA) -match 'pill interactive: clickState before any input: expanded=False'
+    $sent = [PillProbe]::Click($cxA, $cyA)
+    # Wait for the app to log the state CHANGE it made after the click. The pattern carries the
+    # click count and the window height as well, so a pass cannot come from a coincidence:
+    # it takes the click counter, the boolean and the real window height to move together.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $polls = 0
+    # Wait for BOTH facts, not just the first one to show up. The first version stopped as soon as
+    # the expansion line existed -- which can be before the click counter line is flushed -- and
+    # then failed an assertion whose evidence was simply not read yet. Waiting for what you are
+    # going to assert on is not optional.
+    while ($sw.ElapsedMilliseconds -lt 5000) {
+      $polls++
+      $t = Get-PillLog $runA
+      if ($t -match 'pill interactive: expanded=True clicks=1 windowH=(\d+)' -and
+          $t -match 'pill window: WM_LBUTTONUP at client \(\d+,\d+\) clicks=1') { break }
+      Start-Sleep -Milliseconds 50
+    }
+    $txtA = Get-PillLog $runA
+    $mExp = [regex]::Match($txtA, 'pill interactive: expanded=True clicks=1 windowH=(\d+)')
+    "    poll loop: iterations=$polls elapsed=$($sw.ElapsedMilliseconds) ms; " +
+      "logChars=$($txtA.Length); expandedMarkerMatched=$($mExp.Success) " +
+      "clickMarkerMatched=$([regex]::IsMatch($txtA, 'pill window: WM_LBUTTONUP at client \(\d+,\d+\) clicks=1'))"
+    $fgAfter = [PillProbe]::ForegroundInfo()
+    $clickOk = $sent -and $beforeState -and ($txtA -match 'pill interactive: expanded=True clicks=1 windowH=(\d+)') -and
+               ($txtA -match 'pill window: WM_LBUTTONUP at client \(\d+,\d+\) clicks=1')
+    $winExp = Get-PillWindow
+    $grew = ($null -ne $winExp) -and ($null -ne $winA) -and ($winExp.H -gt $winA.H) -and ($winExp.W -ge $winA.W)
+    $fgUnchanged = ($fgBefore -eq $fgAfter)
+    $fgDetail = "$fgBefore -> $fgAfter"
+    if ($fgBefore -match 'hwnd=0x0') {
+      # A null foreground window would make "it did not change" vacuously true.
+      $fgUnchanged = $false
+      $fgDetail = "$fgBefore -> $fgAfter (no foreground window existed, so 'unchanged' cannot be verified)"
+    }
+    # The foreground window is NOT the whole assertion. It was measured to stay put even with
+    # MA_NOACTIVATE removed, because WS_EX_NOACTIVATE (checked at creation, and asserted here from
+    # the live log) already makes the window non-activating -- the two are independent defences.
+    # So the check also reads the live window's extended style, which DOES move when the bit is lost.
+    $exMatch = [regex]::Match((Get-PillLog $runA), 'pill interactive: hwnd=0x([0-9A-F]+) exstyle=0x([0-9A-F]+)')
+    $liveEx = if ($exMatch.Success) { [Convert]::ToInt64($exMatch.Groups[2].Value, 16) } else { 0 }
+    $exNoActivate = ($liveEx -band 0x08000000) -ne 0
+    $exLayered = ($liveEx -band 0x00080000) -ne 0
+    $exClickThrough = ($liveEx -band 0x00000020) -ne 0
+    $clickDetail = "exit-sent=$sent clicks=1 seen=$($clickOk) window $(if ($null -ne $winA) { $winA.H } else { 0 }) -> $(if ($null -ne $winExp) { $winExp.H } else { 0 }) px tall; exstyle=0x$('{0:X}' -f $liveEx) noActivate=$exNoActivate layered=$exLayered clickThrough=$exClickThrough; fg $fgDetail"
+    "    after the first click: expanded=True seen=$clickOk; window height $(if ($null -ne $winExp) { $winExp.H } else { 0 })"
+
+    # The second real click must collapse it again, back to the pill-sized window.
+    $null = [PillProbe]::Click($cxA, $cyA)
+    $sw.Restart()
+    while ($sw.ElapsedMilliseconds -lt 3000) {
+      if ((Get-PillLog $runA) -match 'pill interactive: expanded=False') { break }
+      Start-Sleep -Milliseconds 50
+    }
+    $winBack = Get-PillWindow
+    $shrinkOk = ($null -ne $winBack) -and ($null -ne $winA) -and ($winBack.H -eq $winA.H) -and ($winBack.W -eq $winA.W)
+    # Park the cursor OFF the pill so the rest of this run is not affected by hover.
+    $null = [PillProbe]::MoveTo(($shownA.X - 200), ($shownA.Y - 200))
+    "    after the second click: window $(if ($null -ne $winBack) { "$($winBack.W)x$($winBack.H)" } else { 'none' }) (was $($winA.W)x$($winA.H))"
+  }
+} else {
+  Stop-PillRun $runA
+  Inconclusive 'S16.55-S16.58 real synthetic click and cursor dwell' 'the pill never appeared'
+}
+
+if ($null -ne $shownA -and $null -ne $winA -and $premiseA) {
+  Check 'S16.55 a REAL synthetic click on the pill expands the list (and the window grows with it)' `
+    $clickOk "clicked=($cxA,$cyA) landedOn=$atA; $clickDetail"
+  Check 'S16.56 the live pill window is LAYERED and NON-ACTIVATING, never click-through (measured on the on-screen window)' `
+    ($exNoActivate -and $exLayered -and -not $exClickThrough) `
+    "exstyle=0x$('{0:X}' -f $liveEx) WS_EX_NOACTIVATE=$exNoActivate WS_EX_LAYERED=$exLayered WS_EX_TRANSPARENT=$exClickThrough"
+  Check 'S16.57 the synthetic click did NOT steal the foreground window (WS_EX_NOACTIVATE / MA_NOACTIVATE)' `
+    $fgUnchanged "$fgDetail (foreground before the whole injection phase: $fgBeforeInjection)"
+  Check 'S16.58 a second real click collapses the list again (the window shrinks back)' `
+    $shrinkOk "window $(if ($null -ne $winBack) { "$($winBack.W)x$($winBack.H)" } else { 'none' }) vs pill $($winA.W)x$($winA.H)"
+} else {
+  Inconclusive 'S16.55-S16.57 real synthetic click' 'no pill window was available to click'
+}
+
+# ---------------------------------------------------------------------------
+# S16.58: D2 -- with the cursor RESTING on the pill, the pill does not fade.
+# The falsifiable case is the COLLAPSED pill: on its own it fades after 2 s (spec 4.4),
+# so a run that is still alive well past that can only be explained by hover.
+# (Measured, not assumed: the app logs `holdMs=` and, on the way out, `hiding after N ms`.)
+# ---------------------------------------------------------------------------
+$runB = Start-PillRun 'dwell' 8000
+$shownB = Wait-ForShownRect $runB.Log 4000
+if ($null -ne $shownB) {
+  $cxB = $shownB.X + [int]($shownB.W / 2)
+  $cyB = $shownB.Y + [int]($shownB.H / 2)
+  $atB = [PillProbe]::WindowAtPoint($cxB, $cyB)
+  # Dwell: move there and STAY there (no further moves, exactly like a user reading the pill).
+  $null = [PillProbe]::MoveTo($cxB, $cyB)
+  # Poll until either the app logs the fade or we pass the natural (un-hovered) deadline + margin.
+  $deadline = 4200
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $hidEarly = $false; $hoverSeen = $false; $hidAt = -1
+  while ($sw.ElapsedMilliseconds -lt $deadline) {
+    $t = Get-PillLog $runB
+    if ($t -match 'pill interactive: hover=True') { $hoverSeen = $true }
+    $m = [regex]::Match($t, 'progress: hiding after (\d+) ms')
+    if ($m.Success) { $hidEarly = $true; $hidAt = [int]$m.Groups[1].Value; break }
+    Start-Sleep -Milliseconds 50
+  }
+  $winB = Get-PillWindow
+  $stillVisible = ($null -ne $winB) -and $winB.Visible
+  $txtB = Get-PillLog $runB
+  $holdB = Get-LogField $txtB 'holdMs'
+  "    dwell run: hovered=$hoverSeen hidBeforeDeadline=$hidEarly($hidAt ms) stillVisible=$stillVisible at $($sw.ElapsedMilliseconds) ms; app reported holdMs=$holdB"
+  # Park the cursor away and then let the run finish (it must be able to fade out on its own).
+  $null = [PillProbe]::MoveTo(($shownB.X - 200), ($shownB.Y - 200))
+  $finishedB = $runB.Proc.WaitForExit(20000)
+  $txtB = Get-PillLog $runB
+  $fadedAfter = $txtB -match 'pill interactive: fadedOut=True'
+  Check 'S16.59 the cursor resting on the pill prevents the fade (D2), and it fades once the cursor leaves' `
+    ($hoverSeen -and -not $hidEarly -and $stillVisible -and $finishedB -and $fadedAfter) `
+    "hoverSeen=$hoverSeen hidEarly=$hidEarly($hidAt ms) stillVisibleAt4200ms=$stillVisible " +
+    "holdMs=$holdB finished=$finishedB fadedAfterLeaving=$fadedAfter landedOn=$atB"
+  if (-not $finishedB) { Stop-PillRun $runB }
+} else {
+  Stop-PillRun $runB
+  Inconclusive 'S16.59 cursor dwell prevents the fade' 'the pill never appeared'
+}
+
+# ---------------------------------------------------------------------------
+# S16.60: the vacuity guard for S16.59 -- WITHOUT a dwell the same build DOES fade,
+# at the hold the app itself reports. If this were also "still visible", then S16.58
+# would be passing for a reason that has nothing to do with hover.
+# ---------------------------------------------------------------------------
+$runC = Start-PillRun 'nohover' 8000
+$shownC = Wait-ForShownRect $runC.Log 4000
+if ($null -ne $shownC) {
+  # Keep the cursor away from the pill for the whole hold window.
+  $null = [PillProbe]::MoveTo(($shownC.X - 200), ($shownC.Y - 200))
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $hid = -1
+  while ($sw.ElapsedMilliseconds -lt 6000) {
+    $t = Get-PillLog $runC
+    $m = [regex]::Match($t, 'progress: hiding after (\d+) ms')
+    if ($m.Success) { $hid = [int]$m.Groups[1].Value; break }
+    Start-Sleep -Milliseconds 50
+  }
+  $txtC = Get-PillLog $runC
+  $holdC = Get-LogField $txtC 'holdMs'
+  $winC = Get-PillWindow
+  $goneNow = ($null -eq $winC) -or (-not $winC.Visible)
+  "    no-hover run: fading started at $hid ms (hold reported by the app: $holdC ms); window visible now: $(-not $goneNow)"
+  # Two independent facts: the fade really started, and it started because of the hold
+  # (not immediately, and not never).
+  Check 'S16.60 without a cursor on it the same build DOES fade, at the hold the app reports' `
+    (($hid -ge 0) -and ($holdC -gt 0) -and ($hid -ge $holdC) -and ($hid -le ($holdC + 1500))) `
+    "hiding after=$hid ms holdMs=$holdC ms windowStillVisible=$(-not $goneNow)"
+  $null = $runC.Proc.WaitForExit(15000)
+  if (-not $runC.Proc.HasExited) { Stop-PillRun $runC }
+} else {
+  Stop-PillRun $runC
+  Inconclusive 'S16.60 the no-hover control run' 'the pill never appeared'
+}
+
+$fgAfterInjection = [PillProbe]::ForegroundInfo()
+"    foreground after all injection: $fgAfterInjection"
+
+"=== S16.61 the suite left no Confern process behind (after the injected runs) ==="
+Check 'S16.61 no leftover Confern process after the injected runs' `
+  (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0) ''
+
 ""
 "M1h summary: $($script:Pass)/$($script:Checks) checks passed"
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive)"

@@ -11,7 +11,9 @@ namespace Sidecar;
 ///  • 只有**一個**視窗、**一行**文字，內容就地更新——不得每個檔案彈一個視窗或逐行洗版；
 ///  • 部分失敗時顯示 `✓ 8 / ✗ 2`，但**不自動彈出清單**（清單要使用者點才展開）。
 ///
-/// 實作沿用已經驗過穿透／z-order／收層的 <see cref="VisualLayer"/>：不新增第二套視窗機制。
+/// 容器（2026-10-02，待辦 5 · D1）：本類別只依賴 <see cref="ILayeredSurface"/> 的六個成員，
+/// 所以藥丸可以裝在 <see cref="PillWindow"/>（點得到）上，而輪盤照舊用 <see cref="VisualLayer"/>。
+/// 幾何仍然**只有一份**：畫面就是這個類別交給容器的點陣圖，容器不得自己算位置或大小。
 /// </summary>
 internal sealed class ProgressPresenter : IDisposable
 {
@@ -58,7 +60,7 @@ internal sealed class ProgressPresenter : IDisposable
     /// <summary>工作區（螢幕扣除工作列）。空矩形＝查不到，此時不做任何邊界處理。</summary>
     private Rectangle _workArea;
 
-    private readonly VisualLayer _layer;
+    private readonly ILayeredSurface _layer;
     private readonly Evidence _evidence;
 
     private int _x, _y;
@@ -69,6 +71,18 @@ internal sealed class ProgressPresenter : IDisposable
     private int _updates;
     private ConversionSnapshot _last = ConversionSnapshot.Idle;
     private System.Diagnostics.Stopwatch? _finishedAt;
+
+    /// <summary>
+    /// 游標是否停在藥丸／面板上（D2）。由容器的進入／離開事件維護。
+    ///
+    /// 為什麼需要它：規格 §4.4 的 2 秒淡出（有失敗時 5 秒）對「要點一顆小藥丸」來說太短，
+    /// 這個功能會變成**看得到、點不到**。而且 hover 不能靠「最後一次移動的時間」推論：
+    /// 游標停住不動時那個推論會以為使用者離開了。
+    /// </summary>
+    private bool _hovered;
+
+    /// <summary>是否已經對這次轉檔寫過「暫時不淡出」那一行（避免每個 tick 洗版）。</summary>
+    private bool _hoverHoldLogged;
 
     /// <summary>最後一次畫在螢幕上的矩形（螢幕座標）。命中區域的唯一來源，不另立第二份幾何。</summary>
     private Rectangle _lastRect;
@@ -83,22 +97,68 @@ internal sealed class ProgressPresenter : IDisposable
     /// </summary>
     private IReadOnlyList<ConversionFailureRow> _rows = Array.Empty<ConversionFailureRow>();
 
+    /// <summary>清單裡有幾筆失敗（dump 與驗收用；面板只畫前 <see cref="MaxDetailRows"/> 列）。</summary>
+    public int ExpandedRowCount => _rows.Count;
+
     /// <summary>
     /// tick 時去哪裡拉最新狀態（由 <c>ConversionRunner</c> 設定）。
     /// 這樣「進度從哪來」與「進度怎麼顯示」解耦：顯示層不需要知道 worker 或管道。
     /// </summary>
     public Func<ConversionSnapshot>? Source { get; set; }
 
-    public ProgressPresenter(Evidence evidence, VisualLayer layer, bool trace = false)
+    public ProgressPresenter(Evidence evidence, ILayeredSurface layer, bool trace = false)
     {
         _evidence = evidence;
         _layer = layer;
         _trace = trace;
         _layer.TickRequested += Tick;      // 由圖層的週期回呼驅動，不用輪詢迴圈
+        if (_layer is PillWindow pill)
+        {
+            // hover 只有會收到滑鼠事件的容器才有（視覺層有 WS_EX_TRANSPARENT，永遠不會有）。
+            // 用型別判斷而不是把事件放進介面：介面是「畫一張圖」的契約，
+            // 而 hover／點擊是「這個容器會不會把滑鼠交給我們」的事實——兩者不是同一件事。
+            pill.HoverChanged += OnHoverChanged;
+            // **真實點擊的接線**（規格 §7.3）。少了這一行，藥丸畫得出來、也點得到，
+            // 但點下去什麼都不會發生——而那種失效在畫面上與「還沒做好」完全一樣。
+            pill.Clicked += ToggleDetail;
+        }
+    }
+
+    /// <summary>
+    /// 游標進入／離開。離開時**重設**淡出時鐘：否則「使用者把游標移開」的那一刻，
+    /// 計時已經跑過好幾秒，畫面會在他還沒看清楚之前就開始淡出。
+    /// </summary>
+    private void OnHoverChanged(bool hover)
+    {
+        _hovered = hover;
+        if (!hover)
+        {
+            _hoverHoldLogged = false;
+            if (_last.Finished) _finishedAt = System.Diagnostics.Stopwatch.StartNew();
+        }
+        _evidence.Line($"progress: cursor {(hover ? "entered" : "left")} the pill/panel " +
+                       $"(hover={hover} expanded={_expanded} shown={_shown})");
     }
 
     public bool IsVisible => _layer.IsVisible;
     public int Frames => _layer.Frames;
+
+    /// <summary>游標現在是否停在藥丸／面板上（D2 的狀態，驗收要斷言它）。</summary>
+    public bool IsHovered => _hovered;
+
+    /// <summary>
+    /// 淡出前的停留時間（毫秒）。<c>0</c>＝還沒完成。<c>-1</c>＝**現在不淡出**
+    /// （游標停在上面）：D2 定案的行為，成功與失敗兩條路徑都適用。
+    ///
+    /// 刻意寫成單一函式：淡出時鐘、log 與驗收讀的是同一份規則。
+    /// 分成兩處（例如 Tick 裡各寫一次）就會出現「log 說 5 秒、行為是 2 秒」這種分歧。
+    /// </summary>
+    public int HoldFor()
+    {
+        if (!_last.Finished || _finishedAt == null) return 0;
+        if (_hovered) return -1;
+        return _expanded || _last.Failed > 0 ? FailureHoldMs : FadeMs;
+    }
 
     /// <summary>已經更新過幾次（用來斷言「原地更新」而不是「一直開新視窗」）。</summary>
     public int Updates => _updates;
@@ -124,13 +184,20 @@ internal sealed class ProgressPresenter : IDisposable
     /// <summary>
     /// 展開／收起失敗清單（規格 §7.3）。
     ///
-    /// ⚠ **目前沒有任何地方會從真實點擊呼叫它**：那一下點擊要不要被吃掉，屬於容器層的裁決
-    /// （專屬可點視窗 vs 現成的全域勾子），尚未拍板，而那種改動會動到穿透／z-order 的契約。
-    /// 這一版先把行為本身做成可驗證的（自測與 dump 走同一條路），接線留給裁決之後。
+    /// **真實點擊的入口**（2026-10-02，待辦 5 · D1 定案）：藥丸改由專屬的
+    /// <see cref="PillWindow"/> 承載，它的 <c>WM_LBUTTONUP</c> 直接呼叫這個方法——
+    /// 也就是說使用者點的那一下與自測走的是同一條路徑，沒有第二條。
+    ///
+    /// 為什麼展開之後要**重設**淡出時鐘：展開是使用者的下一個動作（他要讀那份清單），
+    /// 而清單若在他還在讀的時候淡出，這個功能等於沒做完。重設之後，游標停在上面就完全不淡出，
+    /// 游標離開才重新計時（見 <see cref="HoldFor"/>）。
     /// </summary>
     public void ToggleDetail()
     {
         _expanded = !_expanded;
+        _hoverHoldLogged = false;
+        // 展開／收起都是一個**新的閱讀動作**：時鐘從這裡重新開始。
+        if (_last.Finished) _finishedAt = System.Diagnostics.Stopwatch.StartNew();
         _evidence.Line($"progress detail: expanded={_expanded} rows={_rows.Count} " +
                        "(spec 7.3: the list only appears on an explicit toggle)");
         if (_shown) RedrawAlpha(255);
@@ -149,6 +216,8 @@ internal sealed class ProgressPresenter : IDisposable
         _last = ConversionSnapshot.Idle;
         _rows = Array.Empty<ConversionFailureRow>();
         _expanded = false;      // 新的一次轉檔＝收起的清單（§7.3：不自動彈出）
+        _hovered = false;
+        _hoverHoldLogged = false;
         _hasRect = false;
         _workArea = WorkAreaAt(x, y);   // D4：面板的寬度上限與位置夾取都以這裡的工作區為準
         _layer.StartTick(80);
@@ -222,7 +291,20 @@ internal sealed class ProgressPresenter : IDisposable
 
         if (_last.Finished && _finishedAt != null)
         {
-            int hold = _last.Failed > 0 ? FailureHoldMs : FadeMs;
+            // D2：游標停在藥丸／面板上就**完全不淡出**（成功與失敗都一樣）。
+            // 為什麼不是「延長成 10 秒」：使用者可能正在讀那份清單，猜一個秒數只是把
+            // 「來不及看清楚」延後發生；離開才是他知道自己讀完了的那一刻。
+            if (_hovered)
+            {
+                if (!_hoverHoldLogged)
+                {
+                    _hoverHoldLogged = true;
+                    _evidence.Line($"progress: NOT fading — the cursor is on the pill/panel " +
+                                   $"(elapsed={_finishedAt.ElapsedMilliseconds} ms, expanded={_expanded})");
+                }
+                return;
+            }
+            int hold = HoldFor();      // >0：有失敗 5 s、展開 5 s、成功 2 s（0/-1 在上面已排除）
             long elapsed = _finishedAt.ElapsedMilliseconds;
             if (elapsed >= hold + FadeOutMs)
             {
@@ -246,32 +328,52 @@ internal sealed class ProgressPresenter : IDisposable
     {
         // 展開／收起的決定只在 _expanded；兩條路都走**同一個** alpha 參數，
         // 所以清單與藥丸的淡出是同一個節奏（沒有第二套 alpha 規則）。
-        using Bitmap bitmap = _expanded
-            ? ComposeDetail(_rows, alpha, MaxPanelWidthFor(_workArea)).Bitmap
-            : Compose(_last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed, alpha);
-        // 以輪盤中心對齊，往上偏一點，避免正好壓在游標下方
-        int left = _x - bitmap.Width / 2, top = _y - bitmap.Height / 2;
-        // D4：展開後的面板才夾進工作區。**藥丸自己的位置是凍結的行為，不夾**——
-        // 這裡多一個 `_expanded &&` 不是防禦性寫法，是在保護一個已經拍板的決定。
-        string? clamped = null;
-        if (_expanded && _workArea.Width > 0)
+        //
+        // 展開時**仍然只有一張點陣圖**：藥丸與面板疊在同一張上（ComposeExpanded），
+        // 位置也由這裡決定。這是「不得有第二個幾何擁有者」的實作方式——
+        // 若藥丸與面板各自是一個視窗，游標停在兩者交界處就會出現兩種 hover 狀態。
+        Bitmap bitmap;
+        int left, top;
+        if (_expanded)
         {
-            int wantX = left;
-            left = Math.Clamp(left, _workArea.Left, Math.Max(_workArea.Left, _workArea.Right - bitmap.Width));
-            if (left != wantX) clamped = $"x {wantX}->{left}";
+            ExpandedComposite composed = ComposeExpandedAtAnchor(
+                _last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed,
+                _rows, alpha, MaxPanelWidthFor(_workArea));
+            bitmap = composed.Bitmap;
+            left = composed.At.X;
+            top = composed.At.Y;
         }
-        _layer.Show(left, top, bitmap);
-        // 記下真正送出去的矩形：命中判定問的是「螢幕上那一塊」，
-        // 不是「我以為它有多大」。展開後矩形變大，命中區域也跟著變大。
-        _lastRect = new Rectangle(left, top, bitmap.Width, bitmap.Height);
-        _hasRect = true;
-        _shown = true;
-        _updates++;
-        _evidence.Line($"progress: {_last.Line} done={_last.Done}/{_last.Total} " +
-                       $"current={_last.Current ?? "-"} finished={_last.Finished} alpha={alpha} " +
-                       $"expanded={_expanded} rect={_lastRect.X},{_lastRect.Y},{_lastRect.Width},{_lastRect.Height} " +
-                       $"(update #{_updates})" +
-                       (clamped != null ? $" panel clamped into the work area: {clamped}" : string.Empty));
+        else
+        {
+            bitmap = Compose(_last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed, alpha);
+            // 以輪盤中心對齊，往上偏一點，避免正好壓在游標下方
+            left = _x - bitmap.Width / 2;
+            top = _y - bitmap.Height / 2;
+        }
+        using (bitmap)
+        {
+            // D4：展開後的面板才夾進工作區。**藥丸自己的位置是凍結的行為，不夾**——
+            // 這裡多一個 `_expanded` 不是防禦性寫法，是在保護一個已經拍板的決定。
+            string? clamped = null;
+            if (_expanded && _workArea.Width > 0)
+            {
+                int wantX = left;
+                left = Math.Clamp(left, _workArea.Left, Math.Max(_workArea.Left, _workArea.Right - bitmap.Width));
+                if (left != wantX) clamped = $"x {wantX}->{left}";
+            }
+            _layer.Show(left, top, bitmap);
+            // 記下真正送出去的矩形：命中判定問的是「螢幕上那一塊」，
+            // 不是「我以為它有多大」。展開後矩形變大，命中區域也跟著變大。
+            _lastRect = new Rectangle(left, top, bitmap.Width, bitmap.Height);
+            _hasRect = true;
+            _shown = true;
+            _updates++;
+            _evidence.Line($"progress: {_last.Line} done={_last.Done}/{_last.Total} " +
+                           $"current={_last.Current ?? "-"} finished={_last.Finished} alpha={alpha} " +
+                           $"expanded={_expanded} rect={_lastRect.X},{_lastRect.Y},{_lastRect.Width},{_lastRect.Height} " +
+                           $"(update #{_updates})" +
+                           (clamped != null ? $" panel clamped into the work area: {clamped}" : string.Empty));
+        }
     }
 
     public void Hide()
@@ -280,6 +382,88 @@ internal sealed class ProgressPresenter : IDisposable
         _layer.StartTick(0);
         _shown = false;
     }
+
+    // ================= 展開狀態的合成（仍然只有一張點陣圖） =================
+
+    /// <summary>
+    /// 展開後的畫面：**一張**點陣圖，藥丸在上、失敗清單在它下面。
+    ///
+    /// 為什麼合成成一張而不是兩個視窗：規格明文要求「不得有第二個幾何擁有者」。
+    /// 兩個視窗的話，游標停在兩者之間會出現「藥丸說 hover、面板說沒有」這種分歧，
+    /// 而 hover 決定「要不要淡出」——於是同一個畫面會有兩種行為。
+    ///
+    /// 為什麼是 `static`：與 <see cref="ComposeDetail"/> 完全相同的理由——要能在**沒有畫面**的
+    /// 情況下 dump 出來驗版面。展開狀態是這個功能唯一的產出，看不到就等於沒驗過。
+    /// </summary>
+    /// <param name="centerX"><paramref name="centerY"/>：展開前藥丸的中心（螢幕座標）。</param>
+    /// <returns>
+    /// 合成結果：點陣圖、**建議的左上角螢幕座標**（＝畫面上那一塊矩形的左上角），
+    /// 以及真正交給 GDI+ 的那些字串與藥丸那一行的幾何。
+    ///
+    /// 座標是「建議」而不是「決定」：D4 的邊界夾取屬於畫面層（它才知道工作區），
+    /// 所以這裡把想要的左上角一起回傳，讓呼叫端只做夾取、不重新計算置中——
+    /// 重算一次就是第二份幾何，那是這個專案明確禁止的東西。
+    /// </returns>
+    public static ExpandedComposite ComposeExpanded(
+        string text, int done, int total, bool finished, int failed,
+        IReadOnlyList<ConversionFailureRow> rows, int alpha, int maxWidthPx,
+        int centerX, int centerY)
+    {
+        using Bitmap pill = Compose(text, done, total, finished, failed, alpha);
+        (Bitmap Bitmap, IReadOnlyList<string> LaidOut) detail = ComposeDetail(rows, alpha, maxWidthPx);
+        using Bitmap panel = detail.Bitmap;
+
+        int width = Math.Max(pill.Width, panel.Width);
+        // 面板直接貼在藥丸下面，**不留縫**：留縫會露出底下的桌面，看起來像兩個不相干的東西。
+        int height = pill.Height + panel.Height;
+        var bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        int pillX = (width - pill.Width) / 2;
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            g.Clear(Color.Transparent);
+            // 藥丸置中：整張圖的水平中心就是輪盤中心，也是使用者剛剛點的那一點。
+            g.DrawImageUnscaled(pill, pillX, 0);
+            g.DrawImageUnscaled(panel, (width - panel.Width) / 2, pill.Height);
+        }
+        return new ExpandedComposite(
+            bitmap,
+            new Point(centerX - width / 2, centerY - height / 2),
+            detail.LaidOut,
+            new Rectangle(pillX, 0, pill.Width, pill.Height));
+    }
+
+    /// <summary>
+    /// 展開後的那一張合成圖與它的說明（見 <see cref="ComposeExpanded"/>）。
+    ///
+    /// <see cref="PanelRowsLaidOut"/> 是**真正交給 GDI+ 的字串**，與點陣圖用的是同一份
+    /// （不是另外排版一次——算兩次就可能不一致，而驗收會驗到一份沒有被畫出來的字串）。
+    /// 驗收就是靠它把「畫出來的那一列」與「文字本身」對起來。
+    ///
+    /// <see cref="PillInBitmap"/> 是藥丸在合成圖裡的矩形：驗收要證明「合成後藥丸仍然完整存在」
+    /// （不是變成第二個幾何）以及「使用者剛剛點的那一點仍然在合成圖的藥丸上」。
+    /// </summary>
+    public sealed record ExpandedComposite(
+        Bitmap Bitmap, Point At, IReadOnlyList<string> PanelRowsLaidOut, Rectangle PillInBitmap);
+
+    /// <summary>
+    /// <see cref="RedrawAlpha"/> 用的版本：座標由 presenter 自己的錨點（<c>_x,_y</c>）算出來。
+    /// 與上面那個 static 方法共用同一份合成程式碼——dump 與畫面因此不可能長得不一樣。
+    ///
+    /// ⚠ 名字刻意**不叫** <c>ComposeExpanded</c>：多載解析會挑參數最少的那一個，
+    /// 於是這個方法會遞迴呼叫自己（編譯器不會有任何抱怨，而症狀是堆疊爆掉）。
+    /// </summary>
+    private ExpandedComposite ComposeExpandedAtAnchor(
+        string text, int done, int total, bool finished, int failed,
+        IReadOnlyList<ConversionFailureRow> rows, int alpha, int maxWidthPx) =>
+        ComposeExpanded(text, done, total, finished, failed, rows, alpha, maxWidthPx, _x, _y);
+
+    /// <summary>
+    /// 展開狀態的合成圖（**新的一張**，呼叫端負責釋放）。**只給驗收與 dump 用**：
+    /// 展開是這個功能唯一的產出，它必須能被量測，而不是只能被相信。
+    /// </summary>
+    public ExpandedComposite RenderExpandedComposite() =>
+        ComposeExpandedAtAnchor(_last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed,
+                                _rows, 255, MaxPanelWidthFor(_workArea));
 
     /// <summary>
     /// 畫出失敗清單（規格 §7.3）。
@@ -616,5 +800,13 @@ internal sealed class ProgressPresenter : IDisposable
         catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, px, FontStyle.Bold, GraphicsUnit.Pixel); }
     }
 
-    public void Dispose() => _layer.TickRequested -= Tick;
+    public void Dispose()
+    {
+        _layer.TickRequested -= Tick;
+        if (_layer is PillWindow pill)
+        {
+            pill.HoverChanged -= OnHoverChanged;
+            pill.Clicked -= ToggleDetail;
+        }
+    }
 }

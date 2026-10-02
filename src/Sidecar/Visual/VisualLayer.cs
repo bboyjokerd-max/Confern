@@ -14,8 +14,13 @@ namespace Sidecar;
 ///
 /// 本類別**不含任何輪盤知識**：它只負責「把一張 ARGB 點陣圖貼到某個螢幕座標」，
 /// 幾何與外觀屬 <c>WheelPresenter</c>（唯一繪製者）。
+///
+/// 2026-10-02（待辦 5 · D1）：這個類別**一行都沒改**，只是多實作 <see cref="ILayeredSurface"/>——
+/// 那是 <see cref="ProgressPresenter"/> 唯一用到的那六個成員（畫／藏／可見／frame 數／週期回呼）。
+/// 藥丸從此改用 <see cref="PillWindow"/>（沒有 <c>WS_EX_TRANSPARENT</c>，所以點得到），
+/// 輪盤仍然用這一層。抽介面的目的是**不動這裡的穿透與 z-order 契約**。
 /// </summary>
-internal sealed class VisualLayer : IDisposable
+internal sealed class VisualLayer : ILayeredSurface
 {
     private const string ClassName = ProductInfo.Name + "VisualLayer";
     private static Native.WndProcDelegate? _proc;   // 保留委派，避免被 GC 回收（同 HitLayer）

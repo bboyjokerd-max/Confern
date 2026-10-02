@@ -104,6 +104,23 @@ internal static class Program
             return App.RunProgressDetailSelfTest(detailEvidence);
         }
 
+        // 待辦 5 · D1：把 WM_LBUTTONUP 送進**真實的 PillWindow.WndProc**，驗展開／收合、
+        // 視窗矩形與 hover。同樣不必有畫面、不必動滑鼠（訊息是直接送給那個視窗的）。
+        if (opt.PillSelfTest)
+        {
+            Native.AttachParentConsole();
+            using var pillEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunPillSelfTest(opt, pillEvidence);
+        }
+
+        // 待辦 5 · D1/D2：把可點的藥丸顯示出來並活著 N 毫秒，讓外部注入合成輸入。
+        if (opt.PillInteractiveMs > 0)
+        {
+            Native.AttachParentConsole();
+            using var liveEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunPillInteractive(opt, liveEvidence);
+        }
+
         // M1f：改設定並存檔（規格 §8）。設定頁按「儲存」走的就是同一條路，
         // 所以這條路必須能被無頭驗證——否則設定頁的驗證只能靠人眼看。
         if (!string.IsNullOrEmpty(opt.SettingsSet))
@@ -239,6 +256,10 @@ internal sealed class Options
                                     so acceptance can assert on what was drawn instead of on intent
           --progress-detail-selftest
                                     exercise PillRect/Contains/IsExpanded/ToggleDetail headlessly and exit
+          --pill-selftest           send WM_LBUTTONUP through the REAL pill WndProc and verify the
+                                    expand/collapse state, the window rectangle and the hover events (no mouse)
+          --pill-interactive <ms>   show the clickable pill (with a failure list) on screen for N ms, so
+                                    acceptance can inject a real click / cursor dwell and watch the fade
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
@@ -349,6 +370,61 @@ internal sealed class Options
     public bool ProgressDetailSelfTest;
     /// <summary>--progress-trace：記錄每一次週期回呼的決策（診斷淡出卡住用）。</summary>
     public bool ProgressTrace = false;
+
+    /// <summary>
+    /// --pill-selftest：對**真實的 <c>PillWindow.WndProc</c>** 送 <c>WM_LBUTTONUP</c>（不必動滑鼠）。
+    ///
+    /// 為什麼這一條與「真的合成點擊」都要有：合成點擊證明的是「使用者的手點得到」，
+    /// 而這一條證明的是「點擊進到 WndProc 之後走的是展開那條路」。兩者失敗的原因不同
+    /// （前者失敗＝視窗或座標錯了，後者失敗＝訊息分派或回呼錯了），所以不能只留一個。
+    /// </summary>
+    public bool PillSelfTest;
+
+    /// <summary>
+    /// --pill-selftest-dump &lt;png&gt;：把**展開後的合成圖**（藥丸 ＋ 失敗清單，同一張點陣圖）
+    /// 寫成 PNG（不含 alpha／深底，人眼看的版本）。
+    ///
+    /// 為什麼需要它：展開狀態是這個功能唯一的產出，而「展開」在畫面上只表現為「一塊比較大的
+    /// 紅色矩形」。若沒有這張圖，驗收只能斷言「矩形變大了」——那對「清單裡真的有字、
+    /// 字沒有被裁掉」什麼都證明不了。
+    /// </summary>
+    public string PillSelfTestDump = "";
+
+    /// <summary>同 <see cref="PillSelfTestDump"/>，但**保留 alpha**（唯一能取樣文字墨水的檔案）。</summary>
+    public string PillSelfTestDumpRaw = "";
+
+    /// <summary>
+    /// --pill-selftest-dump-json &lt;json&gt;：展開合成圖的幾何 ＋ **真正交給 GDI+ 的那幾列字串**。
+    /// 與 m1h 既有的 panel JSON 同一個理由：只驗像素的話，「字比較短」與「字被截掉」分不出來。
+    /// </summary>
+    public string PillSelfTestDumpJson = "";
+
+    /// <summary>
+    /// --pill-selftest-shot &lt;png&gt;：抓**畫面上真正顯示的那一塊**（視窗矩形的螢幕像素）。
+    ///
+    /// 這一項與 composite dump 互補，而且只有它能回答一個 dump 答不了的問題：
+    /// **那個視窗在螢幕上到底有沒有畫出來**（layered window 可能沒被 composited、
+    /// 可能被別的 topmost 視窗蓋住、可能位置錯了）。dump 是我們自己畫的圖，
+    /// 螢幕截圖是作業系統合成的結果——後者才是使用者看到的東西。
+    ///
+    /// 抓不到時（遠端桌面、最小化的 session、被鎖定的畫面）**必須說出來**，
+    /// 不能安靜地留一個空檔案讓驗收以為通過了。
+    /// </summary>
+    public string PillSelfTestShot = "";
+
+    /// <summary>
+    /// --pill-interactive &lt;ms&gt;：把藥丸（可展開的失敗清單）顯示在畫面上並活著 N 毫秒，
+    /// 讓**外部**能對它注入合成輸入（真實點擊、游標停留），然後自然淡出。
+    ///
+    /// 為什麼需要一個獨立的診斷模式，而不是拿 `--wheel-payload` 來測：
+    /// 驗收要量的是「點在藥丸上會不會展開」「游標停在上面會不會阻止淡出」，
+    /// 這兩件事都需要**在藥丸還活著的時候**從外面動手。`--wheel-payload` 會依自己的節奏
+    /// 一路跑到淡出才結束，驗收只有「剛好在那幾秒內插進去」才會命中——那種檢查會變成
+    /// 隨時間偶爾紅的假檢查。這裡讓生命週期變成一個明確的參數。
+    ///
+    /// 這一條**只提供畫面與生命週期**：展開、淡出、hover 全部走正式路徑的同一組物件與同一組規則。
+    /// </summary>
+    public int PillInteractiveMs;
     /// <summary>--settings-probe <path>：載入指定的設定檔並印出夾制後的結果（驗證 §8 的範圍規則）。</summary>
     public string SettingsProbe = "";
     /// <summary>
@@ -490,6 +566,24 @@ internal sealed class Options
                     break;
                 case "--progress-detail-selftest":
                     o.ProgressDetailSelfTest = true;
+                    break;
+                case "--pill-selftest":
+                    o.PillSelfTest = true;
+                    break;
+                case "--pill-selftest-dump":
+                    if (i + 1 < args.Length) { o.PillSelfTestDump = args[i + 1]; i++; }
+                    break;
+                case "--pill-selftest-dump-raw":
+                    if (i + 1 < args.Length) { o.PillSelfTestDumpRaw = args[i + 1]; i++; }
+                    break;
+                case "--pill-selftest-dump-json":
+                    if (i + 1 < args.Length) { o.PillSelfTestDumpJson = args[i + 1]; i++; }
+                    break;
+                case "--pill-selftest-shot":
+                    if (i + 1 < args.Length) { o.PillSelfTestShot = args[i + 1]; i++; }
+                    break;
+                case "--pill-interactive":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int pillMs)) { o.PillInteractiveMs = pillMs; i++; }
                     break;
                 case "--settings-probe":
                     if (i + 1 < args.Length) { o.SettingsProbe = args[i + 1]; i++; }
@@ -684,9 +778,14 @@ internal static class App
 
         // 視覺層同樣**預先建立**：規格 §9.3 要求輪盤首次顯示 < 100 ms，不可在拖曳中才建視窗。
         using var visual = new VisualLayer(evidence);
-        // 進度層（規格 §4.4）同樣預先建立：轉檔開始時不可以再多花一次建視窗的成本，
-        // 而且它必須與輪盤**分開**——輪盤收起後那一行進度還要留在原位置。
-        using var progressLayer = new VisualLayer(evidence);
+        // 進度顯示（規格 §4.4／§7.3）改用**自己的可點視窗**（待辦 5 · D1 定案：方案 A）。
+        // 為什麼不是共用的 VisualLayer：那一層**必須**有 WS_EX_TRANSPARENT（拖放要穿透它），
+        // 而那個位元的意思正是「滑鼠事件穿過去」——藥丸在它上面永遠點不到，
+        // 規格 §7.3 的「可點擊展開」就無從實作。外觀一行都沒改：兩者共用同一條
+        // UpdateLayeredWindow 繪製路徑，幾何也仍然只有 ProgressPresenter 一份。
+        //
+        // 預先建立的理由與視覺層相同：轉檔開始時不可以再多花一次建視窗的成本。
+        using var progressLayer = new PillWindow(evidence);
         using var progress = new ProgressPresenter(evidence, progressLayer, opt.ProgressTrace);
         // runner 一定要釋放：它擁有 worker 行程與管道（Dispose 會送 shutdown 並確保 worker 收掉）
         using var runner = new ConversionRunner(Environment.ProcessPath ?? $"{ProductInfo.Name}.exe", evidence.Line, progress);
@@ -2204,6 +2303,414 @@ internal static class App
 
         evidence.Line($"detail: selftest done: checks={checks} failed={failed} ok={failed == 0}");
         return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// 待辦 5 · D1：`--pill-selftest`——把 <c>WM_LBUTTONUP</c> 送進**真實的
+    /// <see cref="PillWindow.WndProc"/>**，不必動滑鼠、不必有畫面。
+    ///
+    /// 為什麼要有這一條，既然驗收已經有「真的合成點擊」：
+    /// 那兩條證明的是不同的事。合成點擊證明「使用者的手點得到」（視窗存在、位置對、沒有穿透）；
+    /// 這一條證明「點擊進到 WndProc 之後走的是展開那條路」（訊息分派、回呼、重畫、矩形更新）。
+    /// 前者失敗＝容器錯了，後者失敗＝接線錯了，而兩者的修法完全不同。
+    ///
+    /// 每一條斷言都在日誌裡帶上**量到的數字**（矩形、樣式、hover、clicks），
+    /// 讓「檢查綠燈」與「事實」是可以對照的兩件事，而不是同一句話。
+    /// </summary>
+    internal static int RunPillSelfTest(Options opt, Evidence evidence)
+    {
+        int failed = 0;
+        int checks = 0;
+        void Report(string name, bool ok, string detail = "")
+        {
+            checks++;
+            if (!ok) failed++;
+            evidence.Line($"pill: {(ok ? "PASS" : "FAIL")} {name}" +
+                          (detail.Length > 0 ? $"  [{detail}]" : string.Empty));
+        }
+
+        using var pill = new PillWindow(evidence);
+        using var progress = new ProgressPresenter(evidence, pill);
+
+        // 假快照：一次部分失敗的轉檔（有失敗 → 藥丸是紅的、面板有兩列）。
+        var snapshot = new ConversionSnapshot(9, 10, null, true, 9, 1,
+            new[] { "broken.png 無法解碼", "locked.heic 檔案被鎖定" }, null,
+            new[] { @"C:\tmp\broken.png", @"C:\tmp\locked.heic" });
+
+        // 1) 樣式：該有的有、不該有的沒有。WS_EX_TRANSPARENT 若設起來，點擊會穿過去（＝D1 的白做）。
+        Report("the pill window carries the required styles and NOT WS_EX_TRANSPARENT",
+               (pill.ExStyle & Native.WS_EX_LAYERED) != 0 &&
+               (pill.ExStyle & Native.WS_EX_NOACTIVATE) != 0 &&
+               (pill.ExStyle & Native.WS_EX_TOOLWINDOW) != 0 &&
+               (pill.ExStyle & Native.WS_EX_TRANSPARENT) == 0,
+               $"exstyle=0x{pill.ExStyle:X}");
+
+        // 畫出來，並記下自己的矩形。**這是後面全部檢查的前提**：沒有矩形就沒有可點的東西，
+        // 而「沒有矩形」不會拋例外，只會讓後面每一條比對都失去意義（前提失敗要當場說出來）。
+        //
+        // ⚠ 錨點刻意**不放原點**：藥丸在 (600,400)、視窗因此落在 (516,373)。
+        //   第一版用 (0,0) 當錨點，於是「螢幕座標」與「工作區座標」兩組數字在數值上很接近，
+        //   把一個座標系混用的 bug（拿 lParam 的工作區座標去比視窗的螢幕矩形）藏了起來。
+        //   自測的環境必須讓這種錯誤有機會現形，否則它只會在驗收環境裡才爆。
+        progress.Start(600, 400);
+        progress.Update(snapshot);
+        Rectangle pillRect = progress.PillRect;
+        Report("the pill was really drawn and knows its own rectangle (premise for every check below)",
+               pillRect.Width > 0 && pillRect.Height > 0 && pill.IsVisible &&
+               pillRect.X > 0 && pillRect.Y > 0,
+               $"rect={Rx(pillRect)} visible={pill.IsVisible} frames={pill.Frames}");
+
+        // 3) 一份幾何：**視窗矩形＝回報的矩形**，不是各自為政。
+        Rectangle winBefore = WindowRect(pill.Handle);
+        Report("the window rectangle equals the pill rectangle the presenter reported (one geometry, not two)",
+               winBefore.Width > 0 && winBefore == pillRect,
+               $"window={Rx(winBefore)} reported={Rx(pillRect)}");
+
+        // 4) 真實的 WM_LBUTTONUP → 展開。用 SendMessage（同步）＋ PumpMessages：
+        //    呼叫端不在訊息迴圈裡，SendMessage 才保證「送達」與「處理完」是同一件事。
+        //
+        //    ⚠ lParam 是**工作區座標**（相對於視窗左上角），不是螢幕座標。這裡刻意換算過，
+        //      而不是「反正送螢幕座標也會過」——那個「也會過」正是靠座標系混用在原點附近
+        //      偶然成立才有的假象。
+        int centerX = pillRect.X + pillRect.Width / 2;
+        int centerY = pillRect.Y + pillRect.Height / 2;
+        int clientX = centerX - winBefore.X, clientY = centerY - winBefore.Y;
+        Native.SendMessageW(pill.Handle, Native.WM_LBUTTONUP, IntPtr.Zero, LParam(clientX, clientY));
+        Native.PumpMessages();
+        Rectangle expanded = progress.PillRect;
+        Rectangle winExpanded = WindowRect(pill.Handle);
+        Report("WM_LBUTTONUP through the real WndProc expands the list (spec 7.3)",
+               progress.IsExpanded && pill.Clicks == 1,
+               $"expanded={progress.IsExpanded} clicks={pill.Clicks} " +
+               $"clientSent=({clientX},{clientY}) clientArea={pill.ClientRect.Width}x{pill.ClientRect.Height}");
+        Report("the expanded state is BIGGER than the pill and the window grew with it",
+               expanded.Height > pillRect.Height && expanded.Width >= pillRect.Width &&
+               winExpanded == expanded && winExpanded.Height > winBefore.Height,
+               $"pill={Rx(pillRect)} expanded={Rx(expanded)} window={Rx(winExpanded)} " +
+               $"windowH {winBefore.Height}->{winExpanded.Height}");
+
+        // 5) 展開後的畫面真的畫得出來，而且**藥丸還在裡面、面板接在它下面**（合成不是把藥丸丟掉）。
+        var composite = progress.RenderExpandedComposite();
+        try
+        {
+            // 藥丸在螢幕上的矩形，由合成結果自己推出來（合成圖的左上角 ＋ 藥丸在圖裡的位置）。
+            var pillOnScreen = new Rectangle(composite.At.X + composite.PillInBitmap.X,
+                                            composite.At.Y + composite.PillInBitmap.Y,
+                                            composite.PillInBitmap.Width, composite.PillInBitmap.Height);
+            Report("the expanded composite really has the panel below the pill (one bitmap, pill intact)",
+                   composite.Bitmap.Width == expanded.Width &&
+                   composite.Bitmap.Height == expanded.Height &&
+                   !composite.PillInBitmap.IsEmpty &&
+                   composite.PillInBitmap.Y == 0 &&
+                   composite.PillInBitmap.Height < composite.Bitmap.Height &&
+                   composite.PanelRowsLaidOut.Count >= 2,
+                   $"bitmap={composite.Bitmap.Width}x{composite.Bitmap.Height} " +
+                   $"pillInBitmap={Rx(composite.PillInBitmap)} panelRows={composite.PanelRowsLaidOut.Count}");
+            // 兩份幾何（畫面的 vs 合成的）必須講同一件事：藥丸的水平中心就是輪盤中心，
+            // 而展開前的藥丸仍然完整地位於合成圖的頂端。**座標必須相等，不是差不多**
+            // （展開後 x 會變，那是整張圖變寬造成的，不是藥丸自己跑掉）。
+            Report("the composite agrees with the screen geometry (pill centred on the anchor, same top edge)",
+                   pillOnScreen.Width == pillRect.Width && pillOnScreen.Height == pillRect.Height &&
+                   pillOnScreen.X + pillOnScreen.Width / 2 == centerX &&
+                   pillOnScreen.Y == expanded.Y && pillOnScreen.Bottom <= expanded.Bottom,
+                   $"pillOnScreen={Rx(pillOnScreen)} clicked=({centerX},{centerY}) " +
+                   $"expanded={Rx(expanded)} pillBefore={Rx(pillRect)}");
+
+            // 展開狀態的證據落地（PNG ＋ JSON ＋ 螢幕截圖）。**此刻它正顯示在畫面上**，
+            // 所以截圖抓到的就是使用者看到的那一塊。
+            DumpExpandedEvidence(opt, evidence, progress, composite, pill, expanded);
+        }
+        finally { composite.Bitmap.Dispose(); }
+
+        // 6) 點在視窗**外**不得展開，而且**不得被計為一次點擊**。
+        //    這一條同時是「點在藥丸外面不會展開」（規格明列的失敗模式）與一個更基本的事實：
+        //    訊息是可以被送進來的，所以命中判定必須在視窗自己身上成立，不能只靠「滑鼠本來就點不到」。
+        //
+        //    ⚠ 座標要用**現在**的矩形：此刻是展開狀態，矩形比藥丸大得多，拿藥丸的左上角 -40
+        //      仍然落在展開後的視窗裡（第一版就是這樣，於是斷言量到的是「展開著」而不是別的）。
+        //      座標系是工作區座標，所以「外面」是負值——負值是最明確的「不在這塊矩形上」。
+        Rectangle current = progress.PillRect;
+        int outsideX = -40, outsideY = current.Height / 2;
+        Native.SendMessageW(pill.Handle, Native.WM_LBUTTONUP, IntPtr.Zero, LParam(outsideX, outsideY));
+        Native.PumpMessages();
+        Report("a click reported OUTSIDE the client area neither toggles the list nor counts as a click",
+               progress.IsExpanded && pill.Clicks == 1 && progress.PillRect == current &&
+               !pill.HitTestClientPoint(outsideX, outsideY),
+               $"outsideClient=({outsideX},{outsideY}) insideClientArea={pill.HitTestClientPoint(outsideX, outsideY)} " +
+               $"expanded={progress.IsExpanded} clicks={pill.Clicks} rect={Rx(progress.PillRect)}");
+
+        // 7) hover：進入／離開（D2）。離開的事件由系統送 WM_MOUSELEAVE，這裡直接送同一則訊息。
+        //    座標同樣用**現在**的矩形中心（此刻是展開後的視窗），換算成工作區座標。
+        //
+        //    ⚠ 這裡量的是**訊息路徑**，不是真的把游標移過去：這個自測沒有動滑鼠，所以
+        //      `WM_MOUSEMOVE` 一處理完，系統就會（因為實體游標不在視窗上）排入一則**真實的**
+        //      `WM_MOUSELEAVE`。因此「進入」只能在 SendMessage 回來的當下讀，
+        //      PumpMessages 之後讀到的已經是被系統離場的那一份。
+        //      「游標真的停在藥丸上就不淡出」是 --pill-interactive ＋ 合成輸入那一條在驗的
+        //      （那裡的 hover 由真正的滑鼠移動產生）。
+        int hoverClientX = current.Width / 2, hoverClientY = current.Height / 2;
+        Native.SendMessageW(pill.Handle, Native.WM_MOUSEMOVE, IntPtr.Zero, LParam(hoverClientX, hoverClientY));
+        bool pillSawEnter = pill.IsHovered;
+        bool presenterSawEnter = progress.IsHovered;
+        Native.PumpMessages();
+        bool survivedPump = pill.IsHovered;
+        Native.SendMessageW(pill.Handle, Native.WM_MOUSELEAVE, IntPtr.Zero, IntPtr.Zero);
+        Native.PumpMessages();
+        evidence.Line($"pill: hover probe at client ({hoverClientX},{hoverClientY}) " +
+                      $"insideClientArea={pill.HitTestClientPoint(hoverClientX, hoverClientY)} " +
+                      $"afterSend pill={pillSawEnter} presenter={presenterSawEnter}; " +
+                      $"afterPump pill={survivedPump}; " +
+                      $"afterLeave pill={pill.IsHovered} presenter={progress.IsHovered} " +
+                      "(the pump clears it because the PHYSICAL cursor is not over the window)");
+        Report("WM_MOUSEMOVE marks the pill hovered and WM_MOUSELEAVE clears it (D2's only mechanism)",
+               pillSawEnter && presenterSawEnter && !pill.IsHovered && !progress.IsHovered,
+               $"afterMove: pill={pillSawEnter} presenter={presenterSawEnter}; " +
+               $"afterLeave: pill={pill.IsHovered} presenter={progress.IsHovered}");
+
+        // 8) 再次點擊＝收合，而且視窗縮回藥丸大小（不是卡在大的）。
+        Native.SendMessageW(pill.Handle, Native.WM_LBUTTONUP, IntPtr.Zero, LParam(clientX, clientY));
+        Native.PumpMessages();
+        Rectangle winCollapsed = WindowRect(pill.Handle);
+        Report("a second click collapses again and the window shrinks back to the pill",
+               !progress.IsExpanded && pill.Clicks == 2 && winCollapsed == progress.PillRect &&
+               progress.PillRect.Height == pillRect.Height,
+               $"expanded={progress.IsExpanded} clicks={pill.Clicks} window={Rx(winCollapsed)}");
+
+        evidence.Line($"pill: selftest done: checks={checks} failed={failed} ok={failed == 0} " +
+                      $"hwnd=0x{pill.Handle.ToInt64():X} exstyle=0x{pill.ExStyle:X}");
+        return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// 待辦 5 · D1＋D2：`--pill-interactive &lt;ms&gt;`——把可點的藥丸（含失敗清單）顯示出來並活著
+    /// N 毫秒，讓**外部**注入真實的合成輸入，然後自然淡出。
+    ///
+    /// 為什麼要有這個模式：驗收要量的兩件事（「點在藥丸上會不會展開」「游標停在上面會不會
+    /// 阻止淡出」）都必須在藥丸還活著的時候從外面動手。讓生命週期變成一個明確的參數，
+    /// 檢查才不會變成「剛好在那幾秒內插進去」的時間競賽。
+    ///
+    /// 它**只提供畫面與生命週期**：展開、淡出、hover 全部走正式路徑的同一組物件與同一組規則
+    /// （<see cref="PillWindow"/> ＋ <see cref="ProgressPresenter"/>）。
+    /// </summary>
+    internal static int RunPillInteractive(Options opt, Evidence evidence)
+    {
+        using var pill = new PillWindow(evidence);
+        using var progress = new ProgressPresenter(evidence, pill);
+
+        // 位置取工作區中心：外部的驗收要能在**點下去之前**確認「那個座標上真的有我們的視窗」
+        // （否則它可能會點到桌面上隨便一個東西，而那種檢查會以錯誤的理由通過或失敗）。
+        Rectangle work = ProgressPresenter.WorkAreaAt(0, 0);
+        int x = work.Width > 0 ? work.Left + work.Width / 2 : 800;
+        int y = work.Height > 0 ? work.Top + work.Height / 2 : 400;
+
+        // 合成的失敗列。刻意**不用真實轉檔**：這個模式要驗的是容器與生命週期，
+        // 真實轉檔的失敗路徑已經有 `--wheel-payload` 那條端到端在驗，兩者不該混在一起。
+        var rows = new List<ConversionFailureRow>
+        {
+            new("corrupt.png", "無法解碼"),
+            new("locked.heic", "檔案被鎖定"),
+        };
+        var snapshot = new ConversionSnapshot(rows.Count, rows.Count, null, true, 0, rows.Count,
+            rows.Select(r => r.Text).ToArray(), null,
+            rows.Select(r => @"C:\tmp\" + r.FileName).ToArray());
+
+        progress.Start(x, y);
+        // 先 Update 再（**不**）展開：藥丸從**收合**開始，這樣「展開」就只可能來自
+        // 外部的真實點擊——否則驗收量到的「展開著」是這個模式自己造成的，
+        // 而那種檢查會對著一個沒有點過任何東西的行程說「點擊有效」。
+        progress.Update(snapshot);
+        Rectangle rect = progress.PillRect;
+        evidence.Line($"pill interactive: hwnd=0x{pill.Handle.ToInt64():X} exstyle=0x{pill.ExStyle:X} " +
+                      $"workArea={work.X},{work.Y},{work.Width},{work.Height} anchor=({x},{y})");
+        evidence.Line($"pill interactive: shown rect={Rx(rect)} expanded={progress.IsExpanded} " +
+                      $"holdMs={progress.HoldFor()} fadeMs={opt.PillInteractiveMs} " +
+                      $"(collapsed on purpose: any expansion from here on can only come from the outside)");
+        evidence.Line($"pill interactive: clickState before any input: expanded={progress.IsExpanded} " +
+                      $"windowH={WindowRect(pill.Handle).Height} clicks={pill.Clicks}");
+
+        var sw = Stopwatch.StartNew();
+        int ticks = 0;
+        bool loggedExpanded = progress.IsExpanded;
+        bool loggedHover = false;
+        while (sw.ElapsedMilliseconds < opt.PillInteractiveMs)
+        {
+            while (Native.PeekMessageW(out Native.MSG msg, IntPtr.Zero, 0, 0, Native.PM_REMOVE))
+            {
+                Native.TranslateMessage(ref msg);
+                Native.DispatchMessageW(ref msg);
+                ticks++;
+            }
+            if (progress.IsExpanded != loggedExpanded)
+            {
+                loggedExpanded = progress.IsExpanded;
+                // 這一行是驗收的**因果證據**：它是在外部注入之後才出現的，
+                // 內容包含展開狀態、視窗實際高度與點擊次數——三者必須一起變。
+                evidence.Line($"pill interactive: expanded={loggedExpanded} clicks={pill.Clicks} " +
+                              $"windowH={WindowRect(pill.Handle).Height} " +
+                              $"at {sw.ElapsedMilliseconds} ms rect={Rx(progress.PillRect)}");
+            }
+            if (pill.IsHovered != loggedHover)
+            {
+                loggedHover = pill.IsHovered;
+                evidence.Line($"pill interactive: hover={loggedHover} at {sw.ElapsedMilliseconds} ms");
+            }
+            Thread.Sleep(10);
+        }
+
+        evidence.Line($"pill interactive: loop done after {sw.ElapsedMilliseconds} ms ticks={ticks} " +
+                      $"visible={pill.IsVisible} expanded={progress.IsExpanded} hover={pill.IsHovered} " +
+                      $"clicks={pill.Clicks} frames={pill.Frames} rect={Rx(progress.PillRect)}");
+
+        // 收尾改成「等它淡出」：這樣驗收即使沒有注入任何東西，也會看到正式路徑的自然淡出，
+        // 而注入過的行程則會看到它自己的 hover 把它留在畫面上（那正是 D2 要的）。
+        bool faded = PumpUntil(() => !pill.IsVisible, 20000);
+        evidence.Line($"pill interactive: fadedOut={faded} visible={pill.IsVisible} " +
+                      $"expanded={progress.IsExpanded} clicks={pill.Clicks} " +
+                      $"total={sw.ElapsedMilliseconds} ms");
+        return 0;
+    }
+
+    /// <summary>把矩形寫成人看得懂也 regex 得到的一行（驗收直接讀日誌）。</summary>
+    private static string Rx(Rectangle r) => $"{r.X},{r.Y},{r.Width},{r.Height}";
+
+    /// <summary>
+    /// 展開狀態的三份證據：PNG（含 alpha 的版本才能真正取樣文字墨水）、JSON（交給 GDI+ 的字串），
+    /// 以及**畫面上那一塊的截圖**。
+    ///
+    /// 為什麼截圖是必要的，既然已經有 PNG：PNG 是**我們自己畫的圖**，它證明不了那張圖
+    /// 有沒有出現在螢幕上（layered window 沒被合成、被別的 topmost 蓋住、位置算錯——
+    /// 這三種失效都會留下一張完美的 PNG）。截圖是系統合成的結果，那才是使用者看到的東西。
+    /// 抓不到時大聲說出來，不留一個空檔案讓人以為驗過了。
+    /// </summary>
+    private static void DumpExpandedEvidence(Options opt, Evidence evidence, ProgressPresenter progress,
+                                            ProgressPresenter.ExpandedComposite composite, PillWindow pill,
+                                            Rectangle expanded)
+    {
+        string? dir = null;
+        foreach (string p in new[] { opt.PillSelfTestDump, opt.PillSelfTestDumpRaw, opt.PillSelfTestShot })
+            if (!string.IsNullOrEmpty(p)) { dir = Path.GetDirectoryName(Path.GetFullPath(p)); break; }
+        if (dir == null && !string.IsNullOrEmpty(opt.PillSelfTestDumpJson))
+            dir = Path.GetDirectoryName(Path.GetFullPath(opt.PillSelfTestDumpJson));
+        if (dir != null)
+        {
+            try { Directory.CreateDirectory(dir); }
+            catch (Exception ex) { evidence.Line($"pill dump: cannot create {dir}: {ex.Message}"); }
+        }
+
+        if (!string.IsNullOrEmpty(opt.PillSelfTestDump))
+        {
+            try
+            {
+                using var flat = new Bitmap(composite.Bitmap.Width, composite.Bitmap.Height,
+                                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(flat))
+                {
+                    g.Clear(Color.FromArgb(255, 32, 34, 38));
+                    g.DrawImageUnscaled(composite.Bitmap, 0, 0);
+                }
+                flat.Save(opt.PillSelfTestDump, System.Drawing.Imaging.ImageFormat.Png);
+                evidence.Line($"pill dump: wrote {opt.PillSelfTestDump}");
+            }
+            catch (Exception ex)
+            {
+                evidence.Line($"pill dump: FAILED to write {opt.PillSelfTestDump}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        if (!string.IsNullOrEmpty(opt.PillSelfTestDumpRaw))
+        {
+            try
+            {
+                composite.Bitmap.Save(opt.PillSelfTestDumpRaw, System.Drawing.Imaging.ImageFormat.Png);
+                evidence.Line($"pill dump: wrote {opt.PillSelfTestDumpRaw} (alpha preserved)");
+            }
+            catch (Exception ex)
+            {
+                evidence.Line($"pill dump: FAILED to write {opt.PillSelfTestDumpRaw}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // 這一行同時是「dump 的尺寸」與「畫面幾何」的來源：驗收用它與 PNG 的實際像素比對。
+        evidence.Line($"pill dump line: variant=expanded width={composite.Bitmap.Width} " +
+                      $"height={composite.Bitmap.Height} rows={progress.ExpandedRowCount} " +
+                      $"laidOutRows={composite.PanelRowsLaidOut.Count} " +
+                      $"pillInBitmap={Rx(composite.PillInBitmap)} window={Rx(expanded)} " +
+                      $"at={Rx(new Rectangle(composite.At, composite.Bitmap.Size))}");
+
+        if (!string.IsNullOrEmpty(opt.PillSelfTestDumpJson))
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append('{');
+            sb.Append($"\"width\":{composite.Bitmap.Width},\"height\":{composite.Bitmap.Height},");
+            sb.Append($"\"at\":[{composite.At.X},{composite.At.Y}],");
+            sb.Append($"\"pillInBitmap\":[{composite.PillInBitmap.X},{composite.PillInBitmap.Y}," +
+                      $"{composite.PillInBitmap.Width},{composite.PillInBitmap.Height}],");
+            sb.Append("\"panelRows\":[");
+            for (int i = 0; i < composite.PanelRowsLaidOut.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                string row = composite.PanelRowsLaidOut[i];
+                sb.Append($"{{\"index\":{i},\"laidOut\":{Json(row)},\"laidOutLength\":{row.Length}," +
+                          $"\"laidOutWidth\":{MeasureTextForDump(row)}}}");
+            }
+            sb.Append("]}");
+            try
+            {
+                File.WriteAllText(opt.PillSelfTestDumpJson, sb.ToString(), new System.Text.UTF8Encoding(false));
+                evidence.Line($"pill dump json: wrote {opt.PillSelfTestDumpJson} " +
+                              $"(panelRows={composite.PanelRowsLaidOut.Count})");
+            }
+            catch (Exception ex)
+            {
+                evidence.Line($"pill dump json: FAILED to write {opt.PillSelfTestDumpJson}: " +
+                              $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        if (!string.IsNullOrEmpty(opt.PillSelfTestShot))
+        {
+            // 讓系統有機會把這一幀合成上去：我們剛剛才 UpdateLayeredWindow 完。
+            for (int i = 0; i < 20; i++) { Native.PumpMessages(); Thread.Sleep(10); }
+            EvidenceScreenGrab(evidence, opt.PillSelfTestShot, expanded, pill);
+        }
+    }
+
+    /// <summary>
+    /// 抓螢幕上那塊矩形。**抓不到就說抓不到**：空檔案會讓「畫面上的確有面板」變成一句謊。
+    /// </summary>
+    private static void EvidenceScreenGrab(Evidence evidence, string path, Rectangle rect, PillWindow pill)
+    {
+        try
+        {
+            using var bmp = new Bitmap(rect.Width, rect.Height,
+                                       System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+                g.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(rect.Width, rect.Height));
+            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            // `hitTest=` 是「那塊矩形上現在是不是我們的視窗」——截圖若抓到別的視窗，
+            // 後面的斷言會以錯誤的理由通過或失敗，所以把這個事實一起寫出來。
+            int cx = rect.Left + rect.Width / 2, cy = rect.Top + rect.Height / 2;
+            evidence.Line($"pill screen grab: wrote {path} rect={Rx(rect)} " +
+                          $"hitTest={pill.HitTest(cx, cy)} windowVisible={pill.IsVisible}");
+        }
+        catch (Exception ex)
+        {
+            evidence.Line($"pill screen grab: FAILED for {path}: {ex.GetType().Name}: {ex.Message} " +
+                          "(the on-screen pixels could NOT be sampled in this session)");
+        }
+    }
+
+    /// <summary>滑鼠訊息的 lParam：x 在低 16 位、y 在高 16 位。</summary>
+    private static IntPtr LParam(int x, int y) =>
+        new((y & 0xFFFF) << 16 | (x & 0xFFFF));
+
+    /// <summary>
+    /// 視窗在螢幕上的實際矩形。驗收要斷言「視窗矩形＝回報的矩形」（一份幾何），
+    /// 而**唯一客觀的來源是作業系統**，不是我們自己的變數。
+    /// </summary>
+    private static Rectangle WindowRect(IntPtr hwnd)
+    {
+        if (!Native.GetWindowRect(hwnd, out Native.RECT r)) return Rectangle.Empty;
+        return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
     }
 
     /// <summary>
