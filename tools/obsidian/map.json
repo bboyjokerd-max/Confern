@@ -75,6 +75,16 @@
       "source": "docs/TEST-PLAN-M1-first-run.md",
       "banner": "tools/obsidian/14-banner.md",
       "dest": "14 人工測試清單 - 初版.md"
+    },
+    {
+      "source": "docs/aegis/plans/2026-10-01-ui-redesign.md",
+      "banner": "tools/obsidian/15-banner.md",
+      "dest": "15 UI 重設計 - 方向與凍結決策.md"
+    },
+    {
+      "source": "docs/aegis/plans/2026-10-02-feature-handoff.md",
+      "banner": "tools/obsidian/16-banner.md",
+      "dest": "16 功能接手 - 順序與現況.md"
     }
   ]
 }
