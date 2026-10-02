@@ -8,10 +8,11 @@ namespace Sidecar;
 /// 因此 UI 永遠看到一致的一組數字（不會出現「done 是新的、total 是舊的」）。
 /// </summary>
 internal sealed record ConversionSnapshot(int Done, int Total, string? Current, bool Finished,
-                                          int Ok, int Failed, IReadOnlyList<string> Failures, string? Error)
+                                          int Ok, int Failed, IReadOnlyList<string> Failures, string? Error,
+                                          IReadOnlyList<string>? FailureFiles = null)
 {
     public static readonly ConversionSnapshot Idle =
-        new(0, 0, null, true, 0, 0, Array.Empty<string>(), null);
+        new(0, 0, null, true, 0, 0, Array.Empty<string>(), null, Array.Empty<string>());
 
     public bool Running => !Finished;
 
@@ -26,6 +27,27 @@ internal sealed record ConversionSnapshot(int Done, int Total, string? Current, 
             // `Failed == 0 ? ✓ : ✓ N / ✗ M`，於是規格 §7.1 的失敗原因（「無法解碼」）
             // 永遠到不了畫面（2026-10-01 由人工測試抓到）。
             return ConversionSummary.ComposeLine(Ok, Failed, Failures);
+        }
+    }
+
+    /// <summary>
+    /// 失敗清單的列資料（規格 §7.3）——**這一條路徑（UI／管道）的單一擁有者**。
+    ///
+    /// 為什麼要在這裡拆一次：管道另一端送過來的是規格 §7.1 的**訊息**（`broken.png 無法解碼`），
+    /// 檔名被包在字串裡。若讓繪製端自己切字串，那個「切法」就變成第二份規則，
+    /// 而它一旦與 <see cref="ConversionResult.DescribeMessage"/> 的組法不一致，清單每列的檔名欄
+    /// 會默默顯示成錯的東西（不會拋例外，也不會有人發現）。拆法放在
+    /// <see cref="ProgressDetailRows.FromMessage"/>，與 <see cref="ConversionSummary.FailureRows"/> 共用。
+    /// </summary>
+    public IReadOnlyList<ConversionFailureRow> DetailRows
+    {
+        get
+        {
+            var rows = new List<ConversionFailureRow>(Failures.Count);
+            for (int i = 0; i < Failures.Count; i++)
+                rows.Add(ProgressDetailRows.FromMessage(
+                    FailureFiles != null && i < FailureFiles.Count ? FailureFiles[i] : null, Failures[i]));
+            return rows;
         }
     }
 }
@@ -121,7 +143,7 @@ internal sealed class ConversionClient : IDisposable
                 ConversionSnapshot current = _snapshot;
                 _snapshot = new ConversionSnapshot(current.Done, current.Total, null, true,
                                                    current.Ok, current.Failed, current.Failures,
-                                                   "轉檔服務中斷");
+                                                   "轉檔服務中斷", current.FailureFiles);
             }
         };
         _link.Start();
@@ -158,13 +180,14 @@ internal sealed class ConversionClient : IDisposable
         ConversionSnapshot current = _snapshot;
         int done = current.Done, total = current.Total, ok = current.Ok, failed = current.Failed;
         List<string> failures = current.Failures.ToList();
+        List<string> failureFiles = (current.FailureFiles ?? Array.Empty<string>()).ToList();
 
         if (message.protocolVersion != WorkerProtocol.Version)
         {
             _log($"worker: protocol mismatch (worker={message.protocolVersion}, " +
                  $"ui={WorkerProtocol.Version}) -> restarting worker");
             _snapshot = new ConversionSnapshot(done, total, null, true, ok, failed, failures,
-                                               "轉檔服務版本不符，已重新啟動");
+                                               "轉檔服務版本不符，已重新啟動", failureFiles);
             KillWorker();
             return;
         }
@@ -177,21 +200,32 @@ internal sealed class ConversionClient : IDisposable
 
             case WorkerMessageTypes.Progress:
                 _snapshot = new ConversionSnapshot(message.done, message.total, message.current,
-                                                   false, ok, failed, failures, null);
+                                                   false, ok, failed, failures, null, failureFiles);
                 break;
 
             case WorkerMessageTypes.Result:
-                if (message.ok) ok++; else failed++;
-                if (!message.ok && message.message != null) failures.Add(message.message);
+                if (message.ok) ok++;
+                else
+                {
+                    failed++;
+                    // 檔名與訊息**分開留著**：失敗清單（§7.3）要的是兩欄，
+                    // 而訊息裡的檔名是規格 §7.1 的排版，不是可以拿來當資料用的欄位。
+                    if (message.message != null)
+                    {
+                        failures.Add(message.message);
+                        failureFiles.Add(message.sourcePath ?? "");
+                    }
+                }
                 _snapshot = new ConversionSnapshot(message.done, message.total, message.current,
-                                                   false, ok, failed, failures, null);
+                                                   false, ok, failed, failures, null, failureFiles);
                 _log($"worker result: ok={message.ok} output={message.outputPath ?? "-"} " +
                      $"error={message.errorCode} message={message.message}");
                 break;
 
             case WorkerMessageTypes.Summary:
                 _snapshot = new ConversionSnapshot(message.done, message.total, null, true,
-                                                   message.okCount, message.failedCount, failures, null);
+                                                   message.okCount, message.failedCount, failures,
+                                                   null, failureFiles);
                 _log($"worker summary: ✓ {message.okCount} / ✗ {message.failedCount}");
                 break;
 
@@ -199,7 +233,8 @@ internal sealed class ConversionClient : IDisposable
                 _log($"worker error: code={message.code} detail={message.detail}");
                 _snapshot = new ConversionSnapshot(done, total, null, true, ok, failed, failures,
                                                    message.code == WorkerErrorCodes.ProtocolMismatch
-                                                       ? "轉檔服務版本不符" : "轉檔服務錯誤");
+                                                       ? "轉檔服務版本不符" : "轉檔服務錯誤",
+                                                   failureFiles);
                 break;
         }
     }
@@ -219,7 +254,7 @@ internal sealed class ConversionClient : IDisposable
             ConversionSnapshot current = _snapshot;
             _snapshot = new ConversionSnapshot(current.Done, current.Total, null, true,
                                                current.Ok, current.Failed, current.Failures,
-                                               "轉檔逾時");
+                                               "轉檔逾時", current.FailureFiles);
             KillWorker();
             return;
         }

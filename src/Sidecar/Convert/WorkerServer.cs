@@ -72,6 +72,12 @@ internal sealed class WorkerMessage
     public string? outputPath { get; set; }
     public string? errorCode { get; set; }
     public string? message { get; set; }
+    /// <summary>
+    /// 單檔結果的來源檔案。`message` 是規格 §7.1 的**排版結果**（`broken.png 無法解碼`），
+    /// 把檔名當資料用等於在解析自己的排版；UI 的失敗清單（§7.3）要檔名與原因兩欄，
+    /// 所以檔名必須是欄位而不是字串裡的一段。
+    /// </summary>
+    public string? sourcePath { get; set; }
     public string? detail { get; set; }
     public string? code { get; set; }
 }
@@ -204,6 +210,7 @@ internal static class WorkerServer
                 outputPath = result.OutputPath,
                 errorCode = result.Error.ToString(),
                 message = result.UserMessage,
+                sourcePath = result.SourcePath,
                 detail = result.Detail,
                 done = i + 1,
                 total = paths.Length,

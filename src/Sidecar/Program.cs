@@ -76,6 +76,33 @@ internal static class Program
             return App.RunProgressDump(opt.ProgressDump, dumpEvidence);
         }
 
+        // 規格 §7.3 的失敗清單 dump。放在 `--convert` **之前**：清單的列資料要能來自
+        // 一次真的轉檔失敗，而那種轉檔不需要畫面、也不需要滑鼠——這條路徑本身就是驗收手段。
+        //
+        // ⚠ 但**帶 `--wheel-payload` 時不在這裡處理**：那一條要走完整條 UI 路徑
+        //   （worker 行程、管道、快照），它的列資料才驗得到「跨管道之後還拆得對」。
+        //   若在這裡先 dump，行程會直接結束，那條路徑永遠跑不到——而驗收還是會看到
+        //   「有圖、有列」，只是那些列來自 `--convert` 而不是管道。那是靜默的假通過。
+        if (!string.IsNullOrEmpty(opt.WheelPayload))
+        {
+            // fall through: the payload path dumps the panel itself (see DumpDetailPanels)
+        }
+        else if (!string.IsNullOrEmpty(opt.ProgressDumpDetail) || !string.IsNullOrEmpty(opt.ProgressDumpDetailRaw))
+        {
+            Native.AttachParentConsole();
+            using var detailEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunProgressDumpDetail(opt, detailEvidence);
+        }
+
+        // 規格 §7.3 的行為自測（展開狀態與命中矩形）。它需要一個視覺層實例（藥丸畫在哪裡、
+        // 矩形就是什麼），但不需要升起任何看得見的視窗。
+        if (opt.ProgressDetailSelfTest)
+        {
+            Native.AttachParentConsole();
+            using var detailEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunProgressDetailSelfTest(detailEvidence);
+        }
+
         // M1f：改設定並存檔（規格 §8）。設定頁按「儲存」走的就是同一條路，
         // 所以這條路必須能被無頭驗證——否則設定頁的驗證只能靠人眼看。
         if (!string.IsNullOrEmpty(opt.SettingsSet))
@@ -200,6 +227,14 @@ internal sealed class Options
           --quality <60-100>        JPG/WebP quality for --convert (default 85)
           --worker <pipeName>       run as the conversion worker and connect back to this pipe (spec 9.1)
           --progress-dump <dir>     render the progress line to PNGs (verifies glyphs without a screen)
+          --progress-dump-detail <png>
+                                    render the spec 7.3 failure list (filename + reason) to a PNG and exit;
+                                    with --convert the rows come from a real failing conversion, and with
+                                    --wheel-payload they come from the worker over the pipe (full UI path)
+          --progress-dump-detail-raw <png>
+                                    same panel with alpha preserved (the file whose pixels can be sampled)
+          --progress-detail-selftest
+                                    exercise PillRect/Contains/IsExpanded/ToggleDetail headlessly and exit
           --wheel-simulate-cycles <N>
                                     run N non-invasive capture/show/select/escape cycles and exit
           --wheel-payload <p1;p2;...>
@@ -280,6 +315,25 @@ internal sealed class Options
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
     public string ProgressDump = "";
+    /// <summary>
+    /// --progress-dump-detail &lt;png&gt;：把規格 §7.3 的失敗清單畫成一張 PNG。
+    ///
+    /// 存在的理由與 <see cref="ProgressDump"/> 相同，而這裡更強：清單是**檔名 ＋ 中文原因**
+    /// 兩欄，中文與 ✓／✗ 這類符號若字型缺字就是方框，而方框**也有墨水**——
+    /// 「檔案存在」什麼都證明不了。搭配 <see cref="ProgressDumpDetailRaw"/> 才能取樣像素。
+    ///
+    /// 同時帶 `--convert <壞檔>` 時，列資料直接來自**真的轉檔失敗**（不是合成字串）。
+    /// </summary>
+    public string ProgressDumpDetail = "";
+    /// <summary>同 <see cref="ProgressDumpDetail"/>，但**保留 alpha**（唯一能取樣文字墨水的檔案）。</summary>
+    public string ProgressDumpDetailRaw = "";
+    /// <summary>
+    /// --progress-detail-selftest：不必畫面就驗規格 §7.3 的行為——
+    /// `IsExpanded` 一開始必須是 false（「清單不自動彈出」）、`ToggleDetail` 要真的翻動它、
+    /// 矩形要跟著展開長大、`Contains` 要同意那塊矩形。
+    /// 這些都是「接上真實點擊之後」會直接影響使用者的性質，所以現在就要有自動斷言。
+    /// </summary>
+    public bool ProgressDetailSelfTest;
     /// <summary>--progress-trace：記錄每一次週期回呼的決策（診斷淡出卡住用）。</summary>
     public bool ProgressTrace = false;
     /// <summary>--settings-probe <path>：載入指定的設定檔並印出夾制後的結果（驗證 §8 的範圍規則）。</summary>
@@ -411,6 +465,15 @@ internal sealed class Options
                     break;
                 case "--progress-dump":
                     if (i + 1 < args.Length) { o.ProgressDump = args[i + 1]; i++; }
+                    break;
+                case "--progress-dump-detail":
+                    if (i + 1 < args.Length) { o.ProgressDumpDetail = args[i + 1]; i++; }
+                    break;
+                case "--progress-dump-detail-raw":
+                    if (i + 1 < args.Length) { o.ProgressDumpDetailRaw = args[i + 1]; i++; }
+                    break;
+                case "--progress-detail-selftest":
+                    o.ProgressDetailSelfTest = true;
                     break;
                 case "--settings-probe":
                     if (i + 1 < args.Length) { o.SettingsProbe = args[i + 1]; i++; }
@@ -798,6 +861,15 @@ internal static class App
                 ConversionSnapshot final = runner.Wait(60000);
                 evidence.Line($"conversion finished: finished={final.Finished} ok={final.Ok} failed={final.Failed} " +
                               $"error={final.Error ?? "-"} line='{final.Line}'");
+                // 規格 §7.3 的失敗清單，列資料走的是**這條真實路徑**：worker 解碼失敗 → 管道訊息 →
+                // 快照 → 列資料。`--convert` 那條路是同一顆引擎但**不經過管道**，
+                // 所以它驗不到「管道另一端送來的東西在這裡被正確拆成兩欄」——
+                // 而那一拆正是最容易默默出錯的一段（訊息是排版，檔名要用欄位帶）。
+                // 這裡只留證據（不改變後面的淡出與放手流程）：每一列寫成 detail row，並 dump 面板。
+                List<ConversionFailureRow> rows = final.DetailRows.ToList();
+                foreach (ConversionFailureRow row in rows)
+                    evidence.Line($"detail row: file={row.FileName} reason='{row.Reason}'");
+                DumpDetailPanels(opt, evidence, rows);
                 evidence.Line($"progress instrument: updates={progress.Updates} frames={progress.Frames} " +
                               $"visible={progress.IsVisible} (spec 4.4: one line, updated in place)");
                 bool faded = PumpUntil(() => !progress.IsVisible, 12000);
@@ -1602,10 +1674,202 @@ internal static class App
     }
 
     /// <summary>
+    /// 規格 §7.3 的失敗清單：畫成 PNG，並且**每一列的資料都寫成日誌**（`detail row: file=… reason=…`）。
+    ///
+    /// 為什麼列資料也要寫進日誌：驗收要斷言的是「每一列都有檔名、都有**中文**原因」。
+    /// 只驗圖片的話，「原因不見了」只表現為字變少；只驗日誌的話，畫不出來的失敗又看不到。
+    /// 兩者都留，才不會出現「檢查通過但使用者畫面上什麼都沒有」。
+    ///
+    /// 帶 `--convert &lt;壞檔&gt;` 時，變體 `real` 的列**來自一次真的轉檔失敗**（與 UI 路徑同一條
+    /// worker 管線），不是合成字串——合成字串永遠會通過，包含那些產品根本產生不出來的字串。
+    /// </summary>
+    internal static int RunProgressDumpDetail(Options opt, Evidence evidence)
+    {
+        ConversionSummary? realSummary = null;
+        if (!string.IsNullOrEmpty(opt.ConvertPayload))
+        {
+            // 真的跑一次轉檔。壞檔失敗**是預期結果**（exit 9），不是這個 dump 的失敗，
+            // 所以這裡不看它的回傳碼——它只是資料來源。
+            evidence.Line("detail dump: --convert given, so the 'real' variant comes from a real conversion");
+            realSummary = ConvertOnce(opt, evidence);
+            evidence.Line($"detail dump: real rows={realSummary.FailureRows.Count} " +
+                          "(from the conversion just run)");
+        }
+
+        string outPath = !string.IsNullOrEmpty(opt.ProgressDumpDetail)
+            ? opt.ProgressDumpDetail
+            : opt.ProgressDumpDetailRaw;
+        string? rawPath = string.IsNullOrEmpty(opt.ProgressDumpDetailRaw) ? null : opt.ProgressDumpDetailRaw;
+        if (string.IsNullOrEmpty(outPath)) return 10;
+
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(outPath));
+        try { if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory); }
+        catch (Exception ex)
+        {
+            evidence.Line($"progress-dump-detail: cannot create {directory}: {ex.Message}");
+            return 10;
+        }
+
+        var shortRows = new List<ConversionFailureRow>
+        {
+            new("a.png", "無法解碼"),
+            new("b.heic", "檔案被鎖定"),
+        };
+        var longRows = new List<ConversionFailureRow>
+        {
+            new("2026-09-30 家庭旅遊 第 12 批 全部照片 最終版 真的最終版.png", "無法解碼"),
+            new("b.heic", "檔案被鎖定"),
+        };
+        // 9 列 = 上限 8 ＋ 1 筆溢出。「有沒有真的停在上限」只能靠這種超過上限的輸入驗出來。
+        var manyRows = new List<ConversionFailureRow>();
+        for (int i = 1; i <= 9; i++) manyRows.Add(new ConversionFailureRow($"shot{i:00}.jpg", "無法解碼"));
+
+        int failed = 0;
+        int variants = 0;
+        DumpOne(evidence, "short", shortRows, Panels(outPath, "short")!, Panels(rawPath, "short"), ref failed);
+        variants++;
+        DumpOne(evidence, "long", longRows, Panels(outPath, "long")!, Panels(rawPath, "long"), ref failed);
+        variants++;
+        DumpOne(evidence, "many", manyRows, Panels(outPath, "many")!, Panels(rawPath, "many"), ref failed);
+        variants++;
+
+        if (realSummary != null)
+        {
+            DumpOne(evidence, "real", realSummary.FailureRows,
+                    Panels(outPath, "real")!, Panels(rawPath, "real"), ref failed);
+            variants++;
+            foreach (ConversionFailureRow row in realSummary.FailureRows)
+                // reason 一律用引號夾起來：空的 reason 若寫成 `reason=` 後面沒東西，
+                // 驗收端就沒有東西可以斷言（讀到的是空字串而不是「這裡少了一個原因」）。
+                evidence.Line($"detail row: file={row.FileName} reason='{row.Reason}'");
+        }
+        else
+        {
+            evidence.Line("detail dump: no --convert payload, so there is no real-conversion row " +
+                          "(the acceptance suite drives that variant with a deliberately broken file)");
+        }
+
+        // 藥丸那一行也要一起留：清單是藥丸的展開，兩者寬度都必須依文字量測。
+        // 短／長兩個變體讓「文字變長 → 圖片變寬」可以在同一次執行裡比較（固定寬度會被這條抓到）。
+        // ⚠ 檔名要與 panel 變體**分開**：同名的話藥丸會蓋掉剛剛寫出的面板 dump，
+        //    而驗收只會看到「檔案存在」——那種覆寫不會有任何錯誤訊息。
+        using (Bitmap shortPill = ProgressPresenter.Compose("a.png 無法解碼", 9, 10, true, 1, 255))
+        {
+            string pillPath = Panels(outPath, "pill-short")!;
+            shortPill.Save(pillPath, System.Drawing.Imaging.ImageFormat.Png);
+            evidence.Line($"detail dump line: variant=pill-short width={shortPill.Width} height={shortPill.Height} " +
+                          $"rows=1 cap={ProgressPresenter.MaxDetailRows} -> {pillPath}");
+        }
+        variants++;
+        using (Bitmap longPill = ProgressPresenter.Compose(
+                   "2026-09-30 家庭旅遊 第 12 批 全部照片 最終版 真的最終版.png 無法解碼", 9, 10, true, 1, 255))
+        {
+            string pillPath = Panels(outPath, "pill-long")!;
+            longPill.Save(pillPath, System.Drawing.Imaging.ImageFormat.Png);
+            evidence.Line($"detail dump line: variant=pill-long width={longPill.Width} height={longPill.Height} " +
+                          $"rows=1 cap={ProgressPresenter.MaxDetailRows} -> {pillPath}");
+        }
+        variants++;
+
+        evidence.Line($"progress dump detail done: variants={variants} failed={failed}");
+        return failed == 0 ? 0 : 7;
+    }
+
+    /// <summary>
+    /// 變體檔名：`panel.png` ＋ `short` → `panel-short.png`。
+    /// 呼叫端傳進來的路徑本身就是驗收指定的位置，所以這裡只加後綴，不改目錄——
+    /// 驗收要看的是「它自己指定的那個檔名旁邊有什麼」，不是另一個地方的一堆檔案。
+    /// </summary>
+    private static string? Panels(string? path, string suffix) =>
+        string.IsNullOrEmpty(path) ? null : ReplaceFileName(path, suffix);
+
+    /// <summary>畫一個變體並寫出兩個檔（flat ＋ raw）。回傳 flat 的路徑（失敗時 null）。</summary>
+    private static string? DumpOne(Evidence evidence, string name, IReadOnlyList<ConversionFailureRow> rows,
+                                  string flatPath, string? rawPath, ref int failed)
+    {
+        string? flatTarget = null;
+        try
+        {
+            flatTarget = flatPath;
+            using Bitmap panel = ProgressPresenter.ComposeDetail(rows, 255);
+            using (var flat = new Bitmap(panel.Width, panel.Height,
+                                         System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(flat))
+                {
+                    g.Clear(Color.FromArgb(255, 32, 34, 38));
+                    g.DrawImageUnscaled(panel, 0, 0);
+                }
+                flat.Save(flatTarget, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            if (rawPath != null) panel.Save(rawPath, System.Drawing.Imaging.ImageFormat.Png);
+
+            int shown = Math.Min(rows.Count, ProgressPresenter.MaxDetailRows);
+            evidence.Line($"detail dump line: variant={name} width={panel.Width} height={panel.Height} " +
+                          $"rows={rows.Count} shown={shown} " +
+                          $"overflow={rows.Count - shown} cap={ProgressPresenter.MaxDetailRows} " +
+                          $"-> {flatTarget}");
+        }
+        catch (Exception ex)
+        {
+            failed++;
+            evidence.Line($"detail dump line: variant={name} FAILED {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+        return flatTarget;
+    }
+
+    /// <summary>`C:\x\panel.png` ＋ `short` → `C:\x\panel-short.png`。</summary>
+    private static string ReplaceFileName(string path, string suffix)
+    {
+        string? dir = Path.GetDirectoryName(path);
+        string name = Path.GetFileNameWithoutExtension(path);
+        string ext = Path.GetExtension(path);
+        return string.IsNullOrEmpty(dir) ? $"{name}-{suffix}{ext}" : Path.Combine(dir, $"{name}-{suffix}{ext}");
+    }
+
+    /// <summary>
+    /// 從**真實轉檔路徑**（`--wheel-payload`）dump 規格 §7.3 的面板。
+    ///
+    /// 為什麼需要這一條，而不是只留 `--convert` 那一條：`--convert` 直接呼叫引擎，
+    /// 訊息由 <c>ConversionResult.UserMessage</c> 當場組出來；而 UI 路徑的訊息是**跨管道**
+    /// 送過來、再被拆回「檔名 ＋ 原因」。兩條路都可能出錯，而且錯法不同：
+    /// 前者是訊息組錯，後者是拆錯（拆錯不會拋例外，只會顯示成一個錯的檔名）。
+    /// 只有走這一條，驗收才能把「拿掉中文原因」這種壞掉方式照出來。
+    ///
+    /// 沒有給 `--progress-dump-detail*` 時完全不做任何事（一般執行不受影響）。
+    /// </summary>
+    private static void DumpDetailPanels(Options opt, Evidence evidence, List<ConversionFailureRow> rows)
+    {
+        if (string.IsNullOrEmpty(opt.ProgressDumpDetail) && string.IsNullOrEmpty(opt.ProgressDumpDetailRaw))
+            return;
+        string outPath = !string.IsNullOrEmpty(opt.ProgressDumpDetail)
+            ? opt.ProgressDumpDetail
+            : opt.ProgressDumpDetailRaw;
+        string? rawPath = string.IsNullOrEmpty(opt.ProgressDumpDetailRaw) ? null : opt.ProgressDumpDetailRaw;
+
+        int failed = 0;
+        DumpOne(evidence, "real", rows, Panels(outPath, "real")!, Panels(rawPath, "real"), ref failed);
+        evidence.Line($"detail dump line: variant=real-pipeline rows={rows.Count} " +
+                      $"failed={failed} (rows came from the worker over the pipe, not from --convert)");
+    }
+
+    /// <summary>
     /// M1d：不需要滑鼠就能跑完整條轉檔管線——**驗證必須靠這個，不是靠人工拖曳**。
     /// 同時也是使用者可用的「命令列轉檔」入口（明天測試時很好用）。
     /// </summary>
     internal static int RunConvert(Options opt, Evidence evidence)
+    {
+        ConversionSummary summary = ConvertOnce(opt, evidence);
+        return summary.AllOk ? 0 : 9;
+    }
+
+    /// <summary>
+    /// 跑一次 `--convert` 並回傳摘要。與 <see cref="RunConvert"/> 只差在「回傳什麼」：
+    /// 失敗清單的 dump 需要**那一次的列資料**（真的失敗，不是合成字串），
+    /// 而重跑一次轉檔會產生第二個輸出檔、也會多一次 worker 啟動——那不是驗收想看的東西。
+    /// </summary>
+    internal static ConversionSummary ConvertOnce(Options opt, Evidence evidence)
     {
         var registry = new CodecRegistry();
         var journal = new TempJournal(TempJournal.DefaultPath());
@@ -1633,7 +1897,81 @@ internal static class App
 
         var summary = new ConversionSummary(results);
         evidence.Line($"convert summary: {summary.Line}  (ok={summary.Ok} failed={summary.Failed})");
-        return summary.AllOk ? 0 : 9;
+        return summary;
+    }
+
+    /// <summary>
+    /// 規格 §7.3 的行為自測：不必畫面、不必滑鼠，驗四件會直接影響使用者的事。
+    ///
+    /// 為什麼值得一個入口：`IsExpanded` 一開始必須是 false（§7.3 的「清單**不自動彈出**」），
+    /// 而這個性質最容易在重構（例如「完成時順手展開失敗清單」）中被弄丟，且**不會有任何錯誤**。
+    /// 另外三項（ToggleDetail 真的翻動它、矩形跟著展開長大、Contains 同意那塊矩形）
+    /// 是「接上真實點擊之後」命中判定的全部依據——現在不驗，等於把風險留給那一天。
+    /// </summary>
+    internal static int RunProgressDetailSelfTest(Evidence evidence)
+    {
+        int failed = 0;
+        int checks = 0;
+        void Report(string name, bool ok, string detail = "")
+        {
+            checks++;
+            if (!ok) failed++;
+            evidence.Line($"detail: {(ok ? "PASS" : "FAIL")} {name}" +
+                          (detail.Length > 0 ? $"  [{detail}]" : string.Empty));
+        }
+
+        using var layer = new VisualLayer(evidence);
+        using var progress = new ProgressPresenter(evidence, layer);
+        var snapshot = new ConversionSnapshot(9, 10, null, true, 9, 1,
+            new[] { "broken.png 無法解碼" }, null, new[] { @"C:\tmp\broken.png" });
+
+        // 1) 尚未顯示任何東西：沒有矩形、沒有展開。
+        Report("nothing is expanded before any toggle (spec 7.3: the list never pops up by itself)",
+               !progress.IsExpanded, $"expanded={progress.IsExpanded}");
+        Report("no rectangle exists before anything was drawn",
+               progress.PillRect == Rectangle.Empty && !progress.Contains(0, 0),
+               $"rect={progress.PillRect}");
+
+        // 2) 先畫（Update 就是 tick 走的同一條路），再問它自己的矩形。
+        progress.Start(500, 400);
+        progress.Update(snapshot);
+        Rectangle pill = progress.PillRect;
+        Report("after drawing, the pill knows its own rectangle",
+               pill.Width > 0 && pill.Height > 0, $"rect={pill.X},{pill.Y},{pill.Width},{pill.Height}");
+        int cx = pill.X + pill.Width / 2, cy = pill.Y + pill.Height / 2;
+        Report("Contains agrees with the rectangle it just reported (hit test is not a second geometry)",
+               progress.Contains(cx, cy) && !progress.Contains(pill.X - 5, pill.Y - 5),
+               $"center=({cx},{cy}) outside=({pill.X - 5},{pill.Y - 5})");
+        Report("drawing the pill is NOT what expands the list (spec 7.3)",
+               !progress.IsExpanded, $"expanded={progress.IsExpanded}");
+
+        // 3) 展開：狀態要翻過去，而且畫面（矩形）要真的變大。
+        progress.ToggleDetail();
+        Rectangle expanded = progress.PillRect;
+        Report("ToggleDetail expands the list", progress.IsExpanded, $"expanded={progress.IsExpanded}");
+        Report("the expanded list is bigger than the pill it came from",
+               expanded.Width >= pill.Width && expanded.Height > pill.Height,
+               $"pill={pill.Width}x{pill.Height} expanded={expanded.Width}x{expanded.Height}");
+        Report("the hit rectangle follows the expanded list",
+               progress.Contains(expanded.X + expanded.Width / 2, expanded.Y + expanded.Height - 4),
+               $"rect={expanded.X},{expanded.Y},{expanded.Width},{expanded.Height}");
+
+        // 4) 再切一次＝收起，而且矩形要回到藥丸大小（不是卡在大的）。
+        progress.ToggleDetail();
+        Rectangle collapsed = progress.PillRect;
+        Report("ToggleDetail collapses again", !progress.IsExpanded, $"expanded={progress.IsExpanded}");
+        Report("collapsing restores the pill-sized rectangle",
+               collapsed.Height == pill.Height && collapsed.Width == pill.Width,
+               $"pill={pill.Width}x{pill.Height} collapsed={collapsed.Width}x{collapsed.Height}");
+
+        // 5) 新的一次轉檔＝清單收起（否則上一次失敗的清單會留在畫面上）。
+        progress.ToggleDetail();
+        progress.Start(500, 400);
+        Report("a new conversion starts with the list collapsed",
+               !progress.IsExpanded, $"expanded={progress.IsExpanded}");
+
+        evidence.Line($"detail: selftest done: checks={checks} failed={failed} ok={failed == 0}");
+        return failed == 0 ? 0 : 1;
     }
 
     /// <summary>
