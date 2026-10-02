@@ -255,6 +255,33 @@ for ($r = 100; $r -le 120; $r++) {
 }
 Check "amber #FFC24D stroke on the selected sector edge" ($amber.Count -ge 1) ($amber -join ' ')
 
+# 2026-10-01 user request: "the sectors cut out of the circle should have slightly rounded
+# corners, not this sharp". The selected sector's amber stroke is opaque, so the rounding is
+# measurable instead of eyeballed: walk the ray at a fixed angle and record the outermost amber
+# radius. Just inside the sector's start edge the fillet must pull that radius in, while a few
+# degrees further along the arc the stroke must still reach the full radius (ro = 114, the 2 px
+# stroke covers 113..115). With cr = 7 px the fillet spans asin(7/107) = 3.8 deg, so +1.5 deg
+# sits inside it and +5.0 deg outside. Without the rounding both rays give the same radius.
+# (Sampling a fixed radius instead of the boundary does NOT work: at +2.5 deg the boundary sits
+# at r113.6, so the +-1 px stroke still touches r114 and the test fails on a correct render.)
+function AmberOuterRadius([System.Drawing.Bitmap]$bmp, [double]$deg) {
+  $rad = $deg * [Math]::PI / 180.0
+  $outer = 0
+  for ($r = 104; $r -le 120; $r++) {
+    $x = [int][Math]::Round($CX + [Math]::Cos($rad) * $r)
+    $y = [int][Math]::Round($CY + [Math]::Sin($rad) * $r)
+    if (($x -lt 0) -or ($y -lt 0) -or ($x -ge $bmp.Width) -or ($y -ge $bmp.Height)) { continue }
+    $c = $bmp.GetPixel($x, $y)
+    if (($c.R -gt 200) -and ($c.G -gt 140) -and ($c.G -lt 215) -and ($c.B -lt 120)) { $outer = $r }
+  }
+  return $outer
+}
+$edgeR = AmberOuterRadius $rawDark ($selStart + 1.0)
+$midR = AmberOuterRadius $rawDark ($selStart + 5.0)
+Check "sector outer corner is rounded (the sharp amber tip is pulled in)" `
+      (($edgeR -gt 0) -and ($midR -gt 0) -and (($midR - $edgeR) -ge 2)) `
+      "outer amber radius: +1.0deg = r$edgeR, +5.0deg = r$midR (want the former >= 2 px smaller)"
+
 $unselMid = $selStart - ($step - $sweep) / 2.0 - $step / 2.0
 $rad2 = $unselMid * [Math]::PI / 180.0
 $rimHits = @()

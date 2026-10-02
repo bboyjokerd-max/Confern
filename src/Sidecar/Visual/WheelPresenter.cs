@@ -317,7 +317,7 @@ internal sealed class WheelPresenter
             double step = 360.0 / _targets.Count;
             double sweep = WheelDesign.SweepDeg(_targets.Count);
             float start = (float)(WheelGeometry.StartDeg + _selected * step + (step - sweep) / 2.0);
-            disc.AddPie(cx - rr, cy - rr, rr * 2, rr * 2, start, (float)sweep);
+            disc.AddPath(RoundedSectorPath(cx, cy, rr, start, sweep, WheelDesign.SectorCornerPx), false);
         }
 
         if (_glass != null)
@@ -367,6 +367,51 @@ internal sealed class WheelPresenter
     // 扇區與標籤
     // ==================================================================
 
+    /// <summary>
+    /// 「外緣尖點帶圓角」的扇形路徑（由圓心往外畫），取代 FillPie／DrawPie 的直角尖點。
+    ///
+    /// 圓角＝同時與**外圓內切**、與**徑向邊相切**的圓弧。推導：圓角圓心必須距輪心 (ro−cr)
+    /// （內切）且距徑向邊 cr（相切），所以它偏離徑向邊的角度 α = asin(cr/(ro−cr))；
+    /// 尖點兩邊夾 90°，故圓弧掃角固定是 90°+α。
+    /// a0 側：從徑向邊上的切點掃到外圓切點（起角 a0−90°）；
+    /// 外圓弧只畫中間 (a0+α .. a1−α)；a1 側：從外圓切點掃到徑向邊上的切點（起角 a1−α）。
+    /// 三段在切點上精確接合（GDI+ 的 AddArc 會自動補上零長度的連接線），不會有縫也不會重疊。
+    ///
+    /// 內側不做圓角：扇形一路填到圓心，半徑 47 以內由來源縮圖圓孔蓋住（<see cref="DrawCenter"/>
+    /// 在 DrawWheel 之後才畫）。
+    /// </summary>
+    private static GraphicsPath RoundedSectorPath(float cx, float cy, float ro, double startDeg,
+                                                  double sweepDeg, float cornerPx)
+    {
+        var path = new GraphicsPath();
+        double a0 = startDeg, a1 = startDeg + sweepDeg;
+        double cr = Math.Min(cornerPx, ro * 0.25);          // 半徑很小（填描邊內緣）時自動退化
+        if (cr < 0.5 || sweepDeg <= 0.0)
+        {
+            path.AddPie(cx - ro, cy - ro, ro * 2, ro * 2, (float)a0, (float)sweepDeg);
+            return path;
+        }
+        double rc = ro - cr;
+        double alpha = Math.Asin(Math.Min(1.0, cr / rc)) * 180.0 / Math.PI;
+        double Rad(double deg) => deg * Math.PI / 180.0;
+        PointF At(double deg, double rad) => new PointF(
+            cx + (float)(Math.Cos(Rad(deg)) * rad), cy + (float)(Math.Sin(Rad(deg)) * rad));
+        void CornerArc(double centreDeg, double startAngle)
+        {
+            PointF c = At(centreDeg, rc);
+            path.AddArc(c.X - (float)cr, c.Y - (float)cr, (float)(cr * 2), (float)(cr * 2),
+                        (float)startAngle, (float)(90.0 + alpha));
+        }
+
+        CornerArc(a0 + alpha, a0 - 90.0);
+        path.AddArc(cx - ro, cy - ro, ro * 2, ro * 2,
+                    (float)(a0 + alpha), (float)(sweepDeg - 2.0 * alpha));
+        CornerArc(a1 - alpha, a1 - alpha);
+        path.AddLine(At(a1, rc * Math.Cos(Rad(alpha))), new PointF(cx, cy));
+        path.CloseFigure();
+        return path;
+    }
+
     private void DrawWheel(Graphics g, float cx, float cy, float r)
     {
         int count = _targets.Count;
@@ -395,18 +440,21 @@ internal sealed class WheelPresenter
             {
                 float rr = r + WheelDesign.SelExpandPx;
                 using (var pen = new Pen(WheelDesign.SelStroke, WheelDesign.SelStrokePx))
+                using (var outline = RoundedSectorPath(cx, cy, rr, start, sweep, WheelDesign.SectorCornerPx))
                 {
-                    g.DrawPie(pen, cx - rr, cy - rr, rr * 2, rr * 2, start, (float)sweep);
-                    // DrawPie 只畫外框：補上扇形本體（填到描邊的內緣，不要留 1px 的透明細縫）
+                    g.DrawPath(pen, outline);
+                    // DrawPath 只畫外框：補上扇形本體（填到描邊的內緣，不要留 1px 的透明細縫）
                     using var fillBg = new SolidBrush(WheelDesign.SelFill);
                     float ri = rr - WheelDesign.SelStrokePx / 2f;
-                    g.FillPie(fillBg, cx - ri, cy - ri, ri * 2, ri * 2, start, (float)sweep);
+                    using var body = RoundedSectorPath(cx, cy, ri, start, sweep, WheelDesign.SectorCornerPx);
+                    g.FillPath(fillBg, body);
                 }
             }
             else
             {
                 using var fill = new SolidBrush(i % 2 == 0 ? WheelDesign.FillA : WheelDesign.FillB);
-                g.FillPie(fill, cx - r, cy - r, r * 2, r * 2, start, (float)sweep);
+                using var wedge = RoundedSectorPath(cx, cy, r, start, sweep, WheelDesign.SectorCornerPx);
+                g.FillPath(fill, wedge);
             }
         }
 

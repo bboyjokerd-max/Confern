@@ -152,6 +152,13 @@ internal static class WheelDesign
     /// <summary>光暈疊幾圈。**只影響階梯的細緻度，不影響總量**（總量由 <see cref="GlowRimAlpha"/> 決定）。</summary>
     public const int GlowRings = 14;
 
+    /// <summary>
+    /// 扇形外緣尖點的圓角半徑（px）。使用者 2026-10-01：「從圓形分割出來的區塊，
+    /// 可以加一點點圓角不要這麼銳利」。7px 對 110px 的輪半徑約 6%，是「一點點」的量級：
+    /// 尖點鈍掉、但扇區還是扇區。內側（半徑 47 的圓孔邊）不做圓角——那裡被來源縮圖蓋住。
+    /// </summary>
+    public const float SectorCornerPx = 7f;
+
     // ================= 中心：來源縮圖 ＋ 膠囊 =================
 
     /// <summary>中心鏤空半徑對輪盤半徑的比例（原型 RI=47 / R=110）。</summary>
