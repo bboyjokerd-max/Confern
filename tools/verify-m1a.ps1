@@ -32,6 +32,24 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
 
+# MEASURED 2026-10-02: S4 has reported "needs -DragSim" INCONCLUSIVE on every run for weeks, but
+# DragSim has existed in this repo since 2026-09-30 and its own comment records it producing
+# "OLE DROP RECEIVED (IDropTarget)" against the current receiver. The gap was never capability --
+# it was that nobody passed the path. A check that is permanently inconclusive is a check nobody
+# reads, so auto-detect it; an explicit -DragSim still wins.
+# Verification must not build anything behind the operator's back, so when the binary is missing the
+# message names the exact command instead of quietly staying inconclusive forever.
+if ($DragSim -eq '') {
+  $dragSimCandidate = Join-Path $PSScriptRoot 'dragsim\bin\Release\net8.0-windows\DragSim.exe'
+  if (Test-Path -LiteralPath $dragSimCandidate) {
+    $DragSim = $dragSimCandidate
+    Write-Host "      auto-detected DragSim: $dragSimCandidate"
+  } else {
+    Write-Host "      no DragSim at $dragSimCandidate"
+    Write-Host "      build it with: dotnet build tools\dragsim\DragSim.csproj -c Release -v minimal -nologo"
+  }
+}
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
