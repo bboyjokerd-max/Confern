@@ -291,13 +291,17 @@ internal sealed class WheelPresenter
     private void DrawGlass(Graphics g, float cx, float cy, float r)
     {
         double luma = _glass?.MeanLuma ?? 0.0;
-        Color glow = WheelDesign.Glow(luma);
 
         // 1) 柔暈（由外而內疊加）。強度與厚度都是**實測設計稿**得來的值（見 WheelDesign 的註記）。
         //    從盤緣外 GlowStartPx 才開始，否則光暈會貼著玻璃邊變成一條亮環。
-        double rimAcc = WheelDesign.GlowRimAlpha(luma) / 255.0;
-        DrawSoftRing(g, cx, cy, r + WheelDesign.GlowStartPx,
-                     WheelDesign.GlowSpanPx, WheelDesign.GlowRings, rimAcc, glow);
+        //    WheelDesign.GlowEnabled = false 時整個不畫（2026-10-01 實機排除法用）。
+        if (WheelDesign.GlowEnabled)
+        {
+            Color glow = WheelDesign.Glow(luma);
+            double rimAcc = WheelDesign.GlowRimAlpha(luma) / 255.0;
+            DrawSoftRing(g, cx, cy, r + WheelDesign.GlowStartPx,
+                         WheelDesign.GlowSpanPx, WheelDesign.GlowRings, rimAcc, glow);
+        }
 
         // 2) 柔投影（讓玻璃浮起來，而不是貼在桌布上）。淺色桌布要更重。
         int shadowMax = WheelDesign.ShadowMax(luma);

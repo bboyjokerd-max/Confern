@@ -6,9 +6,13 @@
 #   * the veil is really applied (the light frame's interior must stay dark)
 #   * amber selection stroke / rim hairline / keycap / caption / preview / labels
 #
-# Usage: powershell -ExecutionPolicy Bypass -File check-frame.ps1 -Dir <folder>
+# Usage: powershell -ExecutionPolicy Bypass -File check-frame.ps1 -Dir <folder> [-Glow 1|0]
 param(
-  [Parameter(Mandatory = $true)][string]$Dir
+  [Parameter(Mandatory = $true)][string]$Dir,
+  # 1 = the glow layer is drawn (default). Pass 0 when the build has WheelDesign.GlowEnabled
+  # switched off: then the annulus outside the glass must contain the neutral black shadow
+  # only, so any chroma there would mean a glow layer leaked through.
+  [int]$Glow = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,6 +154,7 @@ foreach ($kv in $buckets.GetEnumerator()) {
   if ($sp -gt $worstRing) { $worstRing = $sp; $worstA = $kv.Key; $worstBucketN = $bs.N }
   if ($kv.Key % 20 -eq 0) { $ringReport += ("a{0}:R{1}-{2} " -f $kv.Key, $bs.MinR, $bs.MaxR) }
 }
+if ($Glow -eq 1) {
 Check "glow is a pure layer (premultiplied RGB constant within one alpha = one radius)" `
       ($glowPx -gt 200 -and $worstRing -le 4) `
       "worst alpha bucket a$worstA spread=$worstRing over $worstBucketN px; alpha range $aMin-$aMax, $glowPx px; $ringReport"
@@ -171,6 +176,27 @@ $a130 = RingMeanAlpha $rawDark 130
 $a145 = RingMeanAlpha $rawDark 145
 Check "glow alpha falls off with radius" (($a118 -gt $a130) -and ($a130 -gt $a145)) `
       ("r118={0:F1} r130={1:F1} r145={2:F1}" -f $a118, $a130, $a145)
+} else {
+# Glow switched off: the same annulus may still hold the shadow, but the shadow is neutral
+# black, so |G-R| must stay at zero. Low alpha is skipped for the usual un-premultiply reason.
+$maxChroma = 0; $chromaPx = 0
+for ($y = 0; $y -lt $H; $y++) {
+  for ($x = 0; $x -lt $W; $x++) {
+    $dx = $x - $CX; $dy = $y - $CY
+    $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
+    if (($d -lt 115) -or ($d -gt 150)) { continue }
+    $deg = [Math]::Atan2($dy, $dx) * 180.0 / [Math]::PI
+    if (($deg -lt -85) -or ($deg -gt -8)) { continue }
+    $c = $rawDark.GetPixel($x, $y)
+    if ($c.A -lt 40) { continue }
+    $ch = [Math]::Abs($c.G - $c.R)
+    if ($ch -gt $maxChroma) { $maxChroma = $ch }
+    if ($ch -gt 3) { $chromaPx++ }
+  }
+}
+Check "glow is off: annulus carries the neutral shadow only (no chroma)" `
+      ($chromaPx -eq 0) "max |G-R| = $maxChroma, $chromaPx px above 3"
+}
 
 Write-Host ""
 Write-Host "=== 4. veil is really applied ==="

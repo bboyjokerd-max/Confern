@@ -129,6 +129,14 @@ internal static class WheelDesign
     public const int GlowRimAlphaDark = 113;
     public const int GlowRimAlphaLight = 94;
 
+    /// <summary>
+    /// 光暈總開關。2026-10-01 使用者實機測試：深色底即使已對齊設計稿，仍被看成「一大圈」，
+    /// 故先關掉做排除法——關掉後若那一圈還在，就是投影而不是光暈。
+    /// **還原＝改成 true**；強度、厚度、圈數等參數全部保留，沒有刪除任何一個。
+    /// 刻意用 static readonly 而非 const：const 會讓編譯器把 if 折成不可達程式碼並發 CS0162。
+    /// </summary>
+    public static readonly bool GlowEnabled = false;
+
     public static int GlowRimAlpha(double meanLuma) =>
         IsLightBackdrop(meanLuma) ? GlowRimAlphaLight : GlowRimAlphaDark;
 
