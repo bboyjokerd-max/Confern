@@ -24,7 +24,7 @@
 
 ---
 
-## 1. 逐條分類表（91 條，全部列出）
+## 1. 逐條分類表（91 次 `Check` 呼叫 ＝ 90 個獨立 id，全部列出）
 
 ### 1.1 `tools/verify-m1f.ps1`（34 條）
 
@@ -65,7 +65,7 @@
 | S14.35 | verify-m1f.ps1:275 | REAL | 必須有 ≥1 個 `progress tick`，診斷開關失效或 presenter 不跑就紅。 |
 | S14.36 | verify-m1f.ps1:281 | REAL | 真實設定檔前後 SHA256 相同（整場跑動若污染使用者設定就紅）。 |
 
-### 1.2 `tools/verify-m1g.ps1`（26 條）
+### 1.2 `tools/verify-m1g.ps1`（26 次 `Check` 呼叫：25 個 id，S15.19 兩分支）
 
 | 檢查 | file:line | 分類 | 一句話理由 |
 |---|---|---|---|
