@@ -53,6 +53,10 @@ public static class P2 {
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  // P0-4 (2026-10-02): the runner drives the product's own hide path from the outside. This is
+  // the same message the guards post (Native.WM_APP_FORCE_HIDE = WM_APP + 1), so the check that
+  // uses it fails when the product's ShowWindow call stops doing anything.
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 
   /// pid==0 means "any process". One string per matching top-level window.
@@ -96,6 +100,14 @@ function Check([string]$name, [bool]$ok) {
   [void]$results.Add([pscustomobject]@{ Name = $name; Pass = $ok })
   if ($ok) { Write-Host "PASS  $name" } else { Write-Host "FAIL  $name" }
 }
+# P1-2 (2026-10-02): the floor of how many checks a run must register. 0 means "not yet
+# calibrated" and skips the assertion; the number is set from a measured run of -Section All.
+# A FLOOR, because S6/S7 register a few checks inside branches that are allowed to reach a
+# different total, while the failure this exists for -- a block that silently registers NOTHING
+# (S6.3-S6.7 did exactly that when their regex stopped matching) -- is always BELOW the floor.
+# Equality would turn any legitimate branch difference into a false red.
+$script:ExpectedChecks = 0
+function Expect([int]$n) { $script:ExpectedChecks += $n }
 function Inconclusive([string]$reason) {
   [void]$inconclusive.Add($reason); Write-Host "INCONCLUSIVE  $reason"
 }
@@ -190,7 +202,7 @@ function Invoke-S6 {
     '--wheel-demo', "$DemoX", "$DemoY", '--watchdog-seconds', '300', '--quiet', '--log', $log) -PassThru
   Start-Sleep -Milliseconds 1800
   $proc.Refresh()
-  if ($proc.HasExited) { Check "S6.0 app alive" $false; return }
+  if ($proc.HasExited) { Expect -13; Check "S6.0 app alive" $false; return }
   $pid32 = [uint32]$proc.Id
 
   $hit = @([P2]::WindowsOfClass('ConfernHitLayer', $pid32))
@@ -264,10 +276,29 @@ function Invoke-S6 {
   }
   Check "S6.12 visual layer logged TRANSPARENT=set(required)" (Test-Log $lines 'WS_EX_TRANSPARENT=set\(required\)')
 
+  # P0-4 (2026-10-02): everything above asks the OS about the window while it is up. This one
+  # drives the product's own hide path from outside the process: it posts WM_APP_FORCE_HIDE
+  # (the message every guard posts, Native.cs: 0x8001) to the visual layer's HWND and then asks
+  # the OS whether the window really went away. Until now "the layer hides" was only ever
+  # proven by the app's own log line, which reads identically when ShowWindow has been turned
+  # into a no-op -- that is exactly the regression this project's 2026-10-02 audit was about.
+  $forceHideOk = $false
+  $forceHideDetail = 'no visual layer hwnd was observed'
+  if ($vhwnd) {
+    [void][P2]::PostMessageW([IntPtr][Convert]::ToInt64($vhwnd, 16), 0x8001, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 500
+    $afterForceHide = @([P2]::WindowsOfClass('ConfernVisualLayer', $pid32))
+    $stillVisible = @($afterForceHide | Where-Object { $_ -match 'visible=True' }).Count
+    $forceHideOk = ($afterForceHide.Count -ge 1) -and ($stillVisible -eq 0)
+    $forceHideDetail = "windows=$($afterForceHide.Count) stillVisible=$stillVisible"
+  }
+
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Start-Sleep -Milliseconds 400
   $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S6.13 no visual layer window survives the process" ($left.Count -eq 0)
+  Write-Host "      [os] after posting WM_APP_FORCE_HIDE: $forceHideDetail"
+  Check "S6.14 posting WM_APP_FORCE_HIDE really hides the visual layer (OS-verified)" $forceHideOk
 }
 
 # ------------------------------------------------------------------ S7
@@ -322,6 +353,21 @@ function Invoke-S7 {
   } else { Check "S7.4 visual layer rectangle readable" $false }
 
   Check "S7.8 demo run logged the wheel show" (Test-Log (Get-LogLines $log) 'wheel shown cursor=')
+
+  # P0-4 (2026-10-02): the same OS-side drive as S6.14, on the rectangle run. S7.4/S7.5/S7.6 and
+  # S7.8 all read either the window style or the app's log; none of them can see the product's
+  # ShowWindow calls stop working. Posting WM_APP_FORCE_HIDE and re-asking the OS can.
+  $rectForceHideOk = $false
+  $rectForceHideDetail = 'no visual layer hwnd was observed'
+  if ($vis.Count -eq 1 -and $vis[0] -match 'hwnd=0x([0-9A-F]+)') {
+    $rectHwnd = $Matches[1]
+    [void][P2]::PostMessageW([IntPtr][Convert]::ToInt64($rectHwnd, 16), 0x8001, [IntPtr]::Zero, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 500
+    $afterRectHide = @([P2]::WindowsOfClass('ConfernVisualLayer', $pid32))
+    $rectStillVisible = @($afterRectHide | Where-Object { $_ -match 'visible=True' }).Count
+    $rectForceHideOk = ($afterRectHide.Count -ge 1) -and ($rectStillVisible -eq 0)
+    $rectForceHideDetail = "windows=$($afterRectHide.Count) stillVisible=$rectStillVisible"
+  }
 
   # ---- flip-edge: the wheel must move to the other side near the work-area edge (spec 4.3) ----
   Stop-AllSidecar
@@ -433,6 +479,8 @@ function Invoke-S7 {
   Stop-AllSidecar
   $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S7.36 no visual layer window survives the runs" ($left.Count -eq 0)
+  Write-Host "      [os] rect run after posting WM_APP_FORCE_HIDE: $rectForceHideDetail"
+  Check "S7.37 posting WM_APP_FORCE_HIDE really hides the visual layer during the rect run (OS-verified)" $rectForceHideOk
 }
 
 # ------------------------------------------------------------------ S8 (human-guided)
@@ -451,6 +499,7 @@ function Invoke-S8([int]$Window) {
   }
   $src = if ($root) { Join-Path $root.FullName 'docs\aegis\work\2026-09-30-m1b-wheel\wheel-frame.png' } else { '' }
   if (-not $src -or -not (Test-Path -LiteralPath $src)) {
+    Expect -12
     Inconclusive "S8 needs the sample PNG under <repo>\docs\aegis\work\2026-09-30-m1b-wheel\ (not found)"
     return
   }
@@ -511,11 +560,22 @@ function Invoke-S8([int]$Window) {
   $after = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash
   Check "S8.11 the dragged file is byte-identical afterwards" ($before -eq $after)
 
+  # P0-4 (2026-10-02): S8.10 proves the app LOGGED that both layers were hidden after the drop.
+  # This is the same property asked of the OS, with a positive premise (a wheel really was shown
+  # from a payload) so it cannot pass by the gesture never having happened. Injected input is
+  # deliberately absent here: this section is the one that exercises the real OLE path.
+  $payloadWheelShown = (Count-Log $lines 'wheel from OLE payload:') -ge 1
+  $afterDrop = @([P2]::WindowsOfClass('ConfernVisualLayer', [uint32]$proc.Id))
+  $afterDropVisible = @($afterDrop | Where-Object { $_ -match 'visible=True' }).Count
+  $dropHiddenOs = $payloadWheelShown -and ($afterDrop.Count -ge 1) -and ($afterDropVisible -eq 0)
+
   $proc.Refresh()
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Start-Sleep -Milliseconds 500
   $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S8.12 no visual layer window survives" ($left.Count -eq 0)
+  Write-Host "      [os] after the real drop: wheelShownFromPayload=$payloadWheelShown windows=$($afterDrop.Count) visible=$afterDropVisible"
+  Check "S8.13 the OS agrees the visual layer is hidden after the real drop (not just the log line)" $dropHiddenOs
 
   # Observation only, NOT asserted: which path delivered the file list? M1d needs one
   # authority, and the answer is decided from these counts rather than guessed here.
@@ -543,10 +603,16 @@ if ($sections.Count -eq 0) { Write-Host "no sections requested"; exit 2 }
 Write-Host "verify-m1b: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
 foreach ($s in $sections) {
+  # P1-2: each section's check count. FLOORS, because a few checks sit inside branches that may
+  # legitimately reach a different total (S6.3-S6.7 only exist while the window string parses,
+  # which IS how that block silently vanished before). The failure this catches -- a block that
+  # registers NOTHING -- is always below the floor. The two "app died" early returns in S7 do
+  # not mirror a correction on purpose: a section that lost the process under test cannot report
+  # a result, so tripping the floor there is the intended outcome.
   switch ($s) {
-    'S6' { Invoke-S6 }
-    'S7' { Invoke-S7 }
-    'S8' { Invoke-S8 $S8WindowSeconds }
+    'S6' { Expect 14; Invoke-S6 }
+    'S7' { Expect 38; Invoke-S7 }
+    'S8' { Expect 13; Invoke-S8 $S8WindowSeconds }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
@@ -554,7 +620,16 @@ foreach ($s in $sections) {
 Stop-AllSidecar
 
 $fail = @($results | Where-Object { -not $_.Pass }).Count
+$registered = $results.Count + $inconclusive.Count
 if ($results.Count -eq 0) { Write-Host "FATAL: no checks ran - refusing to report success"; exit 2 }
+Write-Host "checks=$registered pass=$($results.Count - $fail) fail=$fail inconclusive=$($inconclusive.Count) expectedFloor=$($script:ExpectedChecks)"
+# P1-2: a suite that registers fewer checks than it promises has a block that silently did not
+# register. That is a red run, not an N/N print.
+if ($script:ExpectedChecks -gt 0 -and $registered -lt $script:ExpectedChecks) {
+  Write-Host "FATAL: registered $registered checks but this suite must register at least $($script:ExpectedChecks)."
+  Write-Host "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
 Write-Host ""
 Write-Host "M1b summary: $($results.Count - $fail)/$($results.Count) checks passed ($Section)"
 if ($inconclusive.Count -gt 0) {

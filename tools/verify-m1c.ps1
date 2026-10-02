@@ -43,6 +43,10 @@ function Check([string]$name, [bool]$ok) {
 function Inconclusive([string]$reason) {
   [void]$inconclusive.Add($reason); Write-Host "INCONCLUSIVE  $reason"
 }
+# P1-2 (2026-10-02): how many checks the selected sections MUST register. A block that silently
+# fails to register leaves the summary reading "N/N passed" with nothing to compare N against.
+$script:ExpectedChecks = 0
+function Expect([int]$n) { $script:ExpectedChecks += $n }
 function Get-LogLines([string]$p) { if (Test-Path -LiteralPath $p) { return @(Get-Content -LiteralPath $p -Encoding UTF8) } else { return @() } }
 function Test-Log([string[]]$l, [string]$p) { return [bool]($l | Select-String -Pattern $p -Quiet) }
 # Select-String is CASE-INSENSITIVE by default, so "FAIL" also matches "failed=0" in the
@@ -257,7 +261,7 @@ Write-Host "verify-m1c: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S9' { Invoke-S9 }
+    'S9' { Expect 20; Invoke-S9 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
@@ -265,7 +269,17 @@ foreach ($s in $sections) {
 Stop-AllSidecar
 
 $fail = @($results | Where-Object { -not $_.Pass }).Count
+$registered = $results.Count + $inconclusive.Count
 if ($results.Count -eq 0) { Write-Host "FATAL: no checks ran - refusing to report success"; exit 2 }
+# P1-2 (2026-10-02): every branch in this file registers exactly one check either way, so the
+# number the selected sections promise is exact. A block that silently stops registering --
+# the failure mode behind the 19-check numbering drift this project already hit -- is a red run.
+Write-Host "checks=$registered pass=$($results.Count - $fail) fail=$fail inconclusive=$($inconclusive.Count) expected=$($script:ExpectedChecks)"
+if ($registered -ne $script:ExpectedChecks) {
+  Write-Host "FATAL: registered $registered checks but the selected sections promise $($script:ExpectedChecks)."
+  Write-Host "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
 Write-Host ""
 Write-Host "M1c summary: $($results.Count - $fail)/$($results.Count) checks passed ($Section)"
 if ($inconclusive.Count -gt 0) {

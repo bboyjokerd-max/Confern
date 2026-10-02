@@ -37,6 +37,39 @@ function Inconclusive($name, $why) {
   "  INCONCLUSIVE  $name  [$why]"
 }
 
+# P1-2 (2026-10-02 falsifiability audit): how many checks this run MUST register.
+# Every Check call in this file is unconditional, so this is a single number: a block
+# that silently stops registering turns the run red instead of printing N/N.
+$script:ExpectedChecks = 34
+function Expect([int]$n) { $script:ExpectedChecks += $n }
+
+# P1-3 (2026-10-02): the runner's own window instrument. S14.24 used to assert
+# `SettingsUi.IsOpen`, which is true after the FIRST open succeeds whatever the second
+# open did -- delete the singleton guard entirely and that check stayed green. Asking the
+# OS how many visible top-level windows the process owns can only move if a second window
+# really exists.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UiProbe {
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  /// Visible top-level windows owned by pid. A page that was never shown cannot be counted.
+  public static int VisibleTopLevel(uint pid) {
+    int n = 0;
+    EnumProc cb = delegate(IntPtr h, IntPtr p) {
+      uint wpid; GetWindowThreadProcessId(h, out wpid);
+      if (wpid == pid && IsWindowVisible(h)) n++;
+      return true;
+    };
+    EnumWindows(cb, IntPtr.Zero); GC.KeepAlive(cb);
+    return n;
+  }
+}
+'@
+
 "=== setup ==="
 if (-not (Test-Path -LiteralPath $Exe)) { "executable not found: $Exe"; exit 2 }
 if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
@@ -167,13 +200,29 @@ Get-Process -Name Confern -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-selftest', '--settings-file', $uiSettings, '--quiet', '--log', $uiLog) -PassThru -WindowStyle Hidden
-$finished = $p.WaitForExit(20000)
+# Sample the window count WHILE the self-test runs. It opens the page, asks for a second
+# page, presses Save, then closes -- and only a sample taken during that window can see a
+# second window if the singleton guard is gone. Bounded by the same 20 s as the launch.
+$maxVisibleWindows = 0
+$sawVisibleWindows = $false
+$uiSamples = 0
+while (-not $p.HasExited -and $sw.ElapsedMilliseconds -lt 20000) {
+  $n = [UiProbe]::VisibleTopLevel([uint32]$p.Id)
+  $uiSamples++
+  if ($n -gt $maxVisibleWindows) { $maxVisibleWindows = $n }
+  if ($n -ge 1) { $sawVisibleWindows = $true }
+  Start-Sleep -Milliseconds 20
+}
+$finished = $p.WaitForExit(5000)
 $elapsed = [int]$sw.ElapsedMilliseconds
 if (-not $finished) { $p.Kill(); $p.WaitForExit(5000) | Out-Null }
 $uiText = if (Test-Path -LiteralPath $uiLog) { Get-Content -LiteralPath $uiLog -Raw -Encoding UTF8 } else { '' }
 
 Check 'S14.23 the settings page opens' ($finished -and $p.ExitCode -eq 0 -and $uiText -match 'opened=True') "exit=$($p.ExitCode)"
-Check 'S14.24 a second open is refused (two windows would silently overwrite each other)' ($uiText -match 'second open refused \(still exactly one window\)=True') ''
+Check 'S14.24 the OS never saw more than ONE settings window (two would silently overwrite each other)' `
+  ($sawVisibleWindows -and ($maxVisibleWindows -eq 1) -and
+   $uiText -match 'second open refused \(still exactly one window\)=True') `
+  "maxVisibleWindows=$maxVisibleWindows samples=$uiSamples sawAWindow=$sawVisibleWindows"
 Check 'S14.25 it closes cleanly' ($uiText -match 'closed=True') ''
 Check 'S14.26 closing it does not leave the process hanging (bounded launch)' ($finished -and $elapsed -lt 20000) "finished=$finished elapsed=${elapsed}ms"
 Check 'S14.27 the page thread logs through the main thread, not around it' (
@@ -267,11 +316,15 @@ $runOff = Invoke-Sidecar @('--settings-file', $cfgOff, '--no-autostart', '--whee
 $runOn = Invoke-Sidecar @('--settings-file', $cfgOn, '--no-autostart', '--wheel-payload', $diagSrc, '--progress-trace') 'diag-on-run'
 $ticksOff = ([regex]::Matches($runOff.Text, 'progress tick')).Count
 $ticksOn = ([regex]::Matches($runOn.Text, 'progress tick')).Count
-Check 'S14.34 diagnostics OFF keeps essential events but drops the detail lines' (
+Check 'S14.34 diagnostics OFF keeps essential events and drops the very detail lines that ON shows' (
   $runOff.Text -match 'diagnostics=off \(essential events only\)' -and
   $runOff.Text -match 'conversion finished:' -and
   $runOff.Text -match 'note: --progress-trace is ON but diagnostics is OFF' -and
-  $ticksOff -eq 0) "essential=kept detail_ticks=$ticksOff"
+  $ticksOff -eq 0 -and
+  # P1-7 (2026-10-02): `ticksOff -eq 0` alone is "counted zero and called it success" -- a
+  # presenter that never ticked at all, in BOTH runs, satisfied it. The same assertion must
+  # hold in both directions, so the ON run is required here as well.
+  $ticksOn -ge 1) "essential=kept detail_ticks_off=$ticksOff detail_ticks_on=$ticksOn"
 Check 'S14.35 diagnostics ON brings the detail lines back' (
   $runOn.Text -match 'diagnostics: off -> on \(detail events included\)' -and
   $ticksOn -ge 1) "detail_ticks=$ticksOn"
@@ -282,8 +335,14 @@ Check 'S14.36 the real settings file is byte-identical afterwards' ($realBefore 
 
 ""
 "M1f summary: $($script:Pass)/$($script:Checks) checks passed"
-"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive)"
-if ($script:Fail -gt 0) { exit 1 }
+"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"
 if ($script:Checks -eq 0) { exit 2 }
+# P1-2: fewer checks than promised = a block silently did not register. Red, not N/N.
+if ($script:Checks -ne $script:ExpectedChecks) {
+  "FATAL: registered $($script:Checks) checks but this suite must register exactly $($script:ExpectedChecks)."
+  "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
+if ($script:Fail -gt 0) { exit 1 }
 if ($script:Inconclusive -gt 0) { exit 3 }
 exit 0

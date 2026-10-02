@@ -39,6 +39,12 @@ function Inconclusive($name, $why) {
   "  INCONCLUSIVE  $name  [$why]"
 }
 
+# P1-2 (2026-10-02 falsifiability audit): how many checks this run MUST register.
+# S15.19 registers exactly one check whichever branch it takes, so this file is a single
+# number: a block that silently stops registering turns the run red instead of printing N/N.
+$script:ExpectedChecks = 25
+function Expect([int]$n) { $script:ExpectedChecks += $n }
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -191,8 +197,10 @@ Check 'S15.10 the exit command reached its callback, and resume came back' (
 Check 'S15.11 NIM_DELETE was accepted and the probe says the shell let it go' (
   $trayText -match 'tray: NIM_DELETE removed=True' -and
   $trayText -match 'tray: PASS the shell no longer holds the icon after dispose') ''
+# P1-1 (2026-10-02): `\d+` accepted 0, so a self-test that ran NO checks at all still read as
+# "failed=0 ok=True". A suite that reports its own success count must report a positive one.
 Check 'S15.12 the self-test asserts one shell registration and reports zero failures' (
-  $trayText -match 'tray: selftest done: checks=(\d+) failed=0 ok=True' -and
+  $trayText -match 'tray: selftest done: checks=([1-9]\d*) failed=0 ok=True' -and
   $trayText -match 'tray: PASS the shell holds the icon  \[NIM_MODIFY accepted\]') ''
 
 # Numbered 24-25 rather than inserted as 13-14 on purpose: renumbering eleven later checks would
@@ -204,11 +212,20 @@ Check 'S15.12 the self-test asserts one shell registration and reports zero fail
 # the detail string below is what told them apart, so keep passing real evidence into Check.
 $iconStillPaused = [bool]($trayText -match "tray: paused -> tooltip 'Confern - paused'")
 $iconPausedDetail = [bool]($trayText -match 'the icon tells the truth after a refused resume  \[tray\.IsPaused=True')
+# P1-8 (2026-10-02): the old predicate leaned on `guard.CaptureDisabled=True` -- which is true
+# whatever Resume() did (the tray's Pause is a no-op when capture is already off, and a refused
+# Resume leaves it off), so the guard half of this safety pair proved nothing. The refusal is now
+# a COUNTED FACT (`guardResumeRefusals`) that only the guard's latched branch can produce: remove
+# the KillSwitchLatched gate in ReleaseGuard.Resume and the count stays 0.
+$guardRefusals = 0
+$gr = [regex]::Match($trayText, 'tray: PASS kill switch stays latched[^\r\n]*guardResumeRefusals=(\d+)')
+if ($gr.Success) { $guardRefusals = [int]$gr.Groups[1].Value }
 Check 'S15.24 the kill switch cannot be undone from the tray (spec 4.2.2: until restart)' (
   $trayText -match 'tray: PASS kill switch stays latched: the tray cannot resume capture' -and
+  ($guardRefusals -ge 1) -and
   $trayText -match 'guard: REFUSED to resume' -and
   $trayText -match 'detector: REFUSED to resume') `
-  "guardRefusal=$([bool]($trayText -match 'guard: REFUSED to resume')) detectorRefusal=$([bool]($trayText -match 'detector: REFUSED to resume'))"
+  "guardResumeRefusals=$guardRefusals guardRefusalLog=$([bool]($trayText -match 'guard: REFUSED to resume')) detectorRefusalLog=$([bool]($trayText -match 'detector: REFUSED to resume'))"
 Check 'S15.25 after a refused resume the icon still says paused (it must not lie)' (
   $iconPausedDetail -and $iconStillPaused) `
   "selftestSaysPaused=$iconPausedDetail pausedTooltipLine=$iconStillPaused"
@@ -218,11 +235,42 @@ Check 'S15.25 after a refused resume the icon still says paused (it must not lie
 # split it into two arguments (measured while writing this suite).
 $scratch = "Software\confern-verify-$([Guid]::NewGuid().ToString('N').Substring(0,12))"
 $scratchFull = "HKCU:\$scratch"
-$probe = Invoke-Confern @('--autostart-probe', $scratch) 'autostart-probe'
-$probeText = $probe.Text
+# P1-4 (2026-10-02): this block used to end with `$leftBehind -eq 0` -- an EMPTY SET counted as
+# success, so `Enable()` could have been reduced to a log line and nothing else and S15.16 would
+# still pass. The enabled state only EXISTS while the probe runs, so the runner samples the
+# registry WHILE it runs: "the value was really there, holding the path the app says it uses"
+# becomes a fact about the registry rather than the app's own report of itself.
+$probeLog = Join-Path $logDir 'autostart-probe.log'
+$probeProc = Start-Process -FilePath $Exe -ArgumentList @('--autostart-probe', $scratch, '--quiet', '--log', $probeLog) -PassThru -WindowStyle Hidden
+# The registry is sampled through the .NET API instead of the PowerShell provider: the probe
+# enables, then deliberately writes a STALE path (its own control case), then enables again and
+# disables -- so the correct value exists only in two short windows. A provider round-trip per
+# iteration is slow enough to miss both (measured with it: 1 sample, and it was the stale one),
+# and a check that usually reports "I did not see it" is exactly what this audit is about.
+$scratchParent = [Microsoft.Win32.Registry]::CurrentUser
+$observedValues = New-Object System.Collections.ArrayList
+$probePollSw = [Diagnostics.Stopwatch]::StartNew()
+while (-not $probeProc.HasExited -and $probePollSw.ElapsedMilliseconds -lt 60000) {
+  $k = $null
+  try { $k = $scratchParent.OpenSubKey($scratch) } catch { $k = $null }
+  if ($null -ne $k) {
+    try {
+      $pv = $k.GetValue($runName)
+      if ($null -ne $pv) { [void]$observedValues.Add("$pv") }
+    } finally { $k.Close() }
+  }
+}
+$probeFinished = $probeProc.WaitForExit(60000)
+$probeExit = $null
+try { if ($probeFinished) { $probeExit = $probeProc.ExitCode } } catch { $probeExit = $null }
+if (-not $probeFinished) { $probeProc.Kill(); $probeProc.WaitForExit(5000) | Out-Null }
+$probeText = (Get-Content -LiteralPath $probeLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n"
+$probe = @{ Exit = $probeExit; Finished = $probeFinished; Log = $probeLog; Text = $probeText }
 
+# P1-1 (2026-10-02): `checks=\d+` accepted a self-test that registered ZERO checks.
 Check 'S15.13 --autostart-probe exits 0 in a scratch subkey' (
-  $probe.Finished -and $probe.Exit -eq 0 -and $probeText -match 'autostart: probe done: checks=\d+ failed=0 ok=True') `
+  $probe.Finished -and $probe.Exit -eq 0 -and
+  $probeText -match 'autostart: probe done: checks=([1-9]\d*) failed=0 ok=True') `
   "exit=$($probe.Exit)"
 
 $expected = Get-Field $probeText 'expected'
@@ -243,11 +291,16 @@ Check 'S15.15 the subkey round-trips: absent -> enabled -> readable -> disabled 
   $probeText -match 'autostart: PASS disabled and the value is gone') ''
 
 # Independent check of the round-trip, using the registry itself rather than the app's own report:
-# the probe must have left nothing behind. Then clean up the scratch subkey.
+# the probing loop above must have SEEN the value while the probe had it enabled (with the exact
+# expected path), and the probe must have left nothing behind. Then clean up the scratch subkey.
 $leftBehind = if (Test-Path -LiteralPath $scratchFull) {
   @(Get-Item -LiteralPath $scratchFull).Property.Count
 } else { 0 }
-Check 'S15.16 the scratch subkey holds no values afterwards' ($leftBehind -eq 0) "valuesLeft=$leftBehind"
+$sawExpectedValue = @($observedValues | Where-Object { $_ -eq $expected }).Count
+$distinctSeen = @($observedValues | Sort-Object -Unique)
+Check 'S15.16 the probe really wrote the expected value (seen live) and removed it afterwards' `
+  (($sawExpectedValue -ge 1) -and ($leftBehind -eq 0)) `
+  "liveValueSamples=$($observedValues.Count) sawExpectedValue=$sawExpectedValue distinctSeen=[$($distinctSeen -join ' | ')] valuesLeft=$leftBehind"
 if (Test-Path -LiteralPath $scratchFull) { Remove-Item -LiteralPath $scratchFull -Recurse -Force -ErrorAction SilentlyContinue }
 
 "=== S15.17-S15.20 the resident app: tray on, focus untouched, clean exit ==="
@@ -345,8 +398,14 @@ Check 'S15.23 the real Run value is unchanged by the whole suite' ($runAfterText
 
 ""
 "M1g summary: $($script:Pass)/$($script:Checks) checks passed"
-"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive)"
-if ($script:Fail -gt 0) { exit 1 }
+"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"
 if ($script:Checks -eq 0) { exit 2 }
+# P1-2: fewer checks than promised = a block silently did not register. Red, not N/N.
+if ($script:Checks -ne $script:ExpectedChecks) {
+  "FATAL: registered $($script:Checks) checks but this suite must register exactly $($script:ExpectedChecks)."
+  "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
+if ($script:Fail -gt 0) { exit 1 }
 if ($script:Inconclusive -gt 0) { exit 3 }
 exit 0

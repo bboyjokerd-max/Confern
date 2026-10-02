@@ -22,6 +22,11 @@ internal interface ILayeredSurface : IDisposable
 
     void Hide();
 
+    /// <summary>
+    /// **實作必須問作業系統**（<c>IsWindowVisible</c>），不得回傳自己記錄的旗標。
+    /// 收層斷言、淡出斷言、<see cref="ReleaseGuard"/> 的決定都讀這一個屬性；自記旗標
+    /// 等於讓「覆蓋層卡在使用者畫面上」這件事在最需要被看見的地方說謊（2026-10-02 P0-2）。
+    /// </summary>
     bool IsVisible { get; }
 
     /// <summary>已經畫過幾個 frame（診斷用：證明是原地更新而不是一直開新視窗）。</summary>
@@ -68,7 +73,6 @@ internal sealed class PillWindow : ILayeredSurface
     private readonly Evidence _evidence;
     private readonly IntPtr _hwnd;
     private System.Threading.Timer? _tickTimer;
-    private bool _visible;
     private int _frames;
     private bool _trackingLeave;      // TrackMouseEvent 是「一次性」的，離開之後必須重新要求
     private bool _hover;
@@ -83,7 +87,17 @@ internal sealed class PillWindow : ILayeredSurface
     public event Action? TickRequested;
 
     public IntPtr Handle => _hwnd;
-    public bool IsVisible => _visible;
+
+    /// <summary>
+    /// 與 <see cref="VisualLayer.IsVisible"/> 同一條契約（2026-10-02 可證偽性稽核 P0-2）：
+    /// 「畫面上看不看得見」問作業系統，不回傳自己記錄的 bool。
+    ///
+    /// 藥丸比輪盤更需要這一條：它的失效模式是「一個永遠不淡出的藥丸 / 一塊卡住的錯誤清單」，
+    /// 而舊版的自記旗標會讓 m1h 那一整族淡出斷言在視窗其實還在的時候照樣綠。
+    /// 反過來說，`Show` 途中丟例外時舊版會留下一個「旗標說沒開、視窗其實開著」的覆蓋層。
+    /// </summary>
+    public bool IsVisible => Native.IsWindowVisible(_hwnd);
+
     public int Frames => _frames;
     public bool TickAlive => _tickTimer != null;
 
@@ -215,15 +229,14 @@ internal sealed class PillWindow : ILayeredSurface
             Native.ReleaseDC(IntPtr.Zero, screenDc);
         }
 
-        _visible = true;
         _frames++;
     }
 
     public void Hide()
     {
-        if (!_visible) return;
+        // OS 狀態而不是自記旗標（同 VisualLayer.Hide 的理由）。
+        if (!IsVisible) return;
         Native.ShowWindow(_hwnd, Native.SW_HIDE);
-        _visible = false;
         // 藏起來之後「游標停在上面」不再是事實。留著它會讓下一次顯示帶著一個過期的 hover——
         // 而 hover 決定「要不要淡出」，過期的 hover 就是一個永遠不淡出的藥丸。
         SetHover(false, "hidden");
@@ -336,7 +349,6 @@ internal sealed class PillWindow : ILayeredSurface
                 case Native.WM_APP_FORCE_HIDE:
                     // 與視覺層同一條契約：**決定權不在這裡**（guard 決定，這裡只執行）。
                     Native.ShowWindow(hWnd, Native.SW_HIDE);
-                    pill._visible = false;
                     pill.SetHover(false, "force hide");
                     pill._evidence.Line($"pill window HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
                     return IntPtr.Zero;

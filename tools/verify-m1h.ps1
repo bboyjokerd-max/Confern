@@ -50,6 +50,15 @@ function Inconclusive($name, $why) {
   "  INCONCLUSIVE  $name  [$why]"
 }
 
+# P1-2 (2026-10-02 falsifiability audit): the floor of how many checks a run MUST register.
+# 62 is what this suite registers on this machine today (measured 2026-10-02, 62/62 pass).
+# A FLOOR rather than an equality on purpose: m1h has sub-blocks that are allowed to add
+# checks in other environments, and equality would turn "this machine has one more monitor"
+# into a false red. Under-registration -- a block that silently stopped running, which is the
+# failure this exists for -- is below the floor and turns the run red either way.
+$script:ExpectedChecks = 62
+function Expect([int]$n) { $script:ExpectedChecks += $n }
+
 # CJK expected strings, built from code points so this file stays pure ASCII.
 #   0x7121 0x6CD5 0x89E3 0x78BC  = "cannot decode" (spec 7.1 DecodeFailed reason)
 $MSG_DECODE = [string]::Join('', [char[]]@(0x7121,0x6CD5,0x89E3,0x78BC))
@@ -267,13 +276,42 @@ if ($variantsOk) {
   $cap = $many.Cap
 
   "=== S16.12-S16.14 the glyphs actually rendered (not just 'a file exists') ==="
-  Check 'S16.12 every variant really contains text ink (an empty bitmap would render nothing)' `
-    (($mShort.Ink -gt 200) -and ($mLong.Ink -gt 200) -and ($mMany.Ink -gt 1500) -and ($mReal.Ink -gt 200)) `
-    "ink short=$($mShort.Ink) long=$($mLong.Ink) many=$($mMany.Ink) real=$($mReal.Ink)"
+  # P1-5 (2026-10-02): the old thresholds were absolute magic numbers (ink>200 against a
+  # measured 439, ink>1500 against 3630) with so much slack that a panel rendering almost
+  # nothing still passed. This is now a RELATIVE comparison inside the SAME run: all four
+  # panel variants render the same kind of row (a filename plus a reason), so none of them
+  # may sit an order of magnitude below the middle one. The reference is the MEDIAN OF THE
+  # OTHER THREE, which is what makes this an outlier test rather than a second magic number.
+  # Measured 2026-10-02 baseline ink per band: short=326 long=847 many=403 real=439, so every
+  # variant clears its 0.5x floor by at least 1.49x, while a blank variant (or one that keeps
+  # its bands but loses a row's ink) collapses to 0 and fails.
+  $inkPerBand = @{}
+  $bandCounts = @{}
+  foreach ($v in @(@('short', $mShort), @('long', $mLong), @('many', $mMany), @('real', $mReal))) {
+    $bandCounts[$v[0]] = $v[1].Bands
+    $inkPerBand[$v[0]] = if ($v[1].Bands -gt 0) { [double]$v[1].Ink / [double]$v[1].Bands } else { 0 }
+  }
+  $relativeOk = $true
+  $relativeDetail = @()
+  foreach ($name in @('short', 'long', 'many', 'real')) {
+    $others = @($inkPerBand.Keys | Where-Object { $_ -ne $name } | ForEach-Object { $inkPerBand[$_] } | Sort-Object)
+    $medianOfOthers = $others[[int][math]::Floor($others.Count / 2)]
+    $floor = 0.5 * $medianOfOthers
+    if ($inkPerBand[$name] -lt $floor) { $relativeOk = $false }
+    $relativeDetail += "$name=$([int]$inkPerBand[$name])(floor=$([int]$floor))"
+  }
+  Check 'S16.12 every panel variant carries ink in proportion to its rendered rows (relative, same run)' `
+    (($bandCounts.Values | Where-Object { $_ -lt 1 }).Count -eq 0 -and $relativeOk) `
+    ("inkPerBand $($relativeDetail -join ' ') bands short=$($bandCounts['short']) long=$($bandCounts['long']) " +
+     "many=$($bandCounts['many']) real=$($bandCounts['real'])")
   # Bands = rendered rows. A dropped row keeps the file non-empty but removes a
   # band, which is exactly the failure "the file exists" cannot see.
+  # P1-6 (2026-10-02): `Bands -eq Shown` is also true when BOTH are zero -- a blank panel
+  # and a presenter that never reported a row agreed with each other. `Shown >= 1` is the
+  # premise that makes the equality mean something.
   Check 'S16.13 the rendered row count matches the rows the app says it drew (short=2, real=1)' `
-    (($mShort.Bands -eq $short.Shown) -and ($mReal.Bands -eq $real.Shown)) `
+    (($short.Shown -ge 1) -and ($real.Shown -ge 1) -and
+     ($mShort.Bands -eq $short.Shown) -and ($mReal.Bands -eq $real.Shown)) `
     "short bands=$($mShort.Bands) shown=$($short.Shown); real bands=$($mReal.Bands) shown=$($real.Shown)"
   Check 'S16.14 the long list drew cap rows plus the overflow line' `
     ($mMany.Bands -eq ($cap + 1)) `
@@ -322,12 +360,18 @@ if ($variantsOk) {
     "pipe-panel-real.png"
 
   "=== S16.22-S16.23 the pixel evidence agrees with the row data ==="
-  # The rendered real panel must be at least as wide as the Chinese filename plus
-  # the Chinese reason: if the renderer had used a fixed width, the row would be
-  # clipped. 190 px is comfortably above every filename-only string used here and
-  # comfortably below the panel that actually contains the reason.
-  Check 'S16.22 the rendered real row is wide enough to hold the filename AND the reason' `
-    ($mReal.Width -ge 190) "realPanelWidth=$($mReal.Width) (a filename-only string measures well under 190)"
+  # P1-5 (2026-10-02): `width >= 190` was an absolute magic number measured at 197, i.e. a
+  # 7 px margin: it could only fail if the panel lost almost everything. The failure this
+  # check exists for (a FIXED width that clips the Chinese reason) is a comparison between
+  # two texts of different length in the SAME run, so it is written as one now: the real row
+  # ("corrupt.png" plus the reason) must be wider than the short panel's rows ("a.png" /
+  # "b.heic" plus the same reason). A fixed width makes all panels equal and fails here.
+  # Honest limit: a regression that drops the reason column from EVERY variant shrinks both
+  # panels together and is NOT visible to any relative width comparison -- that one is caught
+  # by S16.15 (right-half ink share), S16.20 and S16.33 (the row text still carries it).
+  Check 'S16.22 the real row is wider than the short panel in the same run (the width is text-driven, not fixed)' `
+    ($mReal.Width -gt $mShort.Width) `
+    "realPanelWidth=$($mReal.Width) shortPanelWidth=$($mShort.Width) delta=$($mReal.Width - $mShort.Width)"
   Check 'S16.23 the rendered real row is much narrower than the deliberately long one (it is really text-driven)' `
     ($mReal.Width -lt $mLong.Width) "real=$($mReal.Width) long=$($mLong.Width)"
 
@@ -526,8 +570,12 @@ if ($variantsOk) {
   $st = Start-Process -FilePath $Exe -ArgumentList @(
     '--progress-detail-selftest', '--quiet', '--log', $stLog) -PassThru -Wait -WindowStyle Hidden
   $stText = (Get-Content -LiteralPath $stLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n"
+  # P1-1 (2026-10-02): `checks=\d+` accepted a self-test that registered ZERO checks.
+  # (A comment may not sit between a backtick continuation and its argument: doing that
+  #  here made PS 5.1 reject the whole file with "Unexpected token", which is how the
+  #  first version of this edit was caught.)
   Check 'S16.44 the expand-state self-test passes every one of its own checks' `
-    ($st.ExitCode -eq 0 -and $stText -match 'detail: selftest done: checks=(\d+) failed=0 ok=True') `
+    ($st.ExitCode -eq 0 -and $stText -match 'detail: selftest done: checks=([1-9]\d*) failed=0 ok=True') `
     "exit=$($st.ExitCode)"
   Check 'S16.45 IsExpanded is false before anything toggles it (spec 7.3)' `
     ($stText -match 'detail: PASS nothing is expanded before any toggle') ''
@@ -1011,8 +1059,14 @@ Check 'S16.61 no leftover Confern process after the injected runs' `
 
 ""
 "M1h summary: $($script:Pass)/$($script:Checks) checks passed"
-"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive)"
-if ($script:Fail -gt 0) { exit 1 }
+"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"
 if ($script:Checks -eq 0) { exit 2 }
+# P1-2: fewer checks than this file promises = a block silently did not register. Red, not N/N.
+if ($script:Checks -lt $script:ExpectedChecks) {
+  "FATAL: registered $($script:Checks) checks but this suite must register at least $($script:ExpectedChecks)."
+  "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
+if ($script:Fail -gt 0) { exit 1 }
 if ($script:Inconclusive -gt 0) { exit 3 }
 exit 0

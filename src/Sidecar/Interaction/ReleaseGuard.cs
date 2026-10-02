@@ -161,22 +161,35 @@ internal sealed class ReleaseGuard : IDisposable
     ///
     /// 為什麼被拒絕時要大聲寫日誌：使用者按了按鈕卻什麼都沒發生，正是他最需要日誌解釋的時刻；
     /// 沉默會讓他以為程式壞了，而不是「保險 #5 照規格要求重啟才復原」。
+    ///
+    /// 回傳值與 <see cref="ResumeRefusals"/>（2026-10-02 可證偽性稽核 P1-8）：日誌行只能證明
+    /// 「我們這樣說」，驗收端讀 `CaptureDisabled` 也證明不了什麼——拒絕與否它都是 true。
+    /// 「守衛拒絕過幾次」是**唯一**能讓「拒絕真的發生過」變成可觀測事實的東西：
+    /// 把 <see cref="KillSwitchLatched"/> 這道閂拿掉，這個計數就會停在 0。
     /// </summary>
-    public void Resume()
+    public bool Resume()
     {
         if (KillSwitchLatched)
         {
+            ResumeRefusals++;
             _evidence.Line("guard: REFUSED to resume: the kill switch (insurance #5) latched capture off " +
                            "until restart; restart the program to capture again");
-            return;
+            return false;
         }
         if (!CaptureDisabled)
         {
             _evidence.Line("guard: resume requested but capture was not disabled; nothing to do");
-            return;
+            return true;
         }
         SetCaptureDisabled(false, "tray resume", Native.HideReasonManual);
+        return true;
     }
+
+    /// <summary>
+    /// 保險 #5 閂上之後，<see cref="Resume"/> 被拒絕的次數。單調遞增，不會被重設。
+    /// 驗收端用它把「守衛拒絕復原」變成事實而不是敘事（P1-8）。
+    /// </summary>
+    public int ResumeRefusals { get; private set; }
 
     /// <summary>
     /// 停用或復原捕捉的**唯一實作**（兩條路徑共用，否則兩個方向會漂移）。

@@ -32,6 +32,18 @@ function Inconclusive($name, $why) {
   "  INCONCLUSIVE  $name  [$why]"
 }
 
+# =============================================================================
+#  P1-2 (2026-10-02 falsifiability audit): how many checks this run MUST register.
+#
+#  The problem this solves: a block whose precondition silently fails can register
+#  NOTHING, and the summary then prints "N/N" with no second number to compare N
+#  against (verify-m1b.ps1's S6.3-S6.7 did exactly that). The number below is the
+#  count this file promises for an unconditional run; the Expect calls inside the
+#  few branching blocks account for the paths that register a different number.
+# =============================================================================
+$script:ExpectedChecks = 48
+function Expect([int]$n) { $script:ExpectedChecks += $n }
+
 # CJK expected strings, built from code points so this file stays pure ASCII.
 $MSG_DECODE  = [string]::Join('', [char[]]@(0x7121,0x6CD5,0x89E3,0x78BC))            # wu fa jie ma
 $MSG_MISSING = [string]::Join('', [char[]]@(0x4F86,0x6E90,0x6A94,0x6848,0x5DF2,0x4E0D,0x5B58,0x5728))  # source file no longer exists
@@ -110,6 +122,7 @@ $outPng = Join-Path $Work 'art.png'
 Check 'S12.1a exit code 0' ($r.Exit -eq 0) "exit=$($r.Exit)"
 Check 'S12.1b output exists' (Test-Path -LiteralPath $outPng) $outPng
 if (Test-Path -LiteralPath $outPng) {
+  Expect 3
   $bytes = [System.IO.File]::ReadAllBytes($outPng)
   $sig = ($bytes[0] -eq 0x89) -and ($bytes[1] -eq 0x50) -and ($bytes[2] -eq 0x4E) -and ($bytes[3] -eq 0x47)
   Check 'S12.1c real PNG signature' $sig ''
@@ -131,6 +144,7 @@ if (Test-Path -LiteralPath $outPng) {
   }
   Check 'S12.2 pixels match the source' ($mismatch -eq 0) "$samples samples, $mismatch over tolerance 2"
 } else {
+  Expect 1
   Inconclusive 'S12.2 pixels match the source' 'no output to compare'
 }
 
@@ -197,27 +211,61 @@ $p = Start-Process -FilePath $Exe -ArgumentList @('--codecs', '--quiet', '--log'
 $codecText = (Get-Content -LiteralPath $codecLog -Encoding UTF8) -join "`n"
 $offeredLine = ($codecText -split "`n" | Where-Object { $_ -match 'offered=\[' } | Select-Object -First 1)
 if ($offeredLine) {
+  Expect 3
   $offered = ([regex]::Match($offeredLine, 'offered=\[([^\]]*)\]')).Groups[1].Value -split ','
   $sorted = ($offered | Sort-Object) -join ','
   Check 'S12.9 offered outputs = declared n encodable' ($sorted -eq 'BMP,JPG,PNG,TIF') "offered=$sorted"
   Check 'S12.9b GIF never offered (capable but not declared)' (-not ($offered -contains 'GIF')) ''
   Check 'S12.9c WEBP never offered (declared but not encodable here)' (-not ($offered -contains 'WEBP')) ''
 } else {
+  Expect 1
   Inconclusive 'S12.9 offered outputs' 'no offered=[] line in the codec log'
 }
 
 # the whole point of the worker split: it must never time out
 $workerLog = Join-Path $env:LOCALAPPDATA 'Confern\worker.log'
-$before = if (Test-Path -LiteralPath $workerLog) { (Get-Item -LiteralPath $workerLog).Length } else { 0 }
+# P0-5 (2026-10-02): the worker opens this file with append:false, so its CONTENT is
+# per-run -- but only when the worker actually starts. Nothing removed it, so a run in
+# which the worker never came up still found the PREVIOUS run's
+# "worker: ready protocolVersion=1" line and S12.10f stayed green while the whole
+# two-process path was dead. Delete it first: from here on the line can only exist
+# because THIS run's worker wrote it, and its timestamp has to be inside this run.
+$staleWorkerBytes = if (Test-Path -LiteralPath $workerLog) { (Get-Item -LiteralPath $workerLog).Length } else { 0 }
+if (Test-Path -LiteralPath $workerLog) { Remove-Item -LiteralPath $workerLog -Force -ErrorAction SilentlyContinue }
+$payloadStarted = Get-Date
 $payloadLog = Join-Path $logDir 'payload.log'
 $p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $srcJpg, '--no-autostart', '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
 $payloadText = (Get-Content -LiteralPath $payloadLog -Encoding UTF8) -join "`n"
 Check 'S12.10a payload path converts through the worker' ($payloadText -match 'conversion finished: finished=True ok=1 failed=0') ''
-Check 'S12.10b progress is ONE window updated in place' ($payloadText -match 'progress instrument: updates=(\d+) frames=(\d+)') ''
-if ($payloadText -match 'progress instrument: updates=(\d+) frames=(\d+) visible=(True|False)') {
-  Check 'S12.10c frames == updates (same window, no line spam)' ($Matches[1] -eq $Matches[2]) "updates=$($Matches[1]) frames=$($Matches[2])"
+
+# ---------------------------------------------------------------------------
+# P1-10 (2026-10-02): this trio used to be three ways of saying nothing. The pill
+# could be drawn NOWHERE and all three stayed green: "updates=0 frames=0" satisfied
+# "one window", `frames == updates` compared one number with itself, and "it faded"
+# was read from a line that also appears when the pill was never on screen. Each
+# check below now demands POSITIVE evidence that the pill was really painted, that
+# it was painted on ONE window, and that the fade really reached invisible.
+# ---------------------------------------------------------------------------
+$instrument = [regex]::Match($payloadText, 'progress instrument: updates=(\d+) frames=(\d+) visible=(True|False)')
+$updatesAtInstrument = 0; $framesAtInstrument = 0; $visibleAtInstrument = $false
+if ($instrument.Success) {
+  $updatesAtInstrument = [int]$instrument.Groups[1].Value
+  $framesAtInstrument = [int]$instrument.Groups[2].Value
+  $visibleAtInstrument = ($instrument.Groups[3].Value -eq 'True')
 }
-Check 'S12.10d progress faded out on its own' ($payloadText -match 'progress faded out on its own: True') ''
+# "painted" = the instrument line saw the pill drawn at least once AND the OS still
+# called the window visible at that moment (IsVisible asks IsWindowVisible since
+# 2026-10-02 P0-2, so that field is now an external reading rather than a self-report).
+$painted = $instrument.Success -and ($updatesAtInstrument -ge 1) -and ($framesAtInstrument -ge 1) -and $visibleAtInstrument
+Check 'S12.10b the pill was really painted AND on screen when the run reported it' `
+  $painted "instrument='$($instrument.Value)' updates=$updatesAtInstrument frames=$framesAtInstrument visible=$visibleAtInstrument"
+$pillCreated = ([regex]::Matches($payloadText, 'pill window created hwnd=0x[0-9A-F]+ class=ConfernPillWindow')).Count
+$pillDisposed = [regex]::Match($payloadText, 'pill window disposed; frames=(\d+) clicks=(\d+)')
+$pillFrames = if ($pillDisposed.Success) { [int]$pillDisposed.Groups[1].Value } else { 0 }
+Check 'S12.10c the pill is ONE window, repainted in place over the run' `
+  (($pillCreated -eq 1) -and ($pillFrames -ge 3)) "windowsCreated=$pillCreated frames=$pillFrames"
+Check 'S12.10d the pill was drawn and then faded out on its own (the OS says invisible afterwards)' `
+  ($painted -and ($payloadText -match 'progress faded out on its own: True visible=False')) ''
 # The fade has exactly ONE driver: the layer's periodic callback. If that callback is
 # starved (the old SetTimer/WM_TIMER version was), the line stays on screen forever.
 # So "it faded" is not enough: prove the callback kept ticking for the whole window.
@@ -233,10 +281,37 @@ if ($hideLines.Count -ge 2) {
   Check 'S12.10d3 both fades repainted the same line (>= 3 alpha steps)' `
         (($updateCounts | Where-Object { $_ -lt 3 }).Count -eq 0) "updates=$($updateCounts -join ',')"
 } else {
-  Inconclusive 'S12.10d2 tick driver ran the whole fade' "only $($hideLines.Count) hiding line(s)"
+  # A missing hiding line is NOT "undetermined": the pill is supposed to be drawn and
+  # fade on every conversion, so a run that never got through a fade is a failure of
+  # the feature. Reporting it as INCONCLUSIVE (which does not fail the suite) is how
+  # this pair could stay silent while the pill was never painted at all.
+  Check 'S12.10d2 tick driver ran the whole fade (not starved) on both conversions' $false `
+        "only $($hideLines.Count) hiding line(s): the pill never got through a fade"
+  Check 'S12.10d3 both fades repainted the same line (>= 3 alpha steps)' $false `
+        "only $($hideLines.Count) hiding line(s)"
 }
-Check 'S12.10e no worker timeout (regression: pipe deadlock)' (-not ($payloadText -match 'timed out')) ''
-Check 'S12.10f worker reported ready' ((Get-Content -LiteralPath $workerLog -Encoding UTF8 | Select-String -Pattern 'worker: ready protocolVersion=1') -ne $null) ''
+# P1-9 (2026-10-02): the old predicate only looked for 'timed out', and the only thing
+# that prints that string is the 30 s IDLE watchdog. The failure this check names (a
+# deadlock between the UI process and the worker) does NOT print it: it prints
+# "worker did not connect within N ms" or "worker: pipe closed before summary".
+# Grepping for the wrong string meant the check could not bite the regression it cited.
+Check 'S12.10e no worker connect failure and no timeout (regression: pipe deadlock)' `
+  ((-not ($payloadText -match 'timed out')) -and
+   (-not ($payloadText -match 'worker did not connect')) -and
+   (-not ($payloadText -match 'pipe closed before summary'))) `
+  "connectFailed=$([bool]($payloadText -match 'worker did not connect')) pipeClosed=$([bool]($payloadText -match 'pipe closed before summary')) idleTimeout=$([bool]($payloadText -match 'timed out'))"
+# P0-5: only THIS run's worker lines count. The file was deleted above, so it exists at
+# all only because a worker started, and its timestamp has to be inside this run.
+$workerBytes = 0; $workerFresh = $false; $workerText = ''
+if (Test-Path -LiteralPath $workerLog) {
+  $wi = Get-Item -LiteralPath $workerLog
+  $workerBytes = $wi.Length
+  $workerFresh = $wi.LastWriteTime -ge $payloadStarted
+  $workerText = (Get-Content -LiteralPath $workerLog -Encoding UTF8) -join "`n"
+}
+Check 'S12.10f worker reported ready (this run only: the log was deleted first)' `
+  ($workerFresh -and ($workerText -match 'worker: ready protocolVersion=1')) `
+  "beforeRun=${staleWorkerBytes}B now=${workerBytes}B fresh=$workerFresh"
 Check 'S12.10g no leftover worker process' (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0) ''
 
 # the most natural user action: select a format, then RELEASE the mouse. It needs a real
@@ -258,12 +333,34 @@ if ($releaseLine) {
 # The failure contract must therefore be asserted through the payload/UI path as
 # well, or the same drift can return with every check still green.
 $failPayloadLog = Join-Path $logDir 'payload-failure.log'
+# P0-1 (2026-10-02): S12.15c used to count `corrupt.*` files in the work directory --
+# and that "1" is the fixture itself. Nothing read the file and nothing compared a hash,
+# so a failure path that EMPTIED or rewrote the user's source file still passed, while
+# spec 5's first red line says the source is never touched. Record the identity of the
+# source before the run and assert it afterwards, together with the reason (so "no
+# output was written" cannot pass because the conversion never ran at all).
+$corruptHash = (Get-FileHash -LiteralPath $corrupt -Algorithm SHA256).Hash
+$corruptStamp = (Get-Item -LiteralPath $corrupt).LastWriteTimeUtc.ToString('o')
+$corruptLen = (Get-Item -LiteralPath $corrupt).Length
 $p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $corrupt, '--no-autostart', '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
 $failText = (Get-Content -LiteralPath $failPayloadLog -Encoding UTF8) -join "`n"
 $failPill = Get-PillLine $failText
 Check 'S12.15a the pill shows the reason, not a bare count' ($failPill.Contains($MSG_DECODE)) "pill='$failPill'"
 Check 'S12.15b the finished line carries the reason' ($failText -match "finished=True ok=0 failed=1 error=- line='.*$MSG_DECODE") ''
-Check 'S12.15c a failed conversion writes no output and no .tmp-*' ((@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count -eq 1) -and (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0)) ''
+$sourceSame = (Get-FileHash -LiteralPath $corrupt -Algorithm SHA256).Hash -eq $corruptHash
+$sourceStampSame = (Get-Item -LiteralPath $corrupt).LastWriteTimeUtc.ToString('o') -eq $corruptStamp
+$sourceLenSame = (Get-Item -LiteralPath $corrupt).Length -eq $corruptLen
+$failReasonOk = ($failText -match 'worker result: ok=False output=- error=DecodeFailed') -and
+                ($failText -match "conversion finished: finished=True ok=0 failed=1 error=- line='.*$MSG_DECODE")
+# NOTE: Test-SummaryCarries is the wrong helper on a --wheel-payload log -- it reads the
+# `convert summary:` line, which only the --convert path writes (measured: it returned False on a
+# log that plainly carried the reason). The first version of this check used it and went red for
+# a reason that had nothing to do with the property under test.
+Check 'S12.15c a failed conversion leaves the source byte-identical and writes nothing' `
+  ($sourceSame -and $sourceStampSame -and $sourceLenSame -and $failReasonOk -and
+   (@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count -eq 1) -and
+   (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0)) `
+  "sourceShaSame=$sourceSame sourceStampSame=$sourceStampSame sourceLenSame=$sourceLenSame reason=$failReasonOk corruptFiles=$(@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count) tmpFiles=$(@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count)"
 Check 'S12.15d a failure holds 5 s, not the 2 s success hold (spec 4.4)' ($failText -match 'hiding after \d+ ms \(updates=\d+, ticks=\d+, hold=5000 ms\)') ''
 
 "=== S12.11-S12.12 settings (spec 8) ==="
@@ -320,8 +417,15 @@ Check 'S12.13e second batch did not overwrite the first' $untouched ''
 Check 'S12.13d no .tmp-* after batch' (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0) ''
 
 "=== result ==="
-"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive)"
+"checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"
 if ($script:Checks -eq 0) { "NO CHECKS RAN"; exit 2 }
+# P1-2: a suite that ran fewer checks than it promises has a block that silently failed
+# to register. That is a red run, not an N/N print.
+if ($script:Checks -ne $script:ExpectedChecks) {
+  "FATAL: registered $($script:Checks) checks but this suite must register exactly $($script:ExpectedChecks)."
+  "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
 if ($script:Fail -gt 0) { exit 1 }
 if ($script:Inconclusive -gt 0) { exit 3 }
 exit 0

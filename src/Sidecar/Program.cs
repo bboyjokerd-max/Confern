@@ -727,6 +727,16 @@ internal static class App
                 evidence.Line(line);
                 Console.WriteLine(line);
             }
+            // 2026-10-02 可證偽性稽核（P1-11）：這一條以前是無條件 `return 0`，所以
+            // 驗收端斷言「exit code 0」其實只證明「沒有崩潰」——監視器列舉回傳 0 筆、
+            // 一行 `monitor#` 都印不出來時照樣是綠的。診斷的**產物**就是那份清單，
+            // 沒有產物就沒有結果可看：3 = 「跑完了，但沒有結果」（與 9 = 崩潰不同）。
+            if (monitors.Length == 0)
+            {
+                evidence.Line("dump-monitors: the enumeration returned NO monitors -> exit 3");
+                Console.Error.WriteLine("dump-monitors: no monitors were enumerated");
+                return 3;
+            }
             return 0;
         }
 
@@ -950,6 +960,13 @@ internal static class App
             guard.OnCaptured();
             ShowWheelFromPayload(presenter, catalog, evidence, injected);
 
+            // 2026-10-02 可證偽性稽核（P1-11）：這條診斷以前是無條件 `return 0`，
+            // 所以驗收端的「exit code 0」只等於「沒有崩潰」——輪盤根本沒做出決定、
+            // 或它承諾的轉檔從來沒跑完，都還是 0。這裡把「這條路徑到底得到什麼結論」
+            // 變成回傳碼：0 = 有結論可讀（Ready 且真的能轉，或是刻意的拒絕狀態），
+            // 3 = 跑完了但沒有結論（與 9 = 崩潰分開，呼叫端才分得出這兩件事）。
+            bool verdict = presenter.Notice != null || presenter.CanCommit;
+
             // 拒絕狀態（混合選取／不支援）下 Enter 必須不執行，而且輪盤要留在畫面上等 Esc。
             if (opt.WheelDump != null) presenter.DumpTo(opt.WheelDump);
             bool committed = CommitWheel(presenter, guard, evidence, runner);
@@ -976,6 +993,9 @@ internal static class App
                 ConversionSnapshot final = runner.Wait(60000);
                 evidence.Line($"conversion finished: finished={final.Finished} ok={final.Ok} failed={final.Failed} " +
                               $"error={final.Error ?? "-"} line='{final.Line}'");
+                // 轉檔是這一條診斷最主要的外部效果：它沒跑完（逾時／worker 沒接上／管道斷）
+                // 就是「沒有結論」，不可以回 0。
+                if (!final.Finished) verdict = false;
                 // 規格 §7.3 的失敗清單，列資料走的是**這條真實路徑**：worker 解碼失敗 → 管道訊息 →
                 // 快照 → 列資料。`--convert` 那條路是同一顆引擎但**不經過管道**，
                 // 所以它驗不到「管道另一端送來的東西在這裡被正確拆成兩欄」——
@@ -1002,9 +1022,13 @@ internal static class App
                 ConversionSnapshot after = runner.Wait(60000);
                 evidence.Line($"release commit finished: finished={after.Finished} ok={after.Ok} " +
                               $"failed={after.Failed} line='{after.Line}'");
+                if (!after.Finished) verdict = false;
                 PumpUntil(() => !progress.IsVisible, 12000);
             }
-            return 0;
+            if (!verdict)
+                evidence.Line("wheel-payload: this diagnostic run produced NO verdict -> exit 3 " +
+                              "(a Ready payload with nothing to convert, or a conversion that never finished)");
+            return verdict ? 0 : 3;
         }
 
         using var hooks = new Hooks();
@@ -1501,8 +1525,11 @@ internal static class App
         else
         {
             // 緊急停用之後這裡會被拒絕（見 ReleaseGuard.Resume）——那正是規格 §4.2.2 要的。
-            guard.Resume();
+            // 回傳值與 ResumeRefusals 一起寫進日誌：只讀 CaptureDisabled 分不出
+            // 「守衛拒絕了」與「守衛根本沒被問到」（兩者都是 true）。
+            bool resumed = guard.Resume();
             detector.SetPaused(false, "tray resume");
+            evidence.Line($"tray: resume attempt accepted={resumed} guardResumeRefusals={guard.ResumeRefusals}");
         }
 
         // 真相只有一個：記下的是兩個擁有者**實際**的狀態，不是使用者剛按下的意圖。
@@ -1510,7 +1537,7 @@ internal static class App
         _capturePaused = guard.CaptureDisabled || detector.IsDisabled;
         evidence.Line($"tray: capture paused={_capturePaused} (requested={paused}) " +
                       $"(guard.CaptureDisabled={guard.CaptureDisabled}, detector.IsDisabled={detector.IsDisabled}, " +
-                      $"killSwitchLatched={guard.KillSwitchLatched})");
+                      $"killSwitchLatched={guard.KillSwitchLatched}, guardResumeRefusals={guard.ResumeRefusals})");
     }
 
     /// <summary>
@@ -1637,9 +1664,9 @@ internal static class App
         tray.InvokeCommand(TrayCommand.TogglePause);
         for (int i = 0; i < 5; i++) Native.PumpMessages();
         Report("kill switch stays latched: the tray cannot resume capture",
-               guard.CaptureDisabled && detector.IsDisabled,
+               guard.CaptureDisabled && detector.IsDisabled && guard.ResumeRefusals >= 1,
                $"guard.CaptureDisabled={guard.CaptureDisabled} detector.IsDisabled={detector.IsDisabled} " +
-               $"latched={guard.KillSwitchLatched}");
+               $"latched={guard.KillSwitchLatched} guardResumeRefusals={guard.ResumeRefusals}");
         Report("the icon tells the truth after a refused resume", tray.IsPaused,
                $"tray.IsPaused={tray.IsPaused} tooltip='{tray.Tooltip}'");
 

@@ -159,6 +159,13 @@ function Check([string]$name, [bool]$ok) {
   [void]$results.Add([pscustomobject]@{ Name = $name; Pass = $ok })
   if ($ok) { Write-Host "PASS  $name" } else { Write-Host "FAIL  $name" }
 }
+# P1-2 (2026-10-02 falsifiability audit): how many checks this run MUST register, mirroring
+# every branch that changes the number. A section that silently stops registering (m1b's
+# S6.3-S6.7 did exactly that) would otherwise still end as "N/N passed" with no second number
+# to compare against. The driver adds a section's count when it runs it; a branch that
+# registers fewer adds a negative correction (Expect -N) where it returns early.
+$script:ExpectedChecks = 0
+function Expect([int]$n) { $script:ExpectedChecks += $n }
 # A section that cannot set up its own precondition must never be reported as PASS or FAIL.
 function Inconclusive([string]$reason) {
   [void]$inconclusive.Add($reason)
@@ -267,15 +274,43 @@ function Invoke-S2 {
   Write-Host ""
   Write-Host "=== S2 50x programmatic raise/hide cycle ==="
   Stop-AllSidecar
-  $run = Start-Sidecar @('--cycle-test', '50') 's2'
-  $run.Process.WaitForExit()
+  # P0-3 (2026-10-02): S2.5 used to call WaitForExit() and THEN ask EnumWindows how many
+  # windows the process owned. A process that has already exited owns none, so the answer was
+  # 0 before the question was asked: replacing the product with a stub could not have moved
+  # it. The instrument now runs WHILE the 50 cycles happen, which is the only moment this
+  # property is observable -- the runner has to SEE the hit window appear, and SEE it gone
+  # again at the end. Started directly instead of through Start-Sidecar because that helper
+  # sleeps 1500 ms, which would eat half of the ~3 s window this measurement lives in.
+  $log = Join-Path $LogDir 's2.log'
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $proc = Start-Process -FilePath $Exe -ArgumentList @('--cycle-test', '50', '--no-autostart', '--quiet', '--log', $log) -PassThru
+  $run = [pscustomobject]@{ Process = $proc; Log = $log }
+  $visibleSamples = 0
+  $liveSamples = 0
+  $lastVisible = -1
+  $pollDeadline = [DateTime]::UtcNow.AddSeconds(90)
+  while (-not $proc.HasExited -and [DateTime]::UtcNow -lt $pollDeadline) {
+    $w = @([Probe]::HitWindows([uint32]$proc.Id))
+    if ($w.Count -gt 0) {
+      $liveSamples++
+      $lastVisible = @($w | Where-Object { $_ -match 'visible=True' }).Count
+      if ($lastVisible -ge 1) { $visibleSamples++ }
+    }
+    Start-Sleep -Milliseconds 15
+  }
+  $proc.WaitForExit()
+  # A window the process has already released cannot be observed, so "nothing is left on
+  # screen" is measured at the LAST sample taken while it was still alive. A window still
+  # raised when the loop ends keeps $lastVisible >= 1 and fails there.
+  $leftAlive = @([Probe]::HitWindows(0) | Where-Object { $_ -match 'visible=True' }).Count
   Check "S2.1 --cycle-test 50 exits 0 (everything hidden at the end)" ($run.Process.ExitCode -eq 0)
   $lines = Get-LogLines $run.Log
   Check "S2.2 exactly 50 raises logged" ((Count-Log $lines 'hit layer SHOWN') -eq 50)
   Check "S2.3 ends allHidden=True" (Test-Log $lines 'cycle test done: 50 cycles; allHidden=True')
   Check "S2.4 no leftover window handles" (Test-Log $lines 'hit layer disposed; leftoverWindows=0')
-  $left = @([Probe]::HitWindows([uint32]$run.Process.Id))
-  Check "S2.5 no hit window survives the process" ($left.Count -eq 0)
+  Write-Host ("      [os] live samples=$liveSamples visible samples=$visibleSamples lastVisibleWhileAlive=$lastVisible visibleAfterExit=$leftAlive")
+  Check "S2.5 the OS saw the hit window raised during the cycles and gone at the end (live instrument)" `
+    (($liveSamples -ge 1) -and ($visibleSamples -ge 1) -and ($lastVisible -eq 0) -and ($leftAlive -eq 0))
 }
 
 # ---------------------------------------------------------------- S3
@@ -286,7 +321,7 @@ function Invoke-S3 {
   Write-Host "     foreground precondition, and must not steal focus to do its job)"
   Stop-AllSidecar
   $run = Start-Sidecar @('--assume-explorer-foreground') 's3'
-  if ($run.Process.HasExited) { Check "S3.0 app alive" $false; return }
+  if ($run.Process.HasExited) { Expect -11; Check "S3.0 app alive" $false; return }
 
   $lines = Get-LogLines $run.Log
   Check "S3.0 foreground check disabled for this run and logged" (Test-Log $lines 'foreground check DISABLED \(--assume-explorer-foreground\)')
@@ -312,6 +347,15 @@ function Invoke-S3 {
   $lines = Get-LogLines $run.Log
   Check "S3.4 trigger release requests release (insurance #2)" (Test-Log $lines 'release requested: trigger released')
   Check "S3.5 hidden after 250 ms grace" (Test-Log $lines 'hit layer HIDDEN \(250 ms grace elapsed\)')
+  # P0-4 (2026-10-02): every check above reads the app's own log file, which proves what the
+  # app SAYS. The runner now asks the OS directly, at exactly the moment the property has to
+  # hold (after the 250 ms grace hide), so a layer whose Hide() became a no-op is caught here
+  # even though its log line still appears. Measured here, asserted as S3.11 at the end of the
+  # section so that no check id below it has to be renumbered.
+  $postGrace = @([Probe]::HitWindows([uint32]$run.Process.Id))
+  $graceWindows = $postGrace.Count
+  $graceVisible = @($postGrace | Where-Object { $_ -match 'visible=True' }).Count
+  $graceHidden = ($graceWindows -ge 1) -and ($graceVisible -eq 0)
 
   # -- mouse up drives insurance #1
   [Probe]::Mouse([Probe]::LEUP) | Out-Null
@@ -356,6 +400,11 @@ function Invoke-S3 {
   $after = Count-Log $lines 'hit layer SHOWN'
   Check "S3.10 no further raise after kill switch ($before -> $after)" ($after -eq $before)
 
+  # P0-4: the OS measurement taken after the 250 ms grace hide, asserted here so that this
+  # section's ids stay contiguous (S3.1-S3.11) and nothing below has to be renumbered.
+  Write-Host ("      [os] after the grace hide: $graceWindows hit window(s) still existing, visible=$graceVisible")
+  Check "S3.11 the OS agrees the layer is hidden after the 250 ms grace (not just the log line)" $graceHidden
+
   Stop-Process -Id $run.Process.Id -Force
   Start-Sleep -Milliseconds 400
 }
@@ -390,6 +439,7 @@ function Invoke-S4 {
   Write-Host ""
   Write-Host "=== S4 synthetic OLE drag onto the raised hit layer ==="
   if ($DragSim -eq '' -or -not (Test-Path -LiteralPath $DragSim)) {
+    Expect -8
     Inconclusive "S4 needs -DragSim <path to DragSim.exe>; drop delivery not verified"
     return
   }
@@ -411,6 +461,13 @@ function Invoke-S4 {
   $drag = Start-Process -FilePath $DragSim -ArgumentList @('--drag', $sample, "$sx", "$sy", "$cx", "$cy") -Wait -PassThru -RedirectStandardOutput (Join-Path $LogDir 's4-drag.out.txt') -RedirectStandardError (Join-Path $LogDir 's4-drag.err.txt')
   Write-Host "      drag exit=$($drag.ExitCode)"
   Start-Sleep -Milliseconds 800
+  # P0-4 (2026-10-02): S4.4 proves the app WROTE "hidden after the drop". This is the same
+  # property asked of the OS, at the moment it has to hold. Asserted as S4.8 at the end of the
+  # section so nothing below this line has to be renumbered.
+  $postDrop = @([Probe]::HitWindows([uint32]$run.Process.Id))
+  $dropWindows = $postDrop.Count
+  $dropVisible = @($postDrop | Where-Object { $_ -match 'visible=True' }).Count
+  $dropHidden = ($dropWindows -ge 1) -and ($dropVisible -eq 0)
 
   $lines = Get-LogLines $run.Log
   # MEASURED 2026-10-01: once RegisterDragDrop is in place, WM_DROPFILES never arrives.
@@ -432,6 +489,9 @@ function Invoke-S4 {
   $mtimeAfter = (Get-Item -LiteralPath $sample).LastWriteTimeUtc
   Check "S4.6 source file untouched: same SHA256" ($before.Hash -eq $after.Hash)
   Check "S4.7 source file untouched: same mtime" ($mtimeBefore -eq $mtimeAfter)
+  # P0-4: the OS measurement taken right after the drop resolved (see the capture site).
+  Write-Host ("      [os] after the drop: $dropWindows hit window(s) still existing, visible=$dropVisible")
+  Check "S4.8 the OS agrees the layer is hidden after the drop resolved (not just the log line)" $dropHidden
 
   if (-not $run.Process.HasExited) { Stop-Process -Id $run.Process.Id -Force }
   Start-Sleep -Milliseconds 400
@@ -535,16 +595,18 @@ if ($sections.Count -eq 0) { Write-Host "no sections requested"; exit 2 }
 Write-Host "verify-m1a: exe=$Exe sections=$($sections -join ',') logdir=$LogDir"
 
 foreach ($s in $sections) {
+  # P1-2: each section's check count, mirrored here. S3 and S4 can register fewer checks when
+  # a precondition fails, and those branches correct the total themselves (see Expect -N).
   switch ($s) {
-    'S0'  { Invoke-S0 }
-    'S1'  { Invoke-S1 }
-    'S2'  { Invoke-S2 }
-    'S3'  { Invoke-S3 }
-    'S3b' { Invoke-S3b }
-    'S4'  { Invoke-S4 }
-    'S4a' { Invoke-S4m 'S4a' $S4WindowSeconds }
-    'S4b' { Invoke-S4m 'S4b' $S4WindowSeconds }
-    'S5'  { Invoke-S5 }
+    'S0'  { Expect 2;  Invoke-S0 }
+    'S1'  { Expect 11; Invoke-S1 }
+    'S2'  { Expect 5;  Invoke-S2 }
+    'S3'  { Expect 12; Invoke-S3 }
+    'S3b' { Expect 5;  Invoke-S3b }
+    'S4'  { Expect 9;  Invoke-S4 }
+    'S4a' { Expect 2;  Invoke-S4m 'S4a' $S4WindowSeconds }
+    'S4b' { Expect 4;  Invoke-S4m 'S4b' $S4WindowSeconds }
+    'S5'  { Expect 4;  Invoke-S5 }
     default { Write-Host "unknown section: $s" }
   }
 }
@@ -560,7 +622,16 @@ if ($EvidenceDir -ne '') {
 }
 
 $fail = @($results | Where-Object { -not $_.Pass }).Count
+$registered = $results.Count + $inconclusive.Count
 if ($results.Count -eq 0) { Write-Host "FATAL: no checks ran - refusing to report success"; exit 2 }
+# P1-2: the sections promise a number of checks; anything below it means a block silently did
+# not register (the failure mode behind the 19-check numbering drift this project already hit).
+Write-Host "checks=$registered pass=$($results.Count - $fail) fail=$fail inconclusive=$($inconclusive.Count) expected=$($script:ExpectedChecks)"
+if ($registered -ne $script:ExpectedChecks) {
+  Write-Host "FATAL: registered $registered checks but the selected sections promise $($script:ExpectedChecks)."
+  Write-Host "       A check block silently did not register (P1-2). Refusing to report a result."
+  exit 1
+}
 Write-Host ""
 Write-Host "M1a summary: $($results.Count - $fail)/$($results.Count) checks passed ($Section)"
 if ($inconclusive.Count -gt 0) {

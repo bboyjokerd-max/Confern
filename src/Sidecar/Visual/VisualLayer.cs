@@ -36,11 +36,24 @@ internal sealed class VisualLayer : ILayeredSurface
     /// <summary>設定頁按下「儲存」後，由 <see cref="RequestSettingsApply"/> 叫回主執行緒。</summary>
     public event Action? SettingsChanged;
     private System.Threading.Timer? _tickTimer;
-    private bool _visible;
     private int _frames;
 
     public IntPtr Handle => _hwnd;
-    public bool IsVisible => _visible;
+
+    /// <summary>
+    /// 「現在畫面上看不看得見」**一律問作業系統**，不再回傳自己記錄的 bool。
+    ///
+    /// 為什麼（2026-10-02 可證偽性稽核，P0-2）：舊版是 `private bool _visible`，於是
+    /// 「輪盤收起來了」這整族斷言讀到的只是**我們自己剛剛寫下的意圖**——`ShowWindow(SW_HIDE)`
+    /// 被拿掉、或 `UpdateLayeredWindow` 失敗留下一個可見視窗，它都會照樣說 false。
+    /// 而那個失效模式（覆蓋層卡在使用者桌面上）正是本產品最災難的一種；
+    /// 同一份程式碼裡的 <see cref="HitLayer.IsVisible"/> 老老實實問 OS，兩者不該有兩種標準。
+    ///
+    /// 這一改讓 <see cref="ReleaseGuard"/> 的收層判斷、<c>--wheel-payload</c> 的
+    /// `wheelVisibleAfter=`、以及淡出斷言全部變成對**外部狀態**的斷言。
+    /// </summary>
+    public bool IsVisible => Native.IsWindowVisible(_hwnd);
+
     public int Frames => _frames;
     /// <summary>診斷用：週期回呼的計時器是否還活著（null＝已被停掉）。</summary>
     public bool TickAlive => _tickTimer != null;
@@ -151,15 +164,16 @@ internal sealed class VisualLayer : ILayeredSurface
             Native.ReleaseDC(IntPtr.Zero, screenDc);
         }
 
-        _visible = true;
         _frames++;
     }
 
     public void Hide()
     {
-        if (!_visible) return;
+        // 判斷式也改用 OS 狀態：舊版讀自記的 `_visible`，於是「Show 途中丟例外」
+        // （視窗已經被 SetWindowPos 顯示、但旗標還沒設起來）會讓 Hide() 直接返回，
+        // 留下一個沒有人收得掉的覆蓋層——正好是這條路徑最該防的事。
+        if (!IsVisible) return;
         Native.ShowWindow(_hwnd, Native.SW_HIDE);
-        _visible = false;
     }
 
     /// <summary>
@@ -185,7 +199,6 @@ internal sealed class VisualLayer : ILayeredSurface
         if (msg == Native.WM_APP_FORCE_HIDE && Instances.TryGetValue(hWnd, out VisualLayer? layer))
         {
             Native.ShowWindow(hWnd, Native.SW_HIDE);
-            layer._visible = false;
             layer._evidence.Line($"visual layer HIDDEN ({Native.HideReasonText(wParam.ToInt32())})");
             return IntPtr.Zero;
         }
