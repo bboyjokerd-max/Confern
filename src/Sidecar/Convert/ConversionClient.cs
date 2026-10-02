@@ -146,7 +146,7 @@ internal sealed class ConversionClient : IDisposable
 
     private static string WorkerLogPath() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Sidecar", "worker.log");
+        ProductInfo.Name, "worker.log");
 
     /// <summary>
     /// 每收到一則 worker 訊息就更新快照。跑在 PipeLink 的讀取任務上，所以

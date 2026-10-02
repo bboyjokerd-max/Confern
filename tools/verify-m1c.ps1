@@ -1,6 +1,6 @@
 # M1c verification: format knowledge and codec capability probing.
 #
-#   -Exe <path to Sidecar.exe>   -Section S9   -LogDir <dir>
+#   -Exe <path to Confern.exe>   -Section S9   -LogDir <dir>
 #
 # WHAT THIS PROVES, AND WHAT IT DOES NOT
 #   1. The codec layer answers "what can this machine really do" by MEASURING it:
@@ -51,7 +51,7 @@ function Test-LogCase([string[]]$l, [string]$p) { return [bool]($l | Select-Stri
 function Count-Log([string[]]$l, [string]$p) { return @($l | Select-String -Pattern $p -CaseSensitive).Count }
 
 function Stop-AllSidecar {
-  Get-Process -Name Sidecar -ErrorAction SilentlyContinue | ForEach-Object {
+  Get-Process -Name Confern -ErrorAction SilentlyContinue | ForEach-Object {
     try { $_.Kill(); $_.WaitForExit(2000) | Out-Null } catch { }
   }
   Start-Sleep -Milliseconds 300
@@ -247,8 +247,8 @@ function Invoke-S9 {
   }
 
   Stop-AllSidecar
-  Check "S9.16 no Sidecar process is left behind" `
-    (@(Get-Process -Name Sidecar -ErrorAction SilentlyContinue).Count -eq 0)
+  Check "S9.16 no Confern process is left behind" `
+    (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0)
 }
 
 # ------------------------------------------------------------------ main

@@ -81,7 +81,7 @@ internal static class SettingsStrings
         [ZhHant] = new(StringComparer.Ordinal)
         {
             // ---- 視窗外框 ----
-            ["window.title"] = "Sidecar 設定",
+            ["window.title"] = "Confern 設定",
             ["window.subtitle"] = "規格 §8 的九個設定。變更按下「儲存」後才寫入檔案。",
 
             // ---- 頁面 ----
@@ -167,7 +167,7 @@ internal static class SettingsStrings
         },
         [En] = new(StringComparer.Ordinal)
         {
-            ["window.title"] = "Sidecar Settings",
+            ["window.title"] = "Confern Settings",
             ["window.subtitle"] = "The nine settings of spec section 8. Changes are written only when you press Save.",
 
             ["page.behaviour"] = "Behaviour",

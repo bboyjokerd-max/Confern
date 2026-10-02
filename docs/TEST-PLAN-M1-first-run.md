@@ -17,20 +17,20 @@
 2. 或雙擊桌面的 `啟動 Tangerine Converter.cmd`
 
 畫面不會出現任何視窗——這是正常的（本程式沒有主視窗，只在拖曳時出現輪盤）。
-若想確認它活著：工作管理員應該看得到 `Sidecar.exe`。
+若想確認它活著：工作管理員應該看得到 `Confern.exe`。
 
 **日誌**（有問題時看這兩個檔案）：
 
 | 檔案 | 內容 |
 |------|------|
-| `%LOCALAPPDATA%\Sidecar\logs\sidecar.log` | UI 行程：輪盤顯示、放手、轉檔進度 |
-| `%LOCALAPPDATA%\Sidecar\worker.log` | 轉檔行程：每個檔案的解碼／編碼／耗時 |
+| `%LOCALAPPDATA%\Confern\logs\confern.log` | UI 行程：輪盤顯示、放手、轉檔進度 |
+| `%LOCALAPPDATA%\Confern\worker.log` | 轉檔行程：每個檔案的解碼／編碼／耗時 |
 
 **怎麼用**：
 > 在檔案總管**拖著檔案**的時候**按住空白鍵** → 輪盤在游標處出現 →
 > 移到目標格式（或用方向鍵）→ **放開滑鼠**（或按 Enter）→ 檔案就出現在原檔旁邊。
 
-**結束**：工作管理員結束 `Sidecar.exe`（設定頁還沒做，所以沒有「結束」選項）。
+**結束**：工作管理員結束 `Confern.exe`（設定頁已經有了，但**托盤還在待辦 4**，所以目前仍沒有「結束」選項）。
 
 ---
 
@@ -68,7 +68,7 @@
 |---|--------|-----------|
 | **14** | 用手機**直拍**的照片（EXIF 有方向標記）轉成 PNG | 我們實測過：若不做處理，PNG 會是**躺著**的（PNG 檢視器不看 EXIF 方向）。現在應該要**站正** |
 | **15** | 批次轉 8 張，其中 2 張故意用壞檔 | 應該顯示 `✓ 6 / ✗ 2`，而且**不會**自動彈出清單干擾你 |
-| **16** | 轉檔中看一下 CPU／風扇 | 轉檔在**獨立行程**；轉完應該自己消失（工作管理員不該殘留多個 Sidecar.exe） |
+| **16** | 轉檔中看一下 CPU／風扇 | 轉檔在**獨立行程**；轉完應該自己消失（工作管理員不該殘留多個 Confern.exe） |
 | **17** | 把一個**很大的圖**（例如 10 MB 以上）轉成 PNG | 記下大概幾秒。我們量到 11.6 MB／20.7 MP → 約 1.3 秒 |
 
 ---
@@ -98,7 +98,7 @@ certutil -hashfile "C:\path\to\photo.jpg" SHA256
 | **WebP 輸出** | 只支援 WebP **輸入**（本機沒有 WebP 編碼器，打包 libwebp 是後續工作）。扇區不會出現 WEBP |
 | **GIF 輸出** | 規格沒有宣告，所以**刻意不提供**（本機其實做得到，但那是多承諾） |
 | **HEIC 輸出** | 不做（不重新散布 HEVC 編碼器） |
-| **設定頁（UI）** | 還沒有。要改 JPG 品質等設定，請直接編輯 `%LOCALAPPDATA%\Sidecar\settings.json`（見附錄 C） |
+| **設定頁（UI）** | **有**：執行 `Confern.exe --settings-ui`（只開設定頁、關掉就結束，不啟動覆蓋層）。也可以直接編輯 `%LOCALAPPDATA%\Confern\settings.json`（見附錄 C）。托盤入口屬待辦 4 |
 | **失敗清單展開** | `✓ 8 / ✗ 2` 目前只顯示一行；**點開看清單**還沒做（失敗訊息在日誌裡） |
 | **開機自動啟動** | 還沒接上登錄檔 |
 | **雲端檔案（OneDrive 佔位檔）** | 有 30 秒逾時保護，但沒有佔位檔可以測 |
@@ -107,7 +107,7 @@ certutil -hashfile "C:\path\to\photo.jpg" SHA256
 
 ## 附錄 C：設定檔（沒有 UI 時的替代）
 
-路徑：`%LOCALAPPDATA%\Sidecar\settings.json`（不存在時就是用規格預設值）
+路徑：`%LOCALAPPDATA%\Confern\settings.json`（不存在時就是用規格預設值）
 
 ```json
 {
@@ -133,7 +133,7 @@ certutil -hashfile "C:\path\to\photo.jpg" SHA256
 最有用的三種紀錄：
 
 1. **哪一項不過**（寫編號就好）＋你看到什麼。
-2. 該次操作的日誌片段：`%LOCALAPPDATA%\Sidecar\logs\sidecar.log` 最後 50 行。
+2. 該次操作的日誌片段：`%LOCALAPPDATA%\Confern\logs\confern.log` 最後 50 行。
 3. 如果可以重現：**具體步驟**（拖幾個檔、什麼格式、有沒有按空白鍵）。
 
 ---

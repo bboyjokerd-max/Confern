@@ -17,7 +17,7 @@ namespace Sidecar;
 /// </summary>
 internal sealed class VisualLayer : IDisposable
 {
-    private const string ClassName = "SidecarVisualLayer";
+    private const string ClassName = ProductInfo.Name + "VisualLayer";
     private static Native.WndProcDelegate? _proc;   // 保留委派，避免被 GC 回收（同 HitLayer）
 
     private readonly Evidence _evidence;
@@ -57,7 +57,7 @@ internal sealed class VisualLayer : IDisposable
         _hwnd = Native.CreateWindowExW(
             Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT | Native.WS_EX_TOOLWINDOW |
             Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST,
-            ClassName, "SidecarVisualLayer", Native.WS_POPUP,
+            ClassName, ClassName, Native.WS_POPUP,
             0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, Native.GetModuleHandleW(null), IntPtr.Zero);
 
         if (_hwnd == IntPtr.Zero)

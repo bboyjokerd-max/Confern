@@ -131,11 +131,11 @@ internal static class Program
 
         // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
         // 因此這裡不留下任何需要清理的檔案鎖。
-        using var mutex = new Mutex(initiallyOwned: true, @"Local\Sidecar.SingleInstance", out bool isFirst);
+        using var mutex = new Mutex(initiallyOwned: true, $@"Local\{ProductInfo.Name}.SingleInstance", out bool isFirst);
         if (!isFirst)
         {
             Native.AttachParentConsole();
-            Console.Error.WriteLine("Sidecar is already running.");
+            Console.Error.WriteLine($"{ProductInfo.Name} is already running.");
             return 3;
         }
 
@@ -151,7 +151,7 @@ internal sealed class Options
 {
     public const string Usage =
         """
-        Sidecar (M1a)
+        Confern (M1a)
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
@@ -189,7 +189,7 @@ internal sealed class Options
                                     glass backdrop source (default screen = the real desktop);
                                     dark/light use a synthetic wallpaper so visual checks are
                                     reproducible and never touch the user's screen
-          --settings-file <path>    use this settings file (default %LOCALAPPDATA%\Sidecar\settings.json)
+          --settings-file <path>    use this settings file (default %LOCALAPPDATA%\Confern\settings.json)
           --settings-set k=v;k=v    change settings and save them, then exit (spec 8); keys that are not
                                     accepted are reported and exit with code 4 instead of being ignored
           --settings-probe <path>   load that settings file, print the clamped result and exit
@@ -258,7 +258,7 @@ internal sealed class Options
     public string SettingsProbe = "";
     /// <summary>
     /// --settings-file <path>：這次執行要用的設定檔（一般執行與 `--settings-set` 都用它）。
-    /// 空＝`%LOCALAPPDATA%\Sidecar\settings.json`。存在的理由＝驗證必須能**隔離使用者的真實設定**，
+    /// 空＝`%LOCALAPPDATA%\Confern\settings.json`。存在的理由＝驗證必須能**隔離使用者的真實設定**，
     /// 否則一個改過設定的人會讓「預設值」的斷言隨環境浮動。
     /// </summary>
     public string SettingsFile = "";
@@ -438,7 +438,7 @@ internal static class App
     public static int Run(Options opt)
     {
         using var evidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
-        evidence.Line($"Sidecar {Program.VersionText()} starting: trigger=VK 0x{opt.TriggerKey:X2} " +
+        evidence.Line($"{ProductInfo.Name} {Program.VersionText()} starting: trigger=VK 0x{opt.TriggerKey:X2} " +
                       $"dumpMonitors={opt.DumpMonitors} raise={opt.ForceRaiseHitLayer} " +
                       $"cycleTest={opt.CycleTest} assumeExplorerForeground={opt.AssumeExplorerForeground} " +
                       $"log={evidence.Path}");
@@ -521,7 +521,7 @@ internal static class App
         using var progressLayer = new VisualLayer(evidence);
         using var progress = new ProgressPresenter(evidence, progressLayer, opt.ProgressTrace);
         // runner 一定要釋放：它擁有 worker 行程與管道（Dispose 會送 shutdown 並確保 worker 收掉）
-        using var runner = new ConversionRunner(Environment.ProcessPath ?? "Sidecar.exe", evidence.Line, progress);
+        using var runner = new ConversionRunner(Environment.ProcessPath ?? $"{ProductInfo.Name}.exe", evidence.Line, progress);
         // 格式能力探測也要**預先做**：第一次使用 WPF/WIC 會載入 PresentationCore，
         // 若等到酬載進來才做，那筆成本會直接落在「酬載 → 顯示」的 100 ms 預算上。
         var catalog = BuildCatalog(evidence);
@@ -924,7 +924,7 @@ internal static class App
         // 所以沒給路徑時一律用暫存檔；自己產生的暫存檔才清掉，操作者指定的路徑不動。
         bool tempPath = string.IsNullOrEmpty(opt.SettingsFile);
         string path = tempPath
-            ? Path.Combine(Path.GetTempPath(), "sidecar-settings-selftest.json")
+            ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-settings-selftest.json")
             : opt.SettingsFile;
         if (tempPath && File.Exists(path)) File.Delete(path);   // 從乾淨的預設值開始，斷言才有意義
         Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
@@ -987,7 +987,7 @@ internal static class App
     internal static int RunSettingsUiDump(Options opt, Evidence evidence)
     {
         string path = string.IsNullOrEmpty(opt.SettingsFile)
-            ? Path.Combine(Path.GetTempPath(), "sidecar-settings-dump.json")
+            ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-settings-dump.json")
             : opt.SettingsFile;
         Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
         var lines = new ConcurrentQueue<string>();
@@ -1175,7 +1175,7 @@ internal static class App
 
         // 儀器誠實性：探測必須能**回報失敗**。用一個保證不存在的路徑當反向對照——
         // 「永遠回報 Ok」的探測器比沒有探測器更危險（它會讓每個扇區都看起來可用）。
-        string missing = Path.Combine(Path.GetTempPath(), $"sidecar-missing-{Guid.NewGuid():N}.png");
+        string missing = Path.Combine(Path.GetTempPath(), $"{ProductInfo.Slug}-missing-{Guid.NewGuid():N}.png");
         DecodeOutcome missingOutcome = registry.ProbeDecode(missing);
         Report($"decode probe reports a missing file as Unreadable (got {missingOutcome.Status})",
                missingOutcome.Status == DecodeStatus.Unreadable);

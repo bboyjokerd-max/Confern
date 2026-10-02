@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory=$true)][string]$Folder,
-  [string]$LogDir = "$env:LOCALAPPDATA\Sidecar"
+  [string]$LogDir = "$env:LOCALAPPDATA\Confern"
 )
 
 # Human-facing self-check after a test session. ASCII-only output on purpose
@@ -27,7 +27,7 @@ Get-ChildItem -LiteralPath $Folder -File -Recurse -ErrorAction SilentlyContinue 
 "   or re-run this after converting a second time - only converted files should appear above.)"
 
 "=== 4. conversion log (last 25 conversion lines) ==="
-$uiLog = Join-Path $LogDir 'logs\sidecar.log'
+$uiLog = Join-Path $LogDir 'logs\confern.log'
 $workerLog = Join-Path $LogDir 'worker.log'
 foreach ($log in @($uiLog, $workerLog)) {
   if (-not (Test-Path -LiteralPath $log)) { "  (no $log yet)"; continue }
@@ -46,6 +46,6 @@ if (Test-Path -LiteralPath $uiLog) {
 }
 
 "=== 6. leftover worker processes ==="
-$procs = @(Get-Process -Name Sidecar -ErrorAction SilentlyContinue)
-if ($procs.Count -eq 0) { "  (no Sidecar process running)" }
+$procs = @(Get-Process -Name Confern -ErrorAction SilentlyContinue)
+if ($procs.Count -eq 0) { "  (no Confern process running)" }
 else { $procs | ForEach-Object { "  pid=$($_.Id)  started=$($_.StartTime)  mem=$([Math]::Round($_.WorkingSet64/1MB,1)) MB" } }

@@ -66,7 +66,7 @@ public static class Probe {
       uint wpid; GetWindowThreadProcessId(h, out wpid);
       if (pid != 0 && wpid != pid) return true;
       var sb = new StringBuilder(256); GetClassNameW(h, sb, 256);
-      if (sb.ToString() != "SidecarHitLayer") return true;
+      if (sb.ToString() != "ConfernHitLayer") return true;
       RECT r; GetWindowRect(h, out r);
       found.Add(string.Format("{0},{1},{2}x{3} visible={4} exstyle=0x{5:X} pid={6}",
         r.L, r.T, r.R - r.L, r.B - r.T, IsWindowVisible(h), GetWindowLongW(h, -20), wpid));
@@ -151,7 +151,7 @@ function Test-Log([string[]]$lines, [string]$pattern) { return [bool]($lines | S
 function Count-Log([string[]]$lines, [string]$pattern) { return @($lines | Select-String -Pattern $pattern).Count }
 
 function Stop-AllSidecar {
-  Get-Process Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+  Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Milliseconds 500
 }
 

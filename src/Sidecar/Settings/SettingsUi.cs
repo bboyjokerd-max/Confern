@@ -217,7 +217,7 @@ internal static class SettingsUi
         var thread = new Thread(UiThreadMain)
         {
             IsBackground = true,                                  // 背景執行緒：不阻擋行程結束
-            Name = "sidecar-settings-ui"
+            Name = ProductInfo.Slug + "-settings-ui"
         };
         thread.SetApartmentState(ApartmentState.STA);              // WPF 必須是 STA
         thread.Start();

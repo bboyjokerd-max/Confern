@@ -48,7 +48,7 @@ $script:counter = 0
 # The user's own settings file must survive this suite untouched: if a test can
 # change the real configuration, every later run of every suite becomes a
 # different experiment (and "the defaults" stop meaning anything).
-$realSettings = Join-Path $env:LOCALAPPDATA 'Sidecar\settings.json'
+$realSettings = Join-Path $env:LOCALAPPDATA 'Confern\settings.json'
 $realBefore = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
 
 function Invoke-Sidecar([string[]]$a, [string]$tag) {
@@ -163,7 +163,7 @@ $uiWork = Join-Path $Work 'ui'
 New-Item -ItemType Directory -Force -Path $uiWork | Out-Null
 $uiSettings = Join-Path $uiWork 'settings.json'
 $uiLog = Join-Path $uiWork 'selftest.log'
-Get-Process -Name Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name Confern -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-selftest', '--settings-file', $uiSettings, '--quiet', '--log', $uiLog) -PassThru -WindowStyle Hidden
@@ -181,7 +181,7 @@ Check 'S14.27 the page thread logs through the main thread, not around it' (
   $uiText -match 'settings ui: open requested') ''
 
 $appLog = Join-Path $uiWork 'in-app.log'
-Get-Process -Name Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name Confern -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 $app = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-live', '--quiet', '--log', $appLog) -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 5

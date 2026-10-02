@@ -14,7 +14,7 @@ namespace Sidecar;
 /// </summary>
 internal sealed class HitLayer : IDisposable
 {
-    private const string ClassName = "SidecarHitLayer";
+    private const string ClassName = ProductInfo.Name + "HitLayer";
 
     /// hwnd → 所屬實例與螢幕索引（靜態 WndProc 需要分派到正確的視窗）
     private static readonly Dictionary<IntPtr, (HitLayer Owner, int Index)> Windows = new();
@@ -88,7 +88,7 @@ internal sealed class HitLayer : IDisposable
         {
             IntPtr hwnd = Native.CreateWindowExW(
                 Native.WS_EX_LAYERED | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST,
-                ClassName, $"Sidecar hit #{m.Index}", Native.WS_POPUP,
+                ClassName, $"{ProductInfo.Name} hit #{m.Index}", Native.WS_POPUP,
                 m.Bounds.Left, m.Bounds.Top, m.Width, m.Height,
                 IntPtr.Zero, IntPtr.Zero, hInst, IntPtr.Zero);
 

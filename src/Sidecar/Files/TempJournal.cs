@@ -27,7 +27,7 @@ internal sealed class TempJournal
     }
 
     public static string DefaultPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sidecar", "temps.json");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductInfo.Name, "temps.json");
 
     public void Register(string tempPath)
     {

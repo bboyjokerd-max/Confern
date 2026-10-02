@@ -129,7 +129,7 @@ function Measure-LogGapMs([string[]]$l, [string]$from, [string]$to) {
 }
 
 function Stop-AllSidecar {
-  Get-Process Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+  Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Milliseconds 500
 }
 
@@ -189,8 +189,8 @@ function Invoke-S6 {
   if ($proc.HasExited) { Check "S6.0 app alive" $false; return }
   $pid32 = [uint32]$proc.Id
 
-  $hit = @([P2]::WindowsOfClass('SidecarHitLayer', $pid32))
-  $vis = @([P2]::WindowsOfClass('SidecarVisualLayer', $pid32))
+  $hit = @([P2]::WindowsOfClass('ConfernHitLayer', $pid32))
+  $vis = @([P2]::WindowsOfClass('ConfernVisualLayer', $pid32))
   Write-Host "      hit  : $($hit -join ' | ')"
   Write-Host "      vis  : $($vis -join ' | ')"
 
@@ -248,7 +248,7 @@ function Invoke-S6 {
 
   $fg = [P2]::ForegroundInfo()
   Write-Host "      foreground: $fg"
-  Check "S6.10 neither layer took the foreground" (($fg -notmatch 'SidecarHitLayer') -and ($fg -notmatch 'SidecarVisualLayer'))
+  Check "S6.10 neither layer took the foreground" (($fg -notmatch 'ConfernHitLayer') -and ($fg -notmatch 'ConfernVisualLayer'))
 
   $lines = Get-LogLines $log
   $ms = $null
@@ -262,7 +262,7 @@ function Invoke-S6 {
 
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Start-Sleep -Milliseconds 400
-  $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
+  $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S6.13 no visual layer window survives the process" ($left.Count -eq 0)
 }
 
@@ -304,7 +304,7 @@ function Invoke-S7 {
   $proc.Refresh()
   if ($proc.HasExited) { Check "S7.3 app alive during the rectangle run" $false; return }
   $pid32 = [uint32]$proc.Id
-  $vis = @([P2]::WindowsOfClass('SidecarVisualLayer', $pid32))
+  $vis = @([P2]::WindowsOfClass('ConfernVisualLayer', $pid32))
   Check "S7.3 exactly one visual layer window" ($vis.Count -eq 1)
 
   $pat = 'hwnd=0x([0-9A-F]+) (-?\d+),(-?\d+),(\d+)x(\d+) visible=(True|False) exstyle=0x([0-9A-F]+)'
@@ -332,7 +332,7 @@ function Invoke-S7 {
   Start-Sleep -Milliseconds 1800
   $proc.Refresh()
   if ($proc.HasExited) { Check "S7.9 app alive during the flip run" $false; return }
-  $vis = @([P2]::WindowsOfClass('SidecarVisualLayer', [uint32]$proc.Id))
+  $vis = @([P2]::WindowsOfClass('ConfernVisualLayer', [uint32]$proc.Id))
   if ($vis.Count -eq 1 -and $vis[0] -match $pat) {
     $fx = [int]$Matches[2]; $fw = [int]$Matches[4]
     # Without a flip the origin would be cursor - PadPx; a flip puts it far to the left.
@@ -427,7 +427,7 @@ function Invoke-S7 {
   Check "S7.35 outside the wheel keeps the selection" (Test-Log $lines 'outside the wheel does not move the selection')
 
   Stop-AllSidecar
-  $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
+  $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S7.36 no visual layer window survives the runs" ($left.Count -eq 0)
 }
 
@@ -508,7 +508,7 @@ function Invoke-S8([int]$Window) {
   $proc.Refresh()
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Start-Sleep -Milliseconds 500
-  $left = @([P2]::WindowsOfClass('SidecarVisualLayer', 0))
+  $left = @([P2]::WindowsOfClass('ConfernVisualLayer', 0))
   Check "S8.12 no visual layer window survives" ($left.Count -eq 0)
 
   # Observation only, NOT asserted: which path delivered the file list? M1d needs one

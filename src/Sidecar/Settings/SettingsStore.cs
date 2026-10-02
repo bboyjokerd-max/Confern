@@ -4,7 +4,7 @@ namespace Sidecar;
 
 /// <summary>
 /// 設定（規格 §8）。預設值就是規格值——使用者不開設定檔也有正確行為。
-/// 檔案位置：`%LOCALAPPDATA%\Sidecar\settings.json`。
+/// 檔案位置：`%LOCALAPPDATA%\Confern\settings.json`。
 /// </summary>
 internal sealed record Settings
 {
@@ -70,7 +70,7 @@ internal static class SettingsStore
     };
 
     public static string DefaultPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sidecar", "settings.json");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductInfo.Name, "settings.json");
 
     /// <summary>一行說完目前生效的設定。日誌、probe、設定頁摘要共用，避免三份不同說法。</summary>
     public static string Describe(Settings s) =>

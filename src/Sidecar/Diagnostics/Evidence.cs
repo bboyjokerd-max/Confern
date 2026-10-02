@@ -16,8 +16,8 @@ internal sealed class Evidence : IDisposable
     {
         string dir = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Sidecar", "logs");
-        return System.IO.Path.Combine(dir, "sidecar.log");
+            ProductInfo.Name, "logs");
+        return System.IO.Path.Combine(dir, ProductInfo.Slug + ".log");
     }
 
     public Evidence(string path, bool quiet)
@@ -26,7 +26,7 @@ internal sealed class Evidence : IDisposable
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
         _writer = new StreamWriter(path, append: false) { AutoFlush = true };
         _quiet = quiet;
-        Line($"=== Sidecar session {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={Environment.ProcessId} ===");
+        Line($"=== {ProductInfo.Name} session {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={Environment.ProcessId} ===");
     }
 
     /// <summary>逐行事件（可稽核的證據）。</summary>

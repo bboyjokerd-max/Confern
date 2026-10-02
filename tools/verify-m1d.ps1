@@ -207,7 +207,7 @@ if ($offeredLine) {
 }
 
 # the whole point of the worker split: it must never time out
-$workerLog = Join-Path $env:LOCALAPPDATA 'Sidecar\worker.log'
+$workerLog = Join-Path $env:LOCALAPPDATA 'Confern\worker.log'
 $before = if (Test-Path -LiteralPath $workerLog) { (Get-Item -LiteralPath $workerLog).Length } else { 0 }
 $payloadLog = Join-Path $logDir 'payload.log'
 $p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $srcJpg, '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
@@ -237,7 +237,7 @@ if ($hideLines.Count -ge 2) {
 }
 Check 'S12.10e no worker timeout (regression: pipe deadlock)' (-not ($payloadText -match 'timed out')) ''
 Check 'S12.10f worker reported ready' ((Get-Content -LiteralPath $workerLog -Encoding UTF8 | Select-String -Pattern 'worker: ready protocolVersion=1') -ne $null) ''
-Check 'S12.10g no leftover worker process' (@(Get-Process -Name Sidecar -ErrorAction SilentlyContinue).Count -eq 0) ''
+Check 'S12.10g no leftover worker process' (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0) ''
 
 # the most natural user action: select a format, then RELEASE the mouse. It needs a real
 # gesture, so this asserts the wiring through the very same Released event (spec 4.3).

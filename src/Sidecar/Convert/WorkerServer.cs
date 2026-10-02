@@ -15,7 +15,7 @@ internal static class WorkerProtocol
 {
     public const int Version = 1;
 
-    public static string NewPipeName() => "sidecar-" + Guid.NewGuid().ToString("N");
+    public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
     public static readonly JsonSerializerOptions Json = new()
     {

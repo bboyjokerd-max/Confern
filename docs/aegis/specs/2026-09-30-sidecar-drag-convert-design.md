@@ -1,10 +1,10 @@
-# Sidecar（工作代號）— 拖曳即轉檔（Windows）設計規格
+# Confern（原工作代號 Sidecar）— 拖曳即轉檔（Windows）設計規格
 
 - Date: `2026-09-30`
 - Status: `draft — 待使用者審閱`
 - Kind: Design Spec（高複雜度、架構與互動決策、行為有歧義）
 - 依據：`00-teardown-and-windows-port.md`（解構與路線比較）
-- 工作代號：**Sidecar**（輸出寫在原檔旁邊 → sidecar）。**可更換**，不對外定名前不影響任何實作。
+- 產品名稱：**Confern**（2026-10-02 使用者定案；原工作代號 Sidecar 取自「輸出寫在原檔旁邊 → sidecar」）。單一擁有者＝`src/Sidecar/ProductInfo.cs`；C# 命名空間仍是歷史名稱 `Sidecar`。
 
 > **本規格的地位**：這是「要做什麼、行為如何、如何驗收」的權威文件。實作計畫（`docs/aegis/plans/`）由 `writing-plans` 從本文件產出，不得在此之外自行增加行為。
 
@@ -528,4 +528,4 @@ Existence Check
 | 2 | 官網兩網域數字矛盾（188 vs 75 選項） | 無（不照抄功能數） | 不需解 |
 | 3 | IME 開啟時空白鍵是否被輸入法攔截 | 觸發鍵可用性 | M0.5 一併實測 |
 | 4 | 長路徑感知對舊版 Windows 的相容 | 邊緣情境 | 實作時以 manifest 處理 |
-| 5 | 產品正式名稱 | 品牌 | 使用者定案前用工作代號 Sidecar |
+| 5 | 產品正式名稱 | 品牌 | **已定案 2026-10-02：Confern**（使用者選定；con＋fern 的梗） |

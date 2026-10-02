@@ -5,7 +5,7 @@ rem  Messages are ASCII on purpose: cmd.exe on a zh-TW system would mangle UTF-8
 rem  The human test plan lives in docs\TEST-PLAN-M1-first-run.md
 rem ---------------------------------------------------------------------------
 setlocal
-set "EXE=%~dp0..\src\Sidecar\bin\Release\net8.0-windows\Sidecar.exe"
+set "EXE=%~dp0..\src\Sidecar\bin\Release\net8.0-windows\Confern.exe"
 
 if not exist "%EXE%" (
   echo [x] Executable not found:
@@ -18,10 +18,10 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-tasklist /fi "imagename eq Sidecar.exe" 2>nul | find /i "Sidecar.exe" >nul
+tasklist /fi "imagename eq Confern.exe" 2>nul | find /i "Confern.exe" >nul
 if not errorlevel 1 (
-  echo [i] Sidecar.exe is already running - this build is single-instance.
-  echo     Close it first ^(Task Manager, or run: taskkill /im Sidecar.exe /f^)
+  echo [i] Confern.exe is already running - this build is single-instance.
+  echo     Close it first ^(Task Manager, or run: taskkill /im Confern.exe /f^)
   echo.
   pause
   exit /b 0
@@ -37,8 +37,8 @@ echo     - the converted file appears next to the original; the original is unto
 echo     - press ESC to cancel, or release SPACE to dismiss the wheel
 echo.
 echo   Logs:
-echo     %LOCALAPPDATA%\Sidecar\logs\sidecar.log   ^(UI process^)
-echo     %LOCALAPPDATA%\Sidecar\worker.log         ^(conversion worker^)
+echo     %LOCALAPPDATA%\Confern\logs\confern.log   ^(UI process^)
+echo     %LOCALAPPDATA%\Confern\worker.log         ^(conversion worker^)
 echo.
 echo   After testing, run this to check for leftovers / changed originals:
 echo     powershell -ExecutionPolicy Bypass -File tools\check-test-artifacts.ps1 -Folder ^<folder you converted in^>

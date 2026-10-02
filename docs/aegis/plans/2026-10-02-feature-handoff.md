@@ -70,7 +70,7 @@
 ```powershell
 # 建置（建置後務必確認 exe 時間戳有變，否則可能跑到舊二進位）
 dotnet build src\Sidecar -c Release -v minimal -nologo
-(Get-Item "src\Sidecar\bin\Release\net8.0-windows\Sidecar.exe").LastWriteTime
+(Get-Item "src\Sidecar\bin\Release\net8.0-windows\Confern.exe").LastWriteTime
 
 # 回歸（每個腳本都要 -Exe <exe>；m1b 預設只跑 S6，要 -Section All 才是 50 項）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 -Exe <exe>
@@ -85,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $
 
 ## 環境鐵律（踩過，別再踩）
 
-1. **驗收前先殺 `Sidecar` 行程**：殘留行程會鎖住 exe、讓複製**靜默失敗**（MSB3027/MSB3021，
+1. **驗收前先殺 `Confern` 行程**：殘留行程會鎖住 exe、讓複製**靜默失敗**（MSB3027/MSB3021，
    被 `Select-String -First N` 濾掉就完全看不到），結果是「0 錯誤」卻驗到舊二進位。
    必要時刪 `src\Sidecar\bin`,`obj` 強制重建。`--wheel-demo` 會活到 30 秒 watchdog。
 2. **`--wheel-dump` 與 `--wheel-dump-raw` 必須一起產生**：只給平面圖會讓 `check-frame.ps1`
@@ -96,3 +96,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $
 
 - `docs/design/reference/` 下未追蹤的使用者素材（`anim/`、`*.jpg`、`*.png`、`tangerine-demo.mp4`）。
 - `tools/glass-spike/`：技術 spike 已完成，結論已寫進 `2026-10-01-ui-redesign.md` §4。
+
+---
+
+## 產品改名（2026-10-02）：工作代號 `Sidecar` → **`Confern`**
+
+使用者定案（con ＋ fern；`confer` 本身也是英文真詞）。路線圖 Q5 結案——它必須在**待辦 4（托盤圖示＋
+開機自動啟動）之前**決定，因為那兩項會把名字寫進登錄檔 Run 機碼與托盤提示。
+
+跟著改的：exe 名（`Confern.exe`）、`AssemblyName`、`%LOCALAPPDATA%\Confern\`（設定／日誌／暫存日記）、
+日誌檔名（`confern.log`）、單一實例 mutex、驗收腳本用來找視窗的**視窗類別名**
+（`ConfernHitLayer`／`ConfernVisualLayer`）、worker pipe 名、暫存檔名、設定頁標題、啟動器
+`tools/start-tangerine.cmd`。
+
+**名稱的唯一擁有者＝`src/Sidecar/ProductInfo.cs`**（`Name` 與由它推導的 `Slug`）。散著硬寫的話，
+改名會留下一個沒改到的副本——而那**不會報錯**，只會在使用者 AppData 底下長出第二套目錄、
+或托盤顯示舊名字。
+
+C# 命名空間與 `src/Sidecar` 目錄**刻意保留歷史名稱**：把產品改名與程式碼重構混在同一個 diff，
+出事時會分不出是哪一件造成的。若要做全專案命名空間清理，那是獨立的一個機械式提交。
+
+改名後五套回歸全數重跑並通過：**m1f 32/32、m1a 38/38（＋1 未定）、m1b 50/50、m1c 20/20、m1d 54/54**。
