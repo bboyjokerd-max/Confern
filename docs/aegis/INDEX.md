@@ -31,3 +31,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/10-intent.md | Wheel impl slice card and readiness view (plan 5.3) |
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/20-checkpoint.md | Wheel impl checkpoint: files, decisions, remaining gaps |
 | 2026-10-01 | work | docs/aegis/work/2026-10-01-wheel-impl/90-evidence.md | Wheel impl evidence: 16/16 frame checks, regression, S4.2 finding |
+| 2026-10-02 | plan | docs/aegis/plans/2026-10-02-feature-handoff.md | 接手起點：功能開發（設計暫定後的下一步、指令、環境鐵律） |
