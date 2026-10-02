@@ -119,13 +119,15 @@ internal static class WheelDesign
     // 實測（盤緣外距離 → 合成 alpha）：
     //   深色底：設計稿 +6px 108、+14px 65、+26px 21；舊實作 +6px 88、+14px 49、+26px 10
     //           ⇒ **相符**（實作略窄），深色分支不需改。
-    //   淺色底：設計稿 +6px 76、+14px 48；舊實作（×1.8）134、69 ⇒ **約 1.76 倍過濃**。
-    // 淺色 ×1.8 是使用者對 §8.4 問題②核可的「淺底加亮」，保留；
-    // 但它是「實機看起來變成一圈亮環」的主要嫌疑，另案向使用者確認。
+    //   淺色底：設計稿 +6px 76、+14px 48；實作 +6px 117、+14px 70（×1.8）⇒ **約 1.5 倍過濃**。
+    // 使用者 2026-10-01 在實機看到「光暈變成一大圈」後定案：**淺色放棄 ×1.8**，
+    // 改為對齊設計稿的 94（實測合成 83／46，對設計稿 76／48）。
+    // 這條覆蓋了先前對 spike §8.4 問題②「淺底加亮」的核可——那次是在設計稿上判斷的，
+    // 沒有在真實桌面上看過。
 
     /// <summary>盤緣處的**累積**不透明度（0–255）。</summary>
     public const int GlowRimAlphaDark = 113;
-    public const int GlowRimAlphaLight = 166;
+    public const int GlowRimAlphaLight = 94;
 
     public static int GlowRimAlpha(double meanLuma) =>
         IsLightBackdrop(meanLuma) ? GlowRimAlphaLight : GlowRimAlphaDark;
