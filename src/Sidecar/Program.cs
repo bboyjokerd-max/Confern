@@ -480,6 +480,15 @@ internal static class App
         // M1f：設定（規格 §8）必須在**建立偵測器之前**載入——觸發鍵與接收層逾時都來自它。
         // 優先順序：命令列（診斷用）> 設定檔 > 規格預設值；預設值即規格值，檔案壞掉／超範圍都會說明。
         _settings = SettingsStore.Load(string.IsNullOrEmpty(opt.SettingsFile) ? null : opt.SettingsFile, evidence.Line);
+        // 「診斷記錄」只影響 detail 行的多寡，不影響必要事件——所以它可以在這裡就生效，
+        // 而且必須在**其他東西開始寫日誌之前**生效，否則同一份日誌會有兩種規矩。
+        evidence.SetDiagnostics(_settings.Diagnostics);
+        // `--progress-trace` 選的是「要追什麼」，而「診斷記錄」決定「要不要寫 detail」。
+        // 兩者衝突時以設定為準（那個語意是使用者裁定過的），但**必須大聲說**——
+        // 一個默默無效的旗標比一個會抱怨的旗標糟糕得多。
+        if (opt.ProgressTrace && !_settings.Diagnostics)
+            evidence.Line("note: --progress-trace is ON but diagnostics is OFF -> per-tick detail lines are suppressed. " +
+                          "Turn on the diagnostics setting (settings page, or --settings-set diagnostics=true) to see them.");
         uint triggerVk = opt.TriggerKeyFromCli ? opt.TriggerKey : SettingsStore.ResolveTriggerVk(_settings, evidence.Line);
         int watchdogMs = opt.WatchdogFromCli ? opt.WatchdogSeconds * 1000 : _settings.CaptureTimeoutSeconds * 1000;
         evidence.Line($"settings in effect: trigger=VK 0x{triggerVk:X2} watchdog={watchdogMs} ms " +
@@ -541,6 +550,7 @@ internal static class App
             uint appliedVk = SettingsStore.ResolveTriggerVk(updated, evidence.Line);
             detector.SetTriggerKey(appliedVk);
             guard.SetVisibleTimeout(updated.CaptureTimeoutSeconds * 1000);
+            evidence.SetDiagnostics(updated.Diagnostics);
             presenter.TriggerKeyLabel = Options.VirtualKeyLabel(appliedVk);
             evidence.Line($"settings ui: applied {SettingsStore.Describe(updated)} " +
                           $"(trigger=VK 0x{appliedVk:X2}, watchdog={updated.CaptureTimeoutSeconds * 1000} ms)");

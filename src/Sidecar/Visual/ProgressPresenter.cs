@@ -93,7 +93,8 @@ internal sealed class ProgressPresenter : IDisposable
     {
         _tickCount++;
         if (_trace)
-            _evidence.Line($"progress tick #{_tickCount} started={_started} shown={_shown} " +
+            // 高頻行：轉檔期間每個 tick 都寫一次 → 走 Detail（診斷開啟時才寫）。
+            _evidence.Detail($"progress tick #{_tickCount} started={_started} shown={_shown} " +
                            $"finished={_last.Finished} elapsed={_finishedAt?.ElapsedMilliseconds.ToString() ?? "-"} " +
                            $"timerAlive={_layer.TickAlive}");
         if (!_started) return;

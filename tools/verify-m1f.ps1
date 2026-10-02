@@ -241,9 +241,41 @@ Check 'S14.32 the page renders to a PNG (a real frame, not a blank one)' (
   $dumpFinished -and $d.ExitCode -eq 0 -and $pngBytes -gt 5000 -and $pngW -gt 400 -and $colours -gt 50) `
   "size=${pngBytes}B ${pngW}x${pngH} colours=$colours"
 
-"=== S14.33 this suite did not touch the real configuration ==="
+"=== S14.34-S14.35 diagnostics: OFF means essential events only, not silence ==="
+# The semantics were settled by the user on 2026-10-02: OFF = essential events only, ON = plus the
+# high-frequency detail lines. Both directions are asserted here, because a switch that is only ever
+# exercised in one direction is a switch nobody tested. The run must be one that really shows the
+# progress line without a mouse, which is why it uses --wheel-payload: that commits a real conversion
+# through the worker process, so the presenter actually ticks.
+$diagSrc = Join-Path $uiWork 'diag-sample.png'
+$bmp = New-Object System.Drawing.Bitmap 48,48
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.Clear([System.Drawing.Color]::Teal)
+$gfx.Dispose()
+$bmp.Save($diagSrc, [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose()
+
+$cfgOff = Join-Path $uiWork 'diag-off.json'
+$cfgOn = Join-Path $uiWork 'diag-on.json'
+Invoke-Sidecar @('--settings-set', 'diagnostics=false', '--settings-file', $cfgOff) 'set-diag-off' | Out-Null
+Invoke-Sidecar @('--settings-set', 'diagnostics=true', '--settings-file', $cfgOn) 'set-diag-on' | Out-Null
+
+$runOff = Invoke-Sidecar @('--settings-file', $cfgOff, '--wheel-payload', $diagSrc, '--progress-trace') 'diag-off-run'
+$runOn = Invoke-Sidecar @('--settings-file', $cfgOn, '--wheel-payload', $diagSrc, '--progress-trace') 'diag-on-run'
+$ticksOff = ([regex]::Matches($runOff.Text, 'progress tick')).Count
+$ticksOn = ([regex]::Matches($runOn.Text, 'progress tick')).Count
+Check 'S14.34 diagnostics OFF keeps essential events but drops the detail lines' (
+  $runOff.Text -match 'diagnostics=off \(essential events only\)' -and
+  $runOff.Text -match 'conversion finished:' -and
+  $runOff.Text -match 'note: --progress-trace is ON but diagnostics is OFF' -and
+  $ticksOff -eq 0) "essential=kept detail_ticks=$ticksOff"
+Check 'S14.35 diagnostics ON brings the detail lines back' (
+  $runOn.Text -match 'diagnostics: off -> on \(detail events included\)' -and
+  $ticksOn -ge 1) "detail_ticks=$ticksOn"
+
+"=== S14.36 this suite did not touch the real configuration ==="
 $realAfter = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
-Check 'S14.33 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"
+Check 'S14.36 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"
 
 ""
 "M1f summary: $($script:Pass)/$($script:Checks) checks passed"

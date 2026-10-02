@@ -182,6 +182,8 @@ internal sealed class WheelPresenter
 
         _selected = idx;
         Repaint();
+        // 刻意留在 Line（不降級成 Detail）：拖曳時這行確實會反覆出現，但驗收腳本 m1b S8.9 斷言它
+        // ≥1 次，而腳本預設跑在診斷關閉之下——降級會讓那條斷言在設定完全正常的情況下紅燈。
         _evidence.Line($"wheel hover selection -> index={idx} target={_targets[idx]} cursor=({screenX},{screenY})");
         return idx;
     }
