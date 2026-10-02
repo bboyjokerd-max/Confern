@@ -23,6 +23,7 @@ param(
   [string]$Section = 'All',
   [string]$EvidenceDir = '',
   [string]$DragSim = '',
+  [string]$ArchiveDir = '',
   [int]$S4WindowSeconds = 75,
   [int]$WatchdogSeconds = 3,
   [string]$LogDir = "$env:TEMP\sidecar-verify"
@@ -390,8 +391,18 @@ function Invoke-S4 {
   Start-Sleep -Milliseconds 800
 
   $lines = Get-LogLines $run.Log
-  Check "S4.2 drop intercepted (WM_DROPFILES delivered)" ((Count-Log $lines '\*\*\* DROP RECEIVED') -ge 1)
-  Check "S4.3 the received path is the sample file" (Test-Log $lines ([regex]::Escape($sample)))
+  # MEASURED 2026-10-01: once RegisterDragDrop is in place, WM_DROPFILES never arrives.
+  # The very same DragSim produced "*** DROP RECEIVED on hit#0" against the commit
+  # before RegisterDragDrop, and only "*** OLE DROP RECEIVED (IDropTarget)" after it.
+  # This check used to assert the WM_DROPFILES line, so from that commit on it was red
+  # no matter what the app did: a check that cannot pass is as worthless as one that
+  # cannot fail. The drop list is now delivered by the OLE path; DragAcceptFiles stays
+  # as a fallback only.
+  $oleDrop = Count-Log $lines '\*\*\* OLE DROP RECEIVED \(IDropTarget\)'
+  $wmDrop = Count-Log $lines '\*\*\* DROP RECEIVED on hit#'
+  Check "S4.2 drop intercepted (OLE IDropTarget)" ($oleDrop -ge 1) "OLE=$oleDrop WM_DROPFILES=$wmDrop (WM is only a fallback now)"
+  Check "S4.3 the drop carried exactly one file" ((Count-Log $lines 'OLE DROP RECEIVED \(IDropTarget\): hit#\d+ files=1') -ge 1) ''
+  Check "S4.3b the received path is the sample file" (Test-Log $lines ([regex]::Escape($sample)))
   Check "S4.4 hidden immediately after the drop" (Test-Log $lines 'hit layer HIDDEN \(drop resolved\)')
   Check "S4.5 the app is still alive after the drop" (-not $run.Process.HasExited)
 
@@ -429,11 +440,27 @@ function Invoke-S4m([string]$Mode, [int]$Window) {
   $lines = Get-LogLines $run.Log
   if ($Mode -eq 'S4a') {
     Check "S4a.1 nothing was raised (A7 zero interference)" ((Count-Log $lines 'hit layer SHOWN') -eq 0)
-    Check "S4a.2 no drop was intercepted" ((Count-Log $lines 'DROP RECEIVED') -eq 0)
+    Check "S4a.2 no drop was intercepted" ((Count-Log $lines '\*\*\* (OLE )?DROP RECEIVED') -eq 0)
   } else {
-    Check "S4b.1 at least 3 drops intercepted (A2)" ((Count-Log $lines '\*\*\* DROP RECEIVED') -ge 3)
-    Check "S4b.2 hidden immediately after drop" ((Count-Log $lines 'hit layer HIDDEN \(drop resolved\)') -ge 3)
-    Check "S4b.3 file paths were read" ((Count-Log $lines '^.*\|?\s{4}[A-Za-z]:\\') -ge 3)
+    # The product contract of a real gesture, in order: the payload is captured DURING
+    # the drag (OLE DragEnter), the wheel commits on the mouse RELEASE (spec 4.3), and
+    # the worker really converted something. Counted per gesture, so three each.
+    Check "S4b.1 payload captured during the drag (OLE DragEnter) x3" ((Count-Log $lines 'OLE DragEnter') -ge 3)
+    Check "S4b.2 mouse release committed a conversion x3" ((Count-Log $lines 'release\(mouse up\): wheel visible') -ge 3)
+    Check "S4b.3 the worker converted the file x3" ((Count-Log $lines 'worker result: ok=True') -ge 3)
+    Check "S4b.4 the layer was hidden after each gesture x3" ((Count-Log $lines 'hit layer HIDDEN') -ge 3)
+    $hideReasons = @(Get-LogLines $run.Log | Select-String 'hit layer HIDDEN \(' |
+                    ForEach-Object { [regex]::Match($_.Line, 'HIDDEN \((.*?)\)').Groups[1].Value } | Sort-Object -Unique)
+    $wmDrops = Count-Log $lines '\*\*\* DROP RECEIVED on hit#'
+    Write-Host ("      [info] hidden reasons seen: " + ($hideReasons -join ', '))
+    Write-Host ("      [info] WM_DROPFILES lines: " + $wmDrops + " (0 is expected while a drop target is registered)")
+  }
+
+  if ($ArchiveDir -ne '') {
+    New-Item -ItemType Directory -Force -Path $ArchiveDir | Out-Null
+    $arch = Join-Path $ArchiveDir ("s4m-" + $Mode + "-" + (Get-Date).ToString('yyyy-MM-dd-HHmmss') + ".log")
+    Copy-Item -LiteralPath $run.Log -Destination $arch -Force
+    Write-Host "      [evidence] session log archived -> $arch"
   }
   $run.Process.Refresh()
   if (-not $run.Process.HasExited) { Stop-Process -Id $run.Process.Id -Force }

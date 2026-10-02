@@ -39,7 +39,7 @@ public sealed class DropTarget : OleInterop.IDropTarget
     {
         effect = OleInterop.DROPEFFECT_COPY;
         string[] paths = ReadDropFiles(dataObject, out string note);
-        _log($"OLE DragEnter: hit#{_monitorIndex} pt=({pt.X},{pt.Y}) files={paths.Length} {note}");
+        _log($"OLE DragEnter: hit#{_monitorIndex} pt=({pt.X},{pt.Y}) files={paths.Length} first={(paths.Length > 0 ? paths[0] : "-")} {note}");
         if (paths.Length > 0) _onPayload(_monitorIndex, paths);
     }
 
@@ -59,7 +59,9 @@ public sealed class DropTarget : OleInterop.IDropTarget
     {
         effect = OleInterop.DROPEFFECT_COPY;
         string[] paths = ReadDropFiles(dataObject, out string note);
-        _log($"*** OLE DROP RECEIVED (IDropTarget): hit#{_monitorIndex} files={paths.Length} {note} ***");
+        // `first=` 是刻意加的：放手這條路原本只記數量，於是「收到的是哪個檔」在日誌上
+        // 無法被證明，S4.3 只能斷言「有東西掉下來」。工具要能被指名道姓地驗證。
+        _log($"*** OLE DROP RECEIVED (IDropTarget): hit#{_monitorIndex} files={paths.Length} first={(paths.Length > 0 ? paths[0] : "-")} {note} ***");
         _onDropObserved(_monitorIndex);
     }
 

@@ -53,6 +53,32 @@ function Run-Convert([string[]]$files, [string]$target, [string]$tag) {
   return @{ Exit = $p.ExitCode; Log = $log; Text = (Get-Content -LiteralPath $log -Encoding UTF8) -join "`n" }
 }
 
+# ---- the line the user actually sees ----------------------------------------
+# ConversionSummary.ComposeLine is the ONE rule: "check N" when all succeed, the
+# spec 7.1 message when ALL fail, the "check N / X M" counts when only some fail
+# (7.3). Two places render it: the headless "convert summary:" line and the
+# progress pill (via ConversionSnapshot.Line). On 2026-10-01 those two had
+# drifted apart and the pill showed a bare count while the reason existed only in
+# the log. S12.6b/S12.7b/S12.8b could not catch that: they only prove the reason
+# appears SOMEWHERE in the log, and the worker-result line always prints it.
+function Get-SummaryLine([string]$text) {
+  $m = [regex]::Match($text, 'convert summary: (.*?)\s*\(ok=')
+  if ($m.Success) { return $m.Groups[1].Value.Trim() }
+  return ''
+}
+function Test-SummaryCarries([string]$text, [string]$reason) {
+  $line = Get-SummaryLine $text
+  if (-not $line) { return $false }
+  return $line.Contains($reason)
+}
+function Get-PillLine([string]$text) {
+  $m = [regex]::Match($text, 'progress: (.*?)\s+done=')
+  if ($m.Success) { return $m.Groups[1].Value.Trim() }
+  return ''
+}
+$CHECKMARK = [char]0x2713
+$CROSSMARK = [char]0x2717
+
 # ---- fixture: a photo-like JPEG with real gradients (not a flat colour, which
 #      would hide any pixel-format mistake) --------------------------------
 $w = 320; $h = 200
@@ -136,16 +162,33 @@ $r = Run-Convert @($corrupt) 'PNG' 'corrupt'
 Check 'S12.6a corrupt input -> DecodeFailed' ($r.Text -match 'error=DecodeFailed') 'error=DecodeFailed'
 Check 'S12.6b corrupt input -> readable message' ($r.Text.Contains($MSG_DECODE)) $MSG_DECODE
 Check 'S12.6c corrupt input -> exit code 9' ($r.Exit -eq 9) "exit=$($r.Exit)"
+Check 'S12.6d corrupt input -> the RENDERED line carries the reason' (Test-SummaryCarries $r.Text $MSG_DECODE) (Get-SummaryLine $r.Text)
 
 $r = Run-Convert @("$Work\nope-does-not-exist.jpg") 'PNG' 'missing'
 Check 'S12.7a missing source -> SourceMissing' ($r.Text -match 'error=SourceMissing') ''
 Check 'S12.7b missing source -> readable message' ($r.Text.Contains($MSG_MISSING)) $MSG_MISSING
+Check 'S12.7c missing source -> the RENDERED line carries the reason' (Test-SummaryCarries $r.Text $MSG_MISSING) (Get-SummaryLine $r.Text)
 
 $pdf = Join-Path $Work 'doc.pdf'
 Set-Content -LiteralPath $pdf -Value '%PDF-1.4 not an image' -Encoding ASCII
 $r = Run-Convert @($pdf) 'PNG' 'unsupported'
 Check 'S12.8a pdf -> refused with a message' (($r.Text -match 'error=Unsupported') -or ($r.Text -match 'error=DecodeFailed')) ''
 Check 'S12.8b pdf -> readable message' ($r.Text.Contains($MSG_UNSUP)) $MSG_UNSUP
+Check 'S12.8c pdf -> the RENDERED line carries the reason' (Test-SummaryCarries $r.Text $MSG_UNSUP) (Get-SummaryLine $r.Text)
+
+# A check that can never fail is worse than none. Prove these assertions reject
+# the pre-fix shape (bare counts) and accept the fixed shape. Synthetic text only.
+$oldShape = "convert summary: $CHECKMARK 0 / $CROSSMARK 1  (ok=0 failed=1)"
+$newShape = "convert summary: corrupt.png $MSG_DECODE  (ok=0 failed=1)"
+Check 'S12.8d self-test: the assertion REJECTS the pre-fix bare-counts line' (-not (Test-SummaryCarries $oldShape $MSG_DECODE)) 'synthetic'
+Check 'S12.8e self-test: the assertion ACCEPTS the reason-bearing line' (Test-SummaryCarries $newShape $MSG_DECODE) 'synthetic'
+
+# spec 7.3: the reason form is ONLY for a total failure. A partial failure keeps
+# the counts form -- the other branch of the same rule, and the thing a careless
+# "always show the reason" fix would break.
+$r = Run-Convert @($srcJpg, $corrupt) 'PNG' 'partial'
+Check 'S12.8f partial failure -> the counts form (spec 7.3)' ((Get-SummaryLine $r.Text) -eq "$CHECKMARK 1 / $CROSSMARK 1") (Get-SummaryLine $r.Text)
+Check 'S12.8g partial failure -> 1 ok and 1 failed, no silence' ($r.Text -match '\(ok=1 failed=1\)') ''
 
 "=== S12.9-S12.10 the two-process path (spec 9.1) ==="
 # offered formats must be exactly the spec-declared AND measured-encodable set
@@ -209,6 +252,19 @@ if ($releaseLine) {
 } else {
   Inconclusive 'S12.10i the released drop produced its own file' 'no release-path line'
 }
+
+# The 2026-10-01 defect lived HERE, not in the headless path: the pill renders
+# ConversionSnapshot.Line, and that snapshot carried its own copy of the rule.
+# The failure contract must therefore be asserted through the payload/UI path as
+# well, or the same drift can return with every check still green.
+$failPayloadLog = Join-Path $logDir 'payload-failure.log'
+$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $corrupt, '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
+$failText = (Get-Content -LiteralPath $failPayloadLog -Encoding UTF8) -join "`n"
+$failPill = Get-PillLine $failText
+Check 'S12.15a the pill shows the reason, not a bare count' ($failPill.Contains($MSG_DECODE)) "pill='$failPill'"
+Check 'S12.15b the finished line carries the reason' ($failText -match "finished=True ok=0 failed=1 error=- line='.*$MSG_DECODE") ''
+Check 'S12.15c a failed conversion writes no output and no .tmp-*' ((@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count -eq 1) -and (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0)) ''
+Check 'S12.15d a failure holds 5 s, not the 2 s success hold (spec 4.4)' ($failText -match 'hiding after \d+ ms \(updates=\d+, ticks=\d+, hold=5000 ms\)') ''
 
 "=== S12.11-S12.12 settings (spec 8) ==="
 $badSettings = Join-Path $Work 'settings-out-of-range.json'
