@@ -24,7 +24,7 @@ internal sealed class DragDetector
     public event Action<string>? Released;
 
     /// <summary>觸發鍵。由建構子注入（Q1：預設空白鍵、可由設定覆寫），此處不得硬編碼。</summary>
-    public uint TriggerKey { get; }
+    public uint TriggerKey { get; private set; }
 
     public bool IsDisabled { get; private set; }
     public DetectorState State => _state;
@@ -53,6 +53,20 @@ internal sealed class DragDetector
         _triggerDown = false;
         SetState(DetectorState.Idle);
         _evidence.Line("detector DISABLED (no capture until restart)");
+    }
+
+    /// <summary>
+    /// 換觸發鍵（設定頁按下「儲存」時走這裡）。**一定要留痕**：設定若沒生效，日誌是唯一能分辨
+    /// 「根本沒套用」與「套用了但那個鍵沒收到」的地方。
+    /// </summary>
+    public void SetTriggerKey(uint vk)
+    {
+        if (vk == TriggerKey) return;
+        uint previous = TriggerKey;
+        TriggerKey = vk;
+        _triggerDown = false;          // 舊鍵的按下狀態不適用於新鍵
+        if (_state is DetectorState.Armed or DetectorState.Capturing) RequestRelease("trigger key changed");
+        _evidence.Line($"detector trigger key changed: 0x{previous:X2} -> 0x{vk:X2}");
     }
 
     public void OnKey(uint vk, bool isDown)

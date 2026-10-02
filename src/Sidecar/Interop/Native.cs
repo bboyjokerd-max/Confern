@@ -111,6 +111,13 @@ internal static class Native
     /// </summary>
     public const uint WM_APP_TICK = 0x8002;
 
+    /// <summary>
+    /// 自訂訊息：設定頁在**別的執行緒**改好設定，要求主執行緒套用（WM_APP + 3）。
+    /// 為什麼一定要繞視窗訊息：設定頁跑在自己的 STA WPF 執行緒上，而證據日誌的 StreamWriter
+    /// 與覆蓋層都不是執行緒安全的——直接呼叫不會當場報錯，只會變成隨機損壞，最難查的那種。
+    /// </summary>
+    public const uint WM_APP_SETTINGS_CHANGED = 0x8003;
+
     /// <summary>保留作為對照：這個常數已不再是週期回呼的驅動來源。</summary>
     public const uint WM_TIMER = 0x0113;
 

@@ -33,14 +33,17 @@ internal sealed class ReleaseGuard : IDisposable
     private readonly List<(Func<bool> IsVisible, Action<int> RequestHide)> _overlays = new();
 
     public bool CaptureDisabled { get; private set; }
-    public int VisibleTimeoutMs { get; }
+    public int VisibleTimeoutMs { get; private set; }
     public bool IsArmed => _watchdog.Enabled;
+
+    /// <summary>逾時的夾制規則**只有這一處**（建構子與熱套用都走它），否則兩邊會漂移。</summary>
+    private static int ClampTimeout(int ms) => Math.Clamp(ms, 1_000, 300_000);
 
     public ReleaseGuard(Evidence evidence, HitLayer hit, int visibleTimeoutMs = DefaultVisibleTimeoutMs)
     {
         _evidence = evidence;
         _hit = hit;
-        VisibleTimeoutMs = Math.Clamp(visibleTimeoutMs, 1_000, 300_000);
+        VisibleTimeoutMs = ClampTimeout(visibleTimeoutMs);
 
         _grace = new System.Timers.Timer(HideGraceMs) { AutoReset = false };
         _grace.Elapsed += (_, _) => HideNow(Native.HideReasonGrace);
@@ -54,6 +57,23 @@ internal sealed class ReleaseGuard : IDisposable
     /// </summary>
     public void AddOverlay(Func<bool> isVisible, Action<int> requestHide) =>
         _overlays.Add((isVisible, requestHide));
+
+    /// <summary>
+    /// 換接收層逾時（設定頁按下「儲存」時走這裡）。若此刻正好武裝中，watchdog 要用新值**重新起算**，
+    /// 否則使用者的感覺是「改了沒用」。
+    /// </summary>
+    public void SetVisibleTimeout(int ms)
+    {
+        int clamped = ClampTimeout(ms);
+        if (clamped == VisibleTimeoutMs) return;
+        int previous = VisibleTimeoutMs;
+        VisibleTimeoutMs = clamped;
+        _watchdog.Interval = clamped;
+        bool rearmed = _watchdog.Enabled;
+        if (rearmed) { _watchdog.Stop(); _watchdog.Start(); }
+        _evidence.Line($"guard visible timeout changed: {previous} ms -> {clamped} ms" +
+                       (rearmed ? " (watchdog restarted with the new value)" : ""));
+    }
 
     /// <summary>捕捉開始：升起接收層並重置保險。</summary>
     public void OnCaptured()

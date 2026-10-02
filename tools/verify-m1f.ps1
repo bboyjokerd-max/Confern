@@ -19,6 +19,7 @@ param(
 #  3 = inconclusive (a precondition could not be established)
 # =============================================================================
 $ErrorActionPreference = 'Continue'
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue   # S14.32 counts colours in the dump
 
 $script:Pass = 0
 $script:Fail = 0
@@ -154,9 +155,95 @@ $raw3 = Get-Content -LiteralPath $s3 -Raw -Encoding UTF8
 Check 'S14.21 choosing Shift warns about Explorer MOVE (spec 8) and still saves' (
   $r.Exit -eq 0 -and $r.Text -match 'WARNING' -and $r.Text -match 'MOVE' -and $raw3 -match '"TriggerKey":\s*"Shift"') "exit=$($r.Exit)"
 
-"=== S14.22 this suite did not touch the real configuration ==="
+"=== S14.23-S14.27 the page itself: lifecycle, cross-thread, in-app open ==="
+# The page runs on its own WPF thread inside this very process. Its two realistic failure modes are
+# invisible to the eye: "opens but cannot be closed" and "closing leaves the process unable to exit".
+# The second one shows up as a hung command line, so every launch here is bounded and killed on timeout.
+$uiWork = Join-Path $Work 'ui'
+New-Item -ItemType Directory -Force -Path $uiWork | Out-Null
+$uiSettings = Join-Path $uiWork 'settings.json'
+$uiLog = Join-Path $uiWork 'selftest.log'
+Get-Process -Name Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$p = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-selftest', '--settings-file', $uiSettings, '--quiet', '--log', $uiLog) -PassThru -WindowStyle Hidden
+$finished = $p.WaitForExit(20000)
+$elapsed = [int]$sw.ElapsedMilliseconds
+if (-not $finished) { $p.Kill(); $p.WaitForExit(5000) | Out-Null }
+$uiText = if (Test-Path -LiteralPath $uiLog) { Get-Content -LiteralPath $uiLog -Raw -Encoding UTF8 } else { '' }
+
+Check 'S14.23 the settings page opens' ($finished -and $p.ExitCode -eq 0 -and $uiText -match 'opened=True') "exit=$($p.ExitCode)"
+Check 'S14.24 a second open is refused (two windows would silently overwrite each other)' ($uiText -match 'second open refused \(still exactly one window\)=True') ''
+Check 'S14.25 it closes cleanly' ($uiText -match 'closed=True') ''
+Check 'S14.26 closing it does not leave the process hanging (bounded launch)' ($finished -and $elapsed -lt 20000) "finished=$finished elapsed=${elapsed}ms"
+Check 'S14.27 the page thread logs through the main thread, not around it' (
+  $uiText -match 'settings ui: STA thread started' -and $uiText -match 'settings ui selftest done: ok=True' -and
+  $uiText -match 'settings ui: open requested') ''
+
+$appLog = Join-Path $uiWork 'in-app.log'
+Get-Process -Name Sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
+$app = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-live', '--quiet', '--log', $appLog) -PassThru -WindowStyle Hidden
+Start-Sleep -Seconds 5
+$appAlive = -not $app.HasExited
+if ($appAlive) { $app.Kill(); $app.WaitForExit(5000) | Out-Null }
+$appText = if (Test-Path -LiteralPath $appLog) { Get-Content -LiteralPath $appLog -Raw -Encoding UTF8 } else { '' }
+Check 'S14.28 --settings-ui-live opens the page inside the running app' (
+  $appText -match 'settings ui: opened in the running app') "app stayed alive=$appAlive"
+
+# The standalone entry is the ONLY way a user can reach the settings page until the tray exists
+# (step 4), so it has to behave like a normal settings window: no overlay, no background process left.
+$pageLog = Join-Path $uiWork 'standalone.log'
+$page = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui', '--settings-file', $uiSettings, '--quiet', '--log', $pageLog) -PassThru -WindowStyle Hidden
+Start-Sleep -Seconds 4
+# Ask the OS again instead of reading the cached Process object's HasExited: a stale property here
+# would report "exited" for a process that is running, which is the wrong reason to fail a check.
+$pageWaiting = @(Get-Process -Id $page.Id -ErrorAction SilentlyContinue).Count -gt 0
+$pageText = if (Test-Path -LiteralPath $pageLog) { Get-Content -LiteralPath $pageLog -Raw -Encoding UTF8 } else { '' }
+$pageKilled = $false
+if ($pageWaiting) { $page.Kill(); $page.WaitForExit(5000) | Out-Null; $pageKilled = $true }
+Check 'S14.29 --settings-ui shows the page alone and keeps no overlay running' (
+  $pageWaiting -and $pageText -match 'settings ui standalone: open' -and
+  $pageText -notmatch 'hit layer|visual layer SHOWN') "pid=$($page.Id) alive=$pageWaiting killed=$pageKilled"
+
+"=== S14.30-S14.32 the page's Save button, end to end ==="
+# The page's own Save path is what a user actually exercises, and until now nothing in the repo could
+# reproduce it (the original harness was a throwaway). SelfTestSave presses the REAL Save button; the
+# file is then read back with the product's own reader, because a self-report is not evidence.
+$r = Invoke-Sidecar @('--settings-probe', $uiSettings) 'probe-after-page-save'
+$result = Get-SettingResult $r.Text
+Check 'S14.30 the page Save button wrote the file' (
+  $uiText -match 'save via the real Save button ok=True' -and
+  (Get-Field $result 'jpgQuality') -eq '71' -and (Get-Field $result 'trigger') -eq 'Tab' -and
+  (Get-Field $result 'capture') -eq '45' -and (Get-Field $result 'language') -eq 'en') $result
+Check 'S14.31 an invalid value is refused instead of written' (
+  $uiText -match 'an invalid value is refused \(save ok=False\)' -and
+  (Get-Field $result 'jpgQuality') -eq '71' -and (Get-Field $result 'trigger') -eq 'Tab') "jpgQuality=$((Get-Field $result 'jpgQuality'))"
+
+$png = Join-Path $uiWork 'settings-page.png'
+$dumpLog = Join-Path $uiWork 'dump.log'
+$d = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump', $png, '--quiet', '--log', $dumpLog) -PassThru -WindowStyle Hidden
+$dumpFinished = $d.WaitForExit(20000)
+if (-not $dumpFinished) { $d.Kill(); $d.WaitForExit(5000) | Out-Null }
+$pngBytes = 0; $pngW = 0; $pngH = 0; $colours = -1
+if (Test-Path -LiteralPath $png) {
+  $pngBytes = (Get-Item -LiteralPath $png).Length
+  $bmp = [System.Drawing.Bitmap]::FromFile($png)
+  $pngW = $bmp.Width; $pngH = $bmp.Height
+  $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+  for ($y = 0; $y -lt $pngH; $y += 6) {
+    for ($x = 0; $x -lt $pngW; $x += 6) { [void]$seen.Add($bmp.GetPixel($x, $y).ToArgb()) }
+  }
+  $colours = $seen.Count
+  $bmp.Dispose()
+}
+Check 'S14.32 the page renders to a PNG (a real frame, not a blank one)' (
+  $dumpFinished -and $d.ExitCode -eq 0 -and $pngBytes -gt 5000 -and $pngW -gt 400 -and $colours -gt 50) `
+  "size=${pngBytes}B ${pngW}x${pngH} colours=$colours"
+
+"=== S14.33 this suite did not touch the real configuration ==="
 $realAfter = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
-Check 'S14.22 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"
+Check 'S14.33 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"
 
 ""
 "M1f summary: $($script:Pass)/$($script:Checks) checks passed"

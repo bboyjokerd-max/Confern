@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -84,6 +85,31 @@ internal static class Program
             return App.RunSettingsSet(opt, setEvidence);
         }
 
+        // M1f：把設定頁畫成一張 PNG（設計審查用；也讓「WPF 在這個行程裡真的畫得出來」有檔案可查）。
+        if (!string.IsNullOrEmpty(opt.SettingsUiDump))
+        {
+            Native.AttachParentConsole();
+            using var dumpEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunSettingsUiDump(opt, dumpEvidence);
+        }
+
+        // M1f：設定頁單獨開啟（規格 §8）——不啟動覆蓋層，關掉視窗就結束。
+        if (opt.SettingsUi)
+        {
+            Native.AttachParentConsole();
+            using var pageEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunSettingsUiStandalone(opt, pageEvidence);
+        }
+
+        // M1f：設定頁的生命週期自測（規格 §8）。設定頁跑在自己的 WPF 執行緒上，最現實的失效模式是
+        // 「開得起來但關不掉／行程結束不掉」——人眼看不到，卻會讓程式無法退出。所以要有這條路。
+        if (opt.SettingsUiSelfTest)
+        {
+            Native.AttachParentConsole();
+            using var uiEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunSettingsUiSelfTest(opt, uiEvidence);
+        }
+
         // M1f：設定檔的範圍驗證（§8）——超範圍要夾回並說出來，壞檔要退回預設而不是讓程式起不來。
         if (!string.IsNullOrEmpty(opt.SettingsProbe))
         {
@@ -167,6 +193,10 @@ internal sealed class Options
           --settings-set k=v;k=v    change settings and save them, then exit (spec 8); keys that are not
                                     accepted are reported and exit with code 4 instead of being ignored
           --settings-probe <path>   load that settings file, print the clamped result and exit
+          --settings-ui             open the settings page only (no overlay); exits when the window closes
+          --settings-ui-live        start the overlay AND open the settings page (saving applies at once)
+          --settings-ui-dump <png>  render the settings page to a PNG and exit (visual evidence)
+          --settings-ui-selftest    open the settings page, verify it opens/closes and exits (diagnostic)
           --quiet                   do not echo events to the console
         """;
 
@@ -234,6 +264,23 @@ internal sealed class Options
     public string SettingsFile = "";
     /// <summary>--settings-set k=v;k=v：改設定並存檔（設定頁按「儲存」走同一條路）。空＝不動作。</summary>
     public string SettingsSet = "";
+    /// <summary>
+    /// --settings-ui：只開設定頁（不啟動覆蓋層），視窗關掉就結束。這是托盤（待辦 4）之前
+    /// 使用者唯一能自己打開設定頁的入口，所以它必須像一個正常的設定視窗，不留背景行程。
+    /// </summary>
+    public bool SettingsUi;
+    /// <summary>
+    /// --settings-ui-live：啟動完整程式（覆蓋層＋hook）並開啟設定頁，用來驗「儲存→當場套用」。
+    /// 托盤做好之後走的是同一條路徑，這個旗標則留給自動化驗收。
+    /// </summary>
+    public bool SettingsUiLive;
+    /// <summary>--settings-ui-dump &lt;png&gt;：把設定頁畫成一張 PNG（設計審查與視覺證據用）。</summary>
+    public string SettingsUiDump = "";
+    /// <summary>
+    /// --settings-ui-selftest：不必人眼就能驗設定頁的生命週期（開得起來、第二次開啟被拒、關得掉、
+    /// 而且**不會讓行程結束不掉**）。最後那一項人眼看不到，卻是設定頁最現實的失效模式。
+    /// </summary>
+    public bool SettingsUiSelfTest;
     /// <summary>--trigger-key 是否由命令列明確指定（決定它與設定檔的優先順序）。</summary>
     public bool TriggerKeyFromCli;
     /// <summary>--watchdog-seconds 是否由命令列明確指定（同上）。</summary>
@@ -334,6 +381,12 @@ internal sealed class Options
                 case "--settings-set":
                     if (++i < args.Length) o.SettingsSet = args[i];
                     break;
+                case "--settings-ui": o.SettingsUi = true; break;
+                case "--settings-ui-live": o.SettingsUiLive = true; break;
+                case "--settings-ui-dump":
+                    if (++i < args.Length) o.SettingsUiDump = args[i];
+                    break;
+                case "--settings-ui-selftest": o.SettingsUiSelfTest = true; break;
             }
         }
         return o;
@@ -474,6 +527,43 @@ internal static class App
         var catalog = BuildCatalog(evidence);
         var presenter = new WheelPresenter(evidence, visual, opt.WheelBackdrop);
         presenter.TriggerKeyLabel = Options.VirtualKeyLabel(triggerVk);
+
+        // M1f：設定頁的「儲存 → 當場套用」（規格 §8）。設定頁跑在自己的 WPF 執行緒上，所以它的回呼
+        // 只做「排隊 ＋ PostMessage 叫醒這裡」；真正的套用一律在主執行緒發生（日誌與覆蓋層都不是
+        // 執行緒安全的，跨執行緒直接呼叫只會變成隨機損壞）。三個設定值各有單一擁有者：
+        // 觸發鍵交給 detector、逾時交給 guard、其餘由 _settings 帶著走（轉檔時才讀）。
+        void ApplyFromSettingsUi()
+        {
+            while (_settingsUiLog.TryDequeue(out string? uiLine)) evidence.Line(uiLine);
+            Settings? updated = Interlocked.Exchange(ref _pendingSettings, null);
+            if (updated == null) return;
+            _settings = updated;
+            uint appliedVk = SettingsStore.ResolveTriggerVk(updated, evidence.Line);
+            detector.SetTriggerKey(appliedVk);
+            guard.SetVisibleTimeout(updated.CaptureTimeoutSeconds * 1000);
+            presenter.TriggerKeyLabel = Options.VirtualKeyLabel(appliedVk);
+            evidence.Line($"settings ui: applied {SettingsStore.Describe(updated)} " +
+                          $"(trigger=VK 0x{appliedVk:X2}, watchdog={updated.CaptureTimeoutSeconds * 1000} ms)");
+        }
+        visual.SettingsChanged += ApplyFromSettingsUi;
+
+        if (opt.SettingsUiLive)
+        {
+            string uiPath = string.IsNullOrEmpty(opt.SettingsFile) ? SettingsStore.DefaultPath() : opt.SettingsFile;
+            SettingsUi.Open(_settings ?? SettingsStore.Load(null, evidence.Line), uiPath,
+                saved =>
+                {
+                    _pendingSettings = saved;         // 交接點：ApplyFromSettingsUi 會在主執行緒取走
+                    visual.RequestSettingsApply();
+                },
+                uiLine =>
+                {
+                    _settingsUiLog.Enqueue(uiLine);
+                    visual.RequestSettingsApply();
+                });
+            evidence.Line($"settings ui: opened in the running app (--settings-ui-live, path={uiPath}); " +
+                          "saving in the window applies immediately");
+        }
 
         // 規格 §7.1：上次崩潰／斷電留下的 `.tmp-*` 必須在啟動時清掉，並且**說出來**。
         int recoveredTemps = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
@@ -774,6 +864,152 @@ internal static class App
 
     /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
     private static Settings? _settings;
+
+    /// <summary>
+    /// 設定頁在 WPF 執行緒上按下「儲存」之後放的結果，由主執行緒取走並套用。
+    /// 交接用參考賦值 ＋ <see cref="Interlocked.Exchange{T}(ref T, T)"/>：設定是 record（參考型別），
+    /// 這種交接不需要鎖，也不會讓主執行緒讀到半套的狀態。
+    /// </summary>
+    private static Settings? _pendingSettings;
+
+    /// <summary>
+    /// 設定頁那條執行緒產生的日誌行。**只能由主執行緒代寫**：<see cref="Evidence.Line"/> 沒有上鎖，
+    /// 兩條執行緒同時寫會互相插斷（而且不會當場報錯）。
+    /// </summary>
+    private static ConcurrentQueue<string> _settingsUiLog = new();
+
+    /// <summary>
+    /// M1f：`--settings-ui`——只開設定頁，不啟動覆蓋層，**視窗關掉就結束**。
+    /// 托盤（待辦 4）之前這是使用者唯一的入口，所以它必須像正常的設定視窗：不留背景行程、
+    /// 不需要工作管理員。存檔本身由設定頁走 `SettingsStore.Save`（檔案當場就變），這裡只留證據。
+    /// </summary>
+    internal static int RunSettingsUiStandalone(Options opt, Evidence evidence)
+    {
+        string path = string.IsNullOrEmpty(opt.SettingsFile) ? SettingsStore.DefaultPath() : opt.SettingsFile;
+        Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
+        var lines = new ConcurrentQueue<string>();
+
+        evidence.Line($"settings ui standalone: opening (path={path})");
+        SettingsUi.Open(settings, path,
+            saved => lines.Enqueue($"settings ui standalone: saved {SettingsStore.Describe(saved)}"),
+            lines.Enqueue);
+
+        var sw = Stopwatch.StartNew();
+        while (!SettingsUi.IsOpen && sw.ElapsedMilliseconds < 5000) Thread.Sleep(25);
+        if (!SettingsUi.IsOpen)
+        {
+            while (lines.TryDequeue(out string? early)) evidence.Line(early);
+            evidence.Line("settings ui standalone: FAILED to open (see the lines above)");
+            return 1;
+        }
+        evidence.Line("settings ui standalone: open — this process exits when the window closes");
+
+        // 上限只是防呆：視窗若因為某個 bug 永遠不關，這裡不可以變成一個殺不掉的背景行程。
+        while (SettingsUi.IsOpen && sw.ElapsedMilliseconds < 30 * 60 * 1000) Thread.Sleep(100);
+        bool timedOut = SettingsUi.IsOpen;
+        if (timedOut) SettingsUi.Close();
+        while (lines.TryDequeue(out string? line)) evidence.Line(line);
+        evidence.Line($"settings ui standalone: done (timedOut={timedOut}) after {sw.ElapsedMilliseconds} ms");
+        return 0;
+    }
+
+    /// <summary>
+    /// M1f：設定頁的生命週期自測（規格 §8）。設定頁跑在自己的 WPF 執行緒上，而它最現實的兩個失效模式
+    /// 人眼都看不到：「開得起來卻關不掉」與「關掉之後行程結束不掉」（後者會讓程式一直掛在背景）。
+    /// 這裡逐項斷言，任何一項不成立就回 1；過程全寫進證據日誌，不是只回一個成功。
+    /// </summary>
+    internal static int RunSettingsUiSelfTest(Options opt, Evidence evidence)
+    {
+        // **絕不可以**讓自測寫到使用者真正的設定檔：SelfTestSave 是按真的「儲存」。
+        // 所以沒給路徑時一律用暫存檔；自己產生的暫存檔才清掉，操作者指定的路徑不動。
+        bool tempPath = string.IsNullOrEmpty(opt.SettingsFile);
+        string path = tempPath
+            ? Path.Combine(Path.GetTempPath(), "sidecar-settings-selftest.json")
+            : opt.SettingsFile;
+        if (tempPath && File.Exists(path)) File.Delete(path);   // 從乾淨的預設值開始，斷言才有意義
+        Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
+        var lines = new ConcurrentQueue<string>();
+
+        static bool WaitFor(Func<bool> condition, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                if (condition()) return true;
+                Thread.Sleep(25);
+            }
+            return condition();
+        }
+
+        evidence.Line($"settings ui selftest: opening (path={path})");
+        SettingsUi.Open(settings, path, _ => lines.Enqueue("settings ui selftest: onSaved fired"), lines.Enqueue);
+        bool opened = WaitFor(() => SettingsUi.IsOpen, 5000);
+        evidence.Line($"settings ui selftest: opened={opened} isOpen={SettingsUi.IsOpen}");
+
+        // 連點兩下不可以出現兩個編輯同一份檔案的視窗：後存的會把先存的蓋掉，而且是靜默的。
+        SettingsUi.Open(settings, path, _ => lines.Enqueue("settings ui selftest: SECOND onSaved fired"), lines.Enqueue);
+        bool singleInstance = SettingsUi.IsOpen;
+        evidence.Line($"settings ui selftest: second open refused (still exactly one window)={singleInstance}");
+
+        // 存檔鏈路：走**真正的按鈕處理常式**（SelfTestSave → SaveButton.RaiseEvent(Click)），
+        // 而不是另外寫一份存檔邏輯。這裡的斷言只說「按下去有沒有成功」；檔案裡到底寫了什麼，
+        // 由驗收腳本再用 product 自己的讀取器（--settings-probe）驗一次，不由被測者自證。
+        Settings good = settings with
+        {
+            JpgQuality = 71, WebpQuality = 92, TriggerKey = "Tab",
+            CaptureTimeoutSeconds = 45, Diagnostics = true, StartWithWindows = false, Language = "en"
+        };
+        bool saved = SettingsUi.SelfTestSave(good, 5000, out string saveDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: save via the real Save button ok={saved} detail={saveDetail}");
+
+        Settings bad = settings with { TriggerKey = "NotARealKey" };
+        bool refused = SettingsUi.SelfTestSave(bad, 5000, out string badDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: an invalid value is refused (save ok={refused}) detail={badDetail}");
+
+        Thread.Sleep(700);      // 讓 WPF 真的完成第一次繪製，而不是只把物件建起來就說「開好了」
+        SettingsUi.Close();
+        bool closed = WaitFor(() => !SettingsUi.IsOpen, 3000);
+        evidence.Line($"settings ui selftest: closed={closed} isOpen={SettingsUi.IsOpen}");
+
+        while (lines.TryDequeue(out string? line)) evidence.Line(line);
+
+        bool ok = opened && singleInstance && closed && saved && !refused;
+        evidence.Line($"settings ui selftest done: ok={ok} (opened={opened} singleInstance={singleInstance} " +
+                      $"closed={closed} saved={saved} refusedInvalid={refused})");
+        return ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// M1f：`--settings-ui-dump &lt;png&gt;`——把設定頁畫成一張 PNG 就結束。
+    /// 為什麼需要它：設定頁的外觀原本只能靠人眼看，回歸最多只能斷言「開得起來」。
+    /// 這張圖讓「畫面長什麼樣」變成一個能保存、能比對、能拿給設計者看的檔案。
+    /// </summary>
+    internal static int RunSettingsUiDump(Options opt, Evidence evidence)
+    {
+        string path = string.IsNullOrEmpty(opt.SettingsFile)
+            ? Path.Combine(Path.GetTempPath(), "sidecar-settings-dump.json")
+            : opt.SettingsFile;
+        Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
+        var lines = new ConcurrentQueue<string>();
+
+        evidence.Line($"settings ui dump: opening (path={path})");
+        SettingsUi.Open(settings, path, _ => { }, lines.Enqueue);
+
+        var sw = Stopwatch.StartNew();
+        while (!SettingsUi.IsOpen && sw.ElapsedMilliseconds < 5000) Thread.Sleep(25);
+        if (!SettingsUi.IsOpen)
+        {
+            while (lines.TryDequeue(out string? early)) evidence.Line(early);
+            evidence.Line("settings ui dump: FAILED to open");
+            return 1;
+        }
+        Thread.Sleep(500);      // 沒畫完就截會得到半張圖，所以先讓它畫完
+        bool ok = SettingsUi.DumpFrame(opt.SettingsUiDump, 5000, out string detail, lines.Enqueue);
+        SettingsUi.Close();
+        while (lines.TryDequeue(out string? line)) evidence.Line(line);
+        evidence.Line($"settings ui dump: ok={ok} detail={detail} path={opt.SettingsUiDump}");
+        return ok ? 0 : 1;
+    }
 
     /// <summary>
     /// M1f：`--settings-set k=v;k=v`（規格 §8）。設定頁按「儲存」走同一條路，所以它必須能被無頭驗證。

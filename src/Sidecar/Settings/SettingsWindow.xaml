@@ -1,0 +1,223 @@
+<!--
+  Sidecar settings window (spec section 8).
+
+  Two hard rules live in this file, both for encoding safety:
+    1. ASCII ONLY. Not a single non-ASCII literal is allowed here; every user visible
+       string is assigned from SettingsStrings.cs by the code behind. The one exception
+       is the file path shown in the footer, which is a real path from the caller and is
+       therefore assigned at runtime too.
+    2. NO COLOURS AND NO BINDINGS. Colours are set in code from SettingsUi's token
+       palette, which itself derives from WheelDesign. Nothing is bound: there is no
+       DataContext and no DataBinding, so every value on screen is pushed explicitly.
+
+  Layout contract (measured, not guessed): each of the nine settings is ONE grid row of
+  Height=28, and each card carries at most one wrapped explanation line. That is what
+  keeps all nine settings plus the footer inside the window at the baseline 100% DPI
+  with no scrollbar, which is a hard requirement. Do NOT move a per-row explanation back
+  into a row (as a second TextBlock under the label): measured, that costs about 10px per
+  row, needs 100 extra pixels of window, and the Save button leaves the screen.
+
+  Element names are referenced by SettingsWindow.xaml.cs; renaming one here without
+  renaming it there is a compile error (the generated fields are typed), which is the
+  point: no silent lookup by string -> no silent no-op control.
+-->
+<Window x:Class="Sidecar.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:ClassModifier="internal"
+        Width="540" Height="780"
+        ResizeMode="CanMinimize"
+        WindowStartupLocation="CenterScreen"
+        ShowInTaskbar="False"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="24,18,24,12">
+            <TextBlock x:Name="TitleText" FontSize="21" FontWeight="SemiBold" />
+            <TextBlock x:Name="SubtitleText" FontSize="12" Margin="0,5,0,0" TextWrapping="Wrap" />
+        </StackPanel>
+
+        <!-- Settings body -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
+            <StackPanel Margin="24,0,18,14">
+
+                <Border x:Name="BehaviourCard" CornerRadius="8" Padding="12,10">
+                    <StackPanel>
+                        <TextBlock x:Name="BehaviourCardTitle" FontSize="12" FontWeight="SemiBold" />
+                        <TextBlock x:Name="BehaviourCardDesc" FontSize="11" Margin="0,3,0,8" TextWrapping="Wrap" />
+
+                        <Grid x:Name="TriggerRow" Height="28">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="54" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TriggerLabel" FontSize="13" VerticalAlignment="Center" />
+                            <Button x:Name="CaptureButton" Grid.Column="1" Height="26" Margin="10,0,8,0"
+                                    VerticalAlignment="Center" FontSize="12"
+                                    LostFocus="OnCaptureButtonLostFocus" />
+                            <ComboBox x:Name="TriggerPresetBox" Grid.Column="2" Height="26" Width="150"
+                                      VerticalAlignment="Center" FontSize="12" />
+                            <TextBlock x:Name="TriggerValueText" Grid.Column="3" FontSize="13" FontWeight="SemiBold"
+                                       Margin="8,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Right"
+                                       TextTrimming="CharacterEllipsis" />
+                        </Grid>
+
+                        <!-- Spec 8 warning for the Shift trigger key; empty unless Shift is chosen -->
+                        <TextBlock x:Name="TriggerWarningText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+
+                        <Grid x:Name="StartupRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="StartupLabel" FontSize="13" VerticalAlignment="Center" />
+                            <TextBlock x:Name="StartupStubBadge" Grid.Column="1" FontSize="10" FontWeight="SemiBold"
+                                       Margin="10,0,8,0" VerticalAlignment="Center" HorizontalAlignment="Left" />
+                            <ToggleButton x:Name="StartupToggle" Grid.Column="2" Width="60" Height="24"
+                                          VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+
+                        <Grid x:Name="LanguageRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="LanguageLabel" FontSize="13" VerticalAlignment="Center" />
+                            <ComboBox x:Name="LanguageBox" Grid.Column="2" Height="26" Width="150"
+                                      VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="QualityCard" CornerRadius="8" Padding="12,10" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock x:Name="QualityCardTitle" FontSize="12" FontWeight="SemiBold" />
+                        <TextBlock x:Name="QualityCardDesc" FontSize="11" Margin="0,3,0,8" TextWrapping="Wrap" />
+
+                        <Grid x:Name="JpgRow" Height="28">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="54" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="JpgLabel" FontSize="13" VerticalAlignment="Center" />
+                            <Slider x:Name="JpgSlider" Grid.Column="1" Minimum="60" Maximum="100"
+                                    VerticalAlignment="Center" Margin="10,0,10,0" />
+                            <TextBlock x:Name="JpgValueText" Grid.Column="2" FontSize="13" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" HorizontalAlignment="Right" />
+                        </Grid>
+
+                        <Grid x:Name="WebpRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="54" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="WebpLabel" FontSize="13" VerticalAlignment="Center" />
+                            <Slider x:Name="WebpSlider" Grid.Column="1" Minimum="60" Maximum="100"
+                                    VerticalAlignment="Center" Margin="10,0,10,0" />
+                            <TextBlock x:Name="WebpValueText" Grid.Column="2" FontSize="13" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" HorizontalAlignment="Right" />
+                        </Grid>
+
+                        <Grid x:Name="NamingRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NamingLabel" FontSize="13" VerticalAlignment="Center" />
+                            <TextBlock x:Name="NamingValueText" Grid.Column="1" FontSize="13" Margin="10,0,0,0"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                        </Grid>
+
+                        <!-- Spec 8: MVP is fixed to auto-numbering; the reason must be on screen -->
+                        <TextBlock x:Name="NamingReasonText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+
+                        <Grid x:Name="TimeoutRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="54" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TimeoutLabel" FontSize="13" VerticalAlignment="Center" />
+                            <Slider x:Name="TimeoutSlider" Grid.Column="1" Minimum="5" Maximum="120"
+                                    VerticalAlignment="Center" Margin="10,0,10,0" />
+                            <TextBlock x:Name="TimeoutValueText" Grid.Column="2" FontSize="13" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" HorizontalAlignment="Right" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="SafetyCard" CornerRadius="8" Padding="12,10" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock x:Name="SafetyCardTitle" FontSize="12" FontWeight="SemiBold" />
+                        <TextBlock x:Name="SafetyCardDesc" FontSize="11" Margin="0,3,0,8" TextWrapping="Wrap" />
+
+                        <Grid x:Name="HotkeyRow" Height="28">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="HotkeyLabel" FontSize="13" VerticalAlignment="Center" />
+                            <TextBox x:Name="HotkeyBox" Grid.Column="1" Height="26" Margin="10,0,8,0"
+                                     VerticalAlignment="Center" FontSize="12" VerticalContentAlignment="Center" />
+                            <ToggleButton x:Name="HotkeyToggle" Grid.Column="2" Width="60" Height="24"
+                                          VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+
+                        <!-- Spec 8: this hotkey is not wired up yet; the UI has to say so -->
+                        <TextBlock x:Name="HotkeyStubText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+
+                        <Grid x:Name="DiagnosticsRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="DiagnosticsLabel" FontSize="13" VerticalAlignment="Center" />
+                            <ToggleButton x:Name="DiagnosticsToggle" Grid.Column="2" Width="60" Height="24"
+                                          VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Footer -->
+        <Border x:Name="FooterPanel" Grid.Row="2" BorderThickness="0,1,0,0" Padding="24,10,24,14">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="StatusText" FontSize="12" TextWrapping="Wrap" MinHeight="16" />
+                <Grid Grid.Row="1" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="PathText" FontSize="11" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button x:Name="CancelButton" Width="92" Height="30" FontSize="13" />
+                        <Button x:Name="SaveButton" Width="108" Height="30" FontSize="13" FontWeight="SemiBold"
+                                Margin="10,0,0,0" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

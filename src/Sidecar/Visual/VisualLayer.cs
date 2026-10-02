@@ -27,6 +27,9 @@ internal sealed class VisualLayer : IDisposable
     private static readonly Dictionary<IntPtr, VisualLayer> Instances = new();
     /// <summary>週期性回呼（進度顯示的淡出與重畫用）。只有需要時才啟動計時器。</summary>
     public event Action? TickRequested;
+
+    /// <summary>設定頁按下「儲存」後，由 <see cref="RequestSettingsApply"/> 叫回主執行緒。</summary>
+    public event Action? SettingsChanged;
     private System.Threading.Timer? _tickTimer;
     private bool _visible;
     private int _frames;
@@ -162,7 +165,14 @@ internal sealed class VisualLayer : IDisposable
         Native.PostMessageW(_hwnd, Native.WM_APP_FORCE_HIDE, new IntPtr(reason), IntPtr.Zero);
 
     /// <summary>
-    /// 視覺層只處理「收層」這一則自訂訊息，其餘一律交回系統。
+    /// 設定頁在自己的 STA 執行緒上按下「儲存」之後，要求**主執行緒**套用新設定。
+    /// 呼叫端（WPF 執行緒）只做「排隊 + 叫醒」，不在這裡碰任何 UI 或日誌物件。
+    /// </summary>
+    public void RequestSettingsApply() =>
+        Native.PostMessageW(_hwnd, Native.WM_APP_SETTINGS_CHANGED, IntPtr.Zero, IntPtr.Zero);
+
+    /// <summary>
+    /// 視覺層處理三則自訂訊息：收層、週期回呼、設定變更；其餘一律交回系統。
     /// **收層的決定權不在這裡**：guard 決定，這裡只執行。
     /// </summary>
     private static IntPtr StaticWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -177,6 +187,11 @@ internal sealed class VisualLayer : IDisposable
         if (msg == Native.WM_APP_TICK && Instances.TryGetValue(hWnd, out VisualLayer? ticking))
         {
             ticking.TickRequested?.Invoke();
+            return IntPtr.Zero;
+        }
+        if (msg == Native.WM_APP_SETTINGS_CHANGED && Instances.TryGetValue(hWnd, out VisualLayer? settings))
+        {
+            settings.SettingsChanged?.Invoke();
             return IntPtr.Zero;
         }
         return Native.DefWindowProcW(hWnd, msg, wParam, lParam);
