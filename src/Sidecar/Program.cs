@@ -87,7 +87,8 @@ internal static class Program
         {
             // fall through: the payload path dumps the panel itself (see DumpDetailPanels)
         }
-        else if (!string.IsNullOrEmpty(opt.ProgressDumpDetail) || !string.IsNullOrEmpty(opt.ProgressDumpDetailRaw))
+        else if (!string.IsNullOrEmpty(opt.ProgressDumpDetail) || !string.IsNullOrEmpty(opt.ProgressDumpDetailRaw)
+                 || !string.IsNullOrEmpty(opt.ProgressDumpDetailJson))
         {
             Native.AttachParentConsole();
             using var detailEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
@@ -233,6 +234,9 @@ internal sealed class Options
                                     --wheel-payload they come from the worker over the pipe (full UI path)
           --progress-dump-detail-raw <png>
                                     same panel with alpha preserved (the file whose pixels can be sampled)
+          --progress-dump-detail-json <json>
+                                    the EXACT laid-out row strings handed to GDI+ (plus the width cap),
+                                    so acceptance can assert on what was drawn instead of on intent
           --progress-detail-selftest
                                     exercise PillRect/Contains/IsExpanded/ToggleDetail headlessly and exit
           --wheel-simulate-cycles <N>
@@ -327,6 +331,15 @@ internal sealed class Options
     public string ProgressDumpDetail = "";
     /// <summary>同 <see cref="ProgressDumpDetail"/>，但**保留 alpha**（唯一能取樣文字墨水的檔案）。</summary>
     public string ProgressDumpDetailRaw = "";
+    /// <summary>
+    /// --progress-dump-detail-json &lt;json&gt;：把**真正交給 GDI+ 的每一列字串**寫成 JSON（D4 的證據）。
+    ///
+    /// 為什麼非有這個不可：驗收要斷言「畫出來的那一行還帶著完整原因、只有檔名被中略」。
+    /// 只驗日誌的話，驗到的是「我打算這樣畫」——那叫**自我報告**；只驗 PNG 的話，
+    /// 「字被截掉了」與「字比較短」在像素上分不出來。這個檔案是排版結果本身，
+    /// 點陣圖的寬度則是同一件事的第二個角度（兩者必須一致）。
+    /// </summary>
+    public string ProgressDumpDetailJson = "";
     /// <summary>
     /// --progress-detail-selftest：不必畫面就驗規格 §7.3 的行為——
     /// `IsExpanded` 一開始必須是 false（「清單不自動彈出」）、`ToggleDetail` 要真的翻動它、
@@ -471,6 +484,9 @@ internal sealed class Options
                     break;
                 case "--progress-dump-detail-raw":
                     if (i + 1 < args.Length) { o.ProgressDumpDetailRaw = args[i + 1]; i++; }
+                    break;
+                case "--progress-dump-detail-json":
+                    if (i + 1 < args.Length) { o.ProgressDumpDetailJson = args[i + 1]; i++; }
                     break;
                 case "--progress-detail-selftest":
                     o.ProgressDetailSelfTest = true;
@@ -1700,15 +1716,28 @@ internal static class App
             ? opt.ProgressDumpDetail
             : opt.ProgressDumpDetailRaw;
         string? rawPath = string.IsNullOrEmpty(opt.ProgressDumpDetailRaw) ? null : opt.ProgressDumpDetailRaw;
-        if (string.IsNullOrEmpty(outPath)) return 10;
+        if (string.IsNullOrEmpty(outPath) && string.IsNullOrEmpty(opt.ProgressDumpDetailJson)) return 10;
 
-        string? directory = Path.GetDirectoryName(Path.GetFullPath(outPath));
+        string? directory = string.IsNullOrEmpty(outPath)
+            ? Path.GetDirectoryName(Path.GetFullPath(opt.ProgressDumpDetailJson))
+            : Path.GetDirectoryName(Path.GetFullPath(outPath));
         try { if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory); }
         catch (Exception ex)
         {
             evidence.Line($"progress-dump-detail: cannot create {directory}: {ex.Message}");
             return 10;
         }
+
+        // D4：寬度上限＝工作區寬 − 2 × 24，取自**產品自己用的那個機制**（MonitorLayout →
+        // `GetMonitorInfoW` 的 rcWork，行程是 PerMonitorV2 所以單位是實體像素）。
+        // 無頭 dump 也走這一條：驗收斷言的「上限」若與畫面上的上限不同，那條斷言只是在
+        // 驗一個不存在於產品裡的數字。
+        // 注意：這裡算出來的 cap 是**這台機器**的；PNG 的實際寬度在下面逐變體寫出來，
+        // 兩者都寫進日誌，所以「有沒有真的被夾住」是可比的。
+        Rectangle workArea = ProgressPresenter.WorkAreaAt(0, 0);
+        int cap = ProgressPresenter.MaxPanelWidthFor(workArea);
+        evidence.Line($"detail dump: work area={workArea.X},{workArea.Y},{workArea.Width},{workArea.Height} " +
+                      $"cap={cap} (0 = unlimited: the work area could not be queried)");
 
         var shortRows = new List<ConversionFailureRow>
         {
@@ -1723,20 +1752,51 @@ internal static class App
         // 9 列 = 上限 8 ＋ 1 筆溢出。「有沒有真的停在上限」只能靠這種超過上限的輸入驗出來。
         var manyRows = new List<ConversionFailureRow>();
         for (int i = 1; i <= 9; i++) manyRows.Add(new ConversionFailureRow($"shot{i:00}.jpg", "無法解碼"));
+        // D4：極端檔名（200 個字元）。沒有這一列，「極長檔名不得把面板撐到無邊」這條
+        // 就沒有東西可以驗——上面最長的變體只有 540 px，遠低於上限。
+        //
+        // 兩個變體是刻意的：`extreme` 的檔名全是同一種字元（中略後頭尾等長，看不出
+        // 「中略」與「尾巴截斷」的差別），`extreme-mid` 的檔名頭尾不同（前面是日期、
+        // 後面是 `.png`），所以「頭尾都被保留、省略號在中間、副檔名還在」是可以逐字驗的。
+        var extremeRows = new List<ConversionFailureRow>
+        {
+            new(new string('W', 200) + ".png", "無法解碼"),
+            new("b.heic", "檔案被鎖定"),
+        };
+        var extremeMidRows = new List<ConversionFailureRow>
+        {
+            // 32 組 `NNNN-NNNN-`（320 個字元 ＋ `.png`）：頭是數字與減號、尾是 `.png`，
+            // 兩端長得不一樣，所以「中略的頭真的是檔名開頭、尾真的是檔名結尾」可以逐字驗。
+            // 字數要夠多到**真的超過上限**，否則這一列根本不會被縮（第一版 204 個字元量出來
+            // 只有 1756 px，第二版 244 個字元是 2018 px，都在 2512 px 的上限之下，
+            // 於是那兩條斷言什麼都沒驗到——這是量出來的，不是猜的）。
+            new(string.Concat(Enumerable.Range(0, 32).Select(_ => "2222-9999-")) + ".png", "無法解碼"),
+            new("b.heic", "檔案被鎖定"),
+        };
 
         int failed = 0;
         int variants = 0;
-        DumpOne(evidence, "short", shortRows, Panels(outPath, "short")!, Panels(rawPath, "short"), ref failed);
+        var stats = new List<DumpVariant>();
+        DumpOne(evidence, cap, "short", shortRows,
+                Panels(outPath, "short")!, Panels(rawPath, "short"), stats, ref failed);
         variants++;
-        DumpOne(evidence, "long", longRows, Panels(outPath, "long")!, Panels(rawPath, "long"), ref failed);
+        DumpOne(evidence, cap, "long", longRows,
+                Panels(outPath, "long")!, Panels(rawPath, "long"), stats, ref failed);
         variants++;
-        DumpOne(evidence, "many", manyRows, Panels(outPath, "many")!, Panels(rawPath, "many"), ref failed);
+        DumpOne(evidence, cap, "many", manyRows,
+                Panels(outPath, "many")!, Panels(rawPath, "many"), stats, ref failed);
+        variants++;
+        DumpOne(evidence, cap, "extreme", extremeRows,
+                Panels(outPath, "extreme")!, Panels(rawPath, "extreme"), stats, ref failed);
+        variants++;
+        DumpOne(evidence, cap, "extreme-mid", extremeMidRows,
+                Panels(outPath, "extreme-mid")!, Panels(rawPath, "extreme-mid"), stats, ref failed);
         variants++;
 
         if (realSummary != null)
         {
-            DumpOne(evidence, "real", realSummary.FailureRows,
-                    Panels(outPath, "real")!, Panels(rawPath, "real"), ref failed);
+            DumpOne(evidence, cap, "real", realSummary.FailureRows,
+                    Panels(outPath, "real")!, Panels(rawPath, "real"), stats, ref failed);
             variants++;
             foreach (ConversionFailureRow row in realSummary.FailureRows)
                 // reason 一律用引號夾起來：空的 reason 若寫成 `reason=` 後面沒東西，
@@ -1771,6 +1831,11 @@ internal static class App
         }
         variants++;
 
+        // D4 的證據檔（可選）。放在最後才寫：它要涵蓋**所有**變體，包括上面的真的轉檔那一列。
+        if (!string.IsNullOrEmpty(opt.ProgressDumpDetailJson))
+            WriteDetailLayoutJson(evidence, opt.ProgressDumpDetailJson, workArea, cap,
+                                  ProgressPresenter.MaxDetailRows, stats);
+
         evidence.Line($"progress dump detail done: variants={variants} failed={failed}");
         return failed == 0 ? 0 : 7;
     }
@@ -1784,31 +1849,59 @@ internal static class App
         string.IsNullOrEmpty(path) ? null : ReplaceFileName(path, suffix);
 
     /// <summary>畫一個變體並寫出兩個檔（flat ＋ raw）。回傳 flat 的路徑（失敗時 null）。</summary>
-    private static string? DumpOne(Evidence evidence, string name, IReadOnlyList<ConversionFailureRow> rows,
-                                  string flatPath, string? rawPath, ref int failed)
+    private static string? DumpOne(Evidence evidence, int cap, string name, IReadOnlyList<ConversionFailureRow> rows,
+                                  string flatPath, string? rawPath,
+                                  List<DumpVariant> stats,
+                                  ref int failed)
     {
         string? flatTarget = null;
         try
         {
             flatTarget = flatPath;
-            using Bitmap panel = ProgressPresenter.ComposeDetail(rows, 255);
-            using (var flat = new Bitmap(panel.Width, panel.Height,
-                                         System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            // ComposeDetail 回傳的 texts 就是**交給 GDI+ 的那一份**，
+            // 不是另外再排版一次（兩次排版就可能不一致，而驗收會驗到一份沒有被畫出來的字串）。
+            var (panel, texts) = ProgressPresenter.ComposeDetail(rows, 255, cap);
+            using (panel)
             {
-                using (var g = Graphics.FromImage(flat))
+                using (var flat = new Bitmap(panel.Width, panel.Height,
+                                             System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                 {
-                    g.Clear(Color.FromArgb(255, 32, 34, 38));
-                    g.DrawImageUnscaled(panel, 0, 0);
+                    using (var g = Graphics.FromImage(flat))
+                    {
+                        g.Clear(Color.FromArgb(255, 32, 34, 38));
+                        g.DrawImageUnscaled(panel, 0, 0);
+                    }
+                    flat.Save(flatTarget, System.Drawing.Imaging.ImageFormat.Png);
                 }
-                flat.Save(flatTarget, System.Drawing.Imaging.ImageFormat.Png);
-            }
-            if (rawPath != null) panel.Save(rawPath, System.Drawing.Imaging.ImageFormat.Png);
+                if (rawPath != null) panel.Save(rawPath, System.Drawing.Imaging.ImageFormat.Png);
 
-            int shown = Math.Min(rows.Count, ProgressPresenter.MaxDetailRows);
-            evidence.Line($"detail dump line: variant={name} width={panel.Width} height={panel.Height} " +
-                          $"rows={rows.Count} shown={shown} " +
-                          $"overflow={rows.Count - shown} cap={ProgressPresenter.MaxDetailRows} " +
-                          $"-> {flatTarget}");
+                int shown = Math.Min(rows.Count, ProgressPresenter.MaxDetailRows);
+                // `cap=` 是**列數上限**（MaxDetailRows），`widthCap=` 才是 D4 的寬度上限。
+                // 舊欄位名不動：驗收套件已經在讀它，改名會讓舊斷言靜默地永遠不匹配。
+                //
+                // `fileNameLength` 是給驗收用的：`extreme` 這一列的檔名有 204 個字元，
+                // 「cap 是有效的上限」與「這一列真的長到會被上限夾住」是兩件不同的事，
+                // 只有前者成立的話，那條斷言會在輸入變短時靜默地變成裝飾品。
+                int longestName = rows.Count == 0 ? 0 : rows.Max(r => r.FileName.Length);
+                evidence.Line($"detail dump line: variant={name} width={panel.Width} height={panel.Height} " +
+                              $"rows={rows.Count} shown={shown} " +
+                              $"overflow={rows.Count - shown} cap={ProgressPresenter.MaxDetailRows} " +
+                              $"widthCap={cap} fileNameLength={longestName} -> {flatTarget}");
+                var laidOutRows = new List<DumpRowLayout>();
+                for (int i = 0; i < shown; i++)
+                    laidOutRows.Add(new DumpRowLayout(rows[i].Text, texts[i], rows[i].FileName,
+                                                      LaidOutFileName(rows[i].Text, texts[i], rows[i].Reason),
+                                                      rows[i].Reason));
+                if (rows.Count > shown)
+                {
+                    // 溢出那一列沒有「原字串」可言（它的字是組出來的），但它的排版結果要留著：
+                    // 驗收對「每一列都要有完整原因」的斷言會把 `…還有 N 筆` 排除掉（原因為空），
+                    // 而它是不是真的被畫出來，由像素的墨跡帶數已經驗過了。
+                    laidOutRows.Add(new DumpRowLayout(texts[texts.Count - 1], texts[texts.Count - 1],
+                                                      "", texts[texts.Count - 1], ""));
+                }
+                stats.Add(new DumpVariant(name, panel.Width, panel.Height, laidOutRows));
+            }
         }
         catch (Exception ex)
         {
@@ -1818,6 +1911,131 @@ internal static class App
         }
         return flatTarget;
     }
+
+    /// <summary>
+    /// 一個 dump 變體的一列：原始那一列的字、**真正交給 GDI+ 的字**，以及那一列的兩欄
+    /// （檔名／原因）。
+    ///
+    /// 為什麼要連檔名與原因都寫出來：驗收要斷言的「檔名被中略、原因沒被動」是**兩欄之間**
+    /// 的關係（哪一段是哪一段）。只給合併後的字串，驗收就只能用「用空白切開」去猜界線，
+    /// 而檔名本來就可能含空白——那條斷言會在遇到空白檔名時靜默地變成錯的。
+    ///
+    /// <see cref="LaidOutFileName"/> 是**排版後**的檔名本身（被中略的那一串）。它與
+    /// <see cref="FileName"/>（原始檔名）的差別是驗收唯一能分辨「中略」與「重排」的地方：
+    /// 中略後的檔名比較短，但它的頭是原檔名的頭、尾是原檔名的尾。
+    /// </summary>
+    private sealed record DumpRowLayout(string Text, string LaidOut, string FileName, string LaidOutFileName,
+                                       string Reason);
+
+    /// <summary>一個 dump 變體的結果（寬高、以及每一列的排版）。</summary>
+    private sealed record DumpVariant(string Name, int Width, int Height, List<DumpRowLayout> Rows);
+
+    /// <summary>
+    /// D4 的證據檔：真正交給 GDI+ 的每一列字串（`--progress-dump-detail-json`）。
+    ///
+    /// 為什麼不只用日誌：日誌行裡的字串混在幾百行其他輸出之間，而且中略號與空格在
+    /// 複製貼上時會走樣；這個檔案是排版結果本身，驗收端可以直接讀。
+    ///
+    /// 為什麼要有 `laidOutWidth`／`ellipsisIndex`：驗收要分辨「中略」與「被尾巴截掉」，
+    /// 而在純文字上兩者長得很像（都有 `…`，只是位置不同）。把中略號的**字元位置**寫出來，
+    /// 驗收就不必自己猜，也不必用會誤判的 `StartsWith` 比對。
+    ///
+    /// `text` 是排版前的原字串，`laidOut` 是排版後的字串：兩者一起寫出來，
+    /// 驗收才驗得到「正常長度的那一列一個字都沒被動過」。
+    /// </summary>
+    private static void WriteDetailLayoutJson(Evidence evidence, string path, Rectangle workArea, int cap,
+                                             int maxRows, List<DumpVariant> stats)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append('{');
+        sb.Append($"\"workArea\":[{workArea.X},{workArea.Y},{workArea.Width},{workArea.Height}],");
+        sb.Append($"\"maxWidthPx\":{cap},");
+        sb.Append($"\"maxRows\":{maxRows},");
+        sb.Append("\"variants\":[");
+        for (int v = 0; v < stats.Count; v++)
+        {
+            DumpVariant variant = stats[v];
+            if (v > 0) sb.Append(',');
+            sb.Append($"{{\"name\":{Json(variant.Name)},\"width\":{variant.Width}," +
+                      $"\"height\":{variant.Height},\"rows\":[");
+            for (int i = 0; i < variant.Rows.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                DumpRowLayout row = variant.Rows[i];
+                string layout = row.LaidOut;
+                sb.Append($"{{\"index\":{i}," +
+                          $"\"fileName\":{Json(row.FileName)},\"fileNameLength\":{row.FileName.Length}," +
+                          $"\"laidOutFileName\":{Json(row.LaidOutFileName)}," +
+                          $"\"laidOutFileNameLength\":{row.LaidOutFileName.Length}," +
+                          $"\"reason\":{Json(row.Reason)},\"reasonLength\":{row.Reason.Length}," +
+                          $"\"text\":{Json(row.Text)},\"laidOut\":{Json(layout)}," +
+                          $"\"laidOutLength\":{layout.Length}," +
+                          $"\"ellipsisIndex\":{layout.IndexOf('\u2026')}," +
+                          $"\"laidOutWidth\":{MeasureTextForDump(layout)}}}");
+            }
+            sb.Append("]}");
+        }
+        sb.Append("]}");
+
+        string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        try
+        {
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(path, sb.ToString(), new System.Text.UTF8Encoding(false));
+            evidence.Line($"detail dump json: wrote {path} " +
+                          $"(workAreaWidth={workArea.Width} maxWidthPx={cap} variants={stats.Count})");
+        }
+        catch (Exception ex)
+        {
+            evidence.Line($"detail dump json: FAILED to write {path}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 排版後那一列裡的**檔名**部分。未被改寫時就是原字串；被縮短時等於「排版後的字串
+    /// 減掉尾巴的原因與那一個分隔空白」。
+    ///
+    /// 為什麼要在 dump 裡把這件事算出來，而不是讓驗收自己切：切錯界線不會有任何錯誤，
+    /// 只會得到一個看起來很有道理的錯檔名——那正是這個專案在消滅的第二個真相來源。
+    /// </summary>
+    private static string LaidOutFileName(string text, string laidOut, string reason)
+    {
+        if (laidOut == text) return text;
+        string suffix = reason.Length == 0 ? string.Empty : " " + reason;
+        return suffix.Length > 0 && laidOut.EndsWith(suffix)
+            ? laidOut.Substring(0, laidOut.Length - suffix.Length)
+            : laidOut;
+    }
+
+    /// <summary>JSON 字串（含控制字元跳脫）。手寫是刻意的：這個 dump 不引入任何新套件。</summary>
+    private static string Json(string text)
+    {
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (char c in text)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        return sb.Append('"').ToString();
+    }
+
+    /// <summary>
+    /// JSON 裡回報的「這一列有多寬」：**問繪製端自己**（同一支字型、同一個格式），
+    /// 不在這裡另寫一份量測——兩份量測就是第二個真相來源，而它會在下一次改字型時默默分歧。
+    /// </summary>
+    private static int MeasureTextForDump(string text) =>
+        (int)Math.Ceiling(ProgressPresenter.MeasureDetailRowWidth(text));
+
 
     /// <summary>`C:\x\panel.png` ＋ `short` → `C:\x\panel-short.png`。</summary>
     private static string ReplaceFileName(string path, string suffix)
@@ -1841,17 +2059,31 @@ internal static class App
     /// </summary>
     private static void DumpDetailPanels(Options opt, Evidence evidence, List<ConversionFailureRow> rows)
     {
-        if (string.IsNullOrEmpty(opt.ProgressDumpDetail) && string.IsNullOrEmpty(opt.ProgressDumpDetailRaw))
+        if (string.IsNullOrEmpty(opt.ProgressDumpDetail) && string.IsNullOrEmpty(opt.ProgressDumpDetailRaw)
+            && string.IsNullOrEmpty(opt.ProgressDumpDetailJson))
             return;
         string outPath = !string.IsNullOrEmpty(opt.ProgressDumpDetail)
             ? opt.ProgressDumpDetail
             : opt.ProgressDumpDetailRaw;
         string? rawPath = string.IsNullOrEmpty(opt.ProgressDumpDetailRaw) ? null : opt.ProgressDumpDetailRaw;
 
+        // 上限與畫面同一條規則（工作區寬 − 2 × 24）。這一條路徑是**跨管道的真實資料**，
+        // 它也要受同一個上限約束，否則「上限」只在無頭 dump 裡成立。
+        Rectangle workArea = ProgressPresenter.WorkAreaAt(0, 0);
+        int cap = ProgressPresenter.MaxPanelWidthFor(workArea);
+
         int failed = 0;
-        DumpOne(evidence, "real", rows, Panels(outPath, "real")!, Panels(rawPath, "real"), ref failed);
+        var stats = new List<DumpVariant>();
+        if (!string.IsNullOrEmpty(outPath))
+            DumpOne(evidence, cap, "real", rows, Panels(outPath, "real")!, Panels(rawPath, "real"), stats, ref failed);
+        if (!string.IsNullOrEmpty(opt.ProgressDumpDetailJson))
+            WriteDetailLayoutJson(evidence, opt.ProgressDumpDetailJson, workArea, cap,
+                                  ProgressPresenter.MaxDetailRows, stats);
+        // 舊的斷言讀的是這一行（`variant=real-pipeline rows=N failed=0`），所以欄位順序不動，
+        // widthCap 只能加在後面。
         evidence.Line($"detail dump line: variant=real-pipeline rows={rows.Count} " +
-                      $"failed={failed} (rows came from the worker over the pipe, not from --convert)");
+                      $"failed={failed} (rows came from the worker over the pipe, not from --convert) " +
+                      $"[widthCap={cap}]");
     }
 
     /// <summary>

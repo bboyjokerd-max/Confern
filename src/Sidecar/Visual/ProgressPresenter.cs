@@ -35,6 +35,29 @@ internal sealed class ProgressPresenter : IDisposable
     private const int DetailTextInsetX = 14;
     private const float DetailFontPx = 14f;
 
+    /// <summary>
+    /// 面板圓角半徑的上限（D3）。<c>radius = min(height / 2, 18)</c>：
+    /// 1 列時 <c>height / 2 = 17</c>（幾乎是膠囊），8 列時被夾在 18（圓角矩形）——
+    /// 兩種列數在像素上的圓角因此**只差 1 px**，是「同一個元件、同一種形狀語言」。
+    ///
+    /// 原本面板沿用藥丸的「半高」規則，於是高度一變圓角跟著變：1 列像膠囊、8 列像一般的
+    /// 圓角矩形，同一個元件長出兩種形狀。**藥丸的半高膠囊是凍結的設計決定，不動**
+    /// （見 <see cref="Compose"/>）；被改的只有面板。
+    /// </summary>
+    public const float PanelCornerRadiusMax = 18f;
+
+    /// <summary>面板兩側至少留這麼多像素（D4：寬度上限＝工作區寬 − 2 × 這個值）。</summary>
+    public const int ScreenMargin = 24;
+
+    /// <summary>檔名省略時，尾端至少保留幾個字元（否則連副檔名都留不住）。</summary>
+    private const int MinTailChars = 4;
+
+    /// <summary>中略號。用一個字元（不是三個點）——三個點會讓「保留幾個字元」的計算變成猜的。</summary>
+    private const char Ellipsis = '\u2026';
+
+    /// <summary>工作區（螢幕扣除工作列）。空矩形＝查不到，此時不做任何邊界處理。</summary>
+    private Rectangle _workArea;
+
     private readonly VisualLayer _layer;
     private readonly Evidence _evidence;
 
@@ -127,7 +150,37 @@ internal sealed class ProgressPresenter : IDisposable
         _rows = Array.Empty<ConversionFailureRow>();
         _expanded = false;      // 新的一次轉檔＝收起的清單（§7.3：不自動彈出）
         _hasRect = false;
+        _workArea = WorkAreaAt(x, y);   // D4：面板的寬度上限與位置夾取都以這裡的工作區為準
         _layer.StartTick(80);
+    }
+
+    /// <summary>
+    /// 點 (x,y) 所在螢幕的**工作區**（扣除工作列）。查不到時回傳空矩形＝不做邊界處理。
+    ///
+    /// 幾何的唯一來源是 <see cref="MonitorLayout"/>（它拿 <c>GetMonitorInfoW</c> 的 <c>rcWork</c>），
+    /// 不自己推算、也不寫死一組螢幕尺寸——寫死的那種「上限」在別台機器上只是裝飾品。
+    /// </summary>
+    internal static Rectangle WorkAreaAt(int x, int y)
+    {
+        try
+        {
+            MonitorEntry m = MonitorLayout.Nearest(x, y, MonitorLayout.Enumerate());
+            return Rectangle.FromLTRB(m.Work.Left, m.Work.Top, m.Work.Right, m.Work.Bottom);
+        }
+        catch (Exception)
+        {
+            return Rectangle.Empty;
+        }
+    }
+
+    /// <summary>
+    /// 面板寬度上限（D4）：<c>工作區寬 − 2 × <see cref="ScreenMargin"/></c>。
+    /// 回傳 0＝無上限（查不到工作區時不猜一個數字：猜錯的邊界比沒有邊界更難查）。
+    /// </summary>
+    public static int MaxPanelWidthFor(Rectangle workArea)
+    {
+        if (workArea.Width <= 0) return 0;
+        return Math.Max(BitmapWidth, workArea.Width - ScreenMargin * 2);
     }
 
     /// <summary>由 UI 的 tick 呼叫：內容有變才重畫（同一張圖原地更新）。</summary>
@@ -194,10 +247,19 @@ internal sealed class ProgressPresenter : IDisposable
         // 展開／收起的決定只在 _expanded；兩條路都走**同一個** alpha 參數，
         // 所以清單與藥丸的淡出是同一個節奏（沒有第二套 alpha 規則）。
         using Bitmap bitmap = _expanded
-            ? ComposeDetail(_rows, alpha)
+            ? ComposeDetail(_rows, alpha, MaxPanelWidthFor(_workArea)).Bitmap
             : Compose(_last.Line, _last.Done, _last.Total, _last.Finished, _last.Failed, alpha);
         // 以輪盤中心對齊，往上偏一點，避免正好壓在游標下方
         int left = _x - bitmap.Width / 2, top = _y - bitmap.Height / 2;
+        // D4：展開後的面板才夾進工作區。**藥丸自己的位置是凍結的行為，不夾**——
+        // 這裡多一個 `_expanded &&` 不是防禦性寫法，是在保護一個已經拍板的決定。
+        string? clamped = null;
+        if (_expanded && _workArea.Width > 0)
+        {
+            int wantX = left;
+            left = Math.Clamp(left, _workArea.Left, Math.Max(_workArea.Left, _workArea.Right - bitmap.Width));
+            if (left != wantX) clamped = $"x {wantX}->{left}";
+        }
         _layer.Show(left, top, bitmap);
         // 記下真正送出去的矩形：命中判定問的是「螢幕上那一塊」，
         // 不是「我以為它有多大」。展開後矩形變大，命中區域也跟著變大。
@@ -208,7 +270,8 @@ internal sealed class ProgressPresenter : IDisposable
         _evidence.Line($"progress: {_last.Line} done={_last.Done}/{_last.Total} " +
                        $"current={_last.Current ?? "-"} finished={_last.Finished} alpha={alpha} " +
                        $"expanded={_expanded} rect={_lastRect.X},{_lastRect.Y},{_lastRect.Width},{_lastRect.Height} " +
-                       $"(update #{_updates})");
+                       $"(update #{_updates})" +
+                       (clamped != null ? $" panel clamped into the work area: {clamped}" : string.Empty));
     }
 
     public void Hide()
@@ -227,36 +290,37 @@ internal sealed class ProgressPresenter : IDisposable
     ///
     /// 語彙沿用同一套，不是新發明：
     ///   • 錯誤紅＝<see cref="WheelDesign.NoticeFill"/>（產品裡「這是錯誤」只有一個紅）；
-    ///   • 圓角＝與藥丸同一種（半高膠囊／固定圓角的同一族），不是另一種形狀語言；
+    ///   • 圓角＝<c>min(高度 / 2, 18)</c>（D3）。**不是**藥丸的半高：面板列數一變，
+    ///     半高就會讓 1 列長成膠囊、8 列長成一般圓角矩形——同一個元件兩種形狀；
     ///   • 字型＝與藥丸共用的 <see cref="MakeFontPx"/>；alpha＝與藥丸相同的算法；
-    ///   • 寬度＝**依文字量測**（固定寬度會裁掉中文原因，那就等於使用者看不到原因）；
+    ///   • 寬度＝**依文字量測**（固定寬度會裁掉中文原因，那就等於使用者看不到原因），
+    ///     但總寬夾在 <paramref name="maxWidthPx"/>（D4：工作區寬 − 2 × 24）；
+    ///   • 太寬的一列**只縮檔名**（中略，保留副檔名），**原因永遠不縮**；
     ///   • 上限＝<see cref="MaxDetailRows"/> 列 ＋ `…還有 N 筆`，避免清單蓋住整個畫面。
     /// </summary>
-    public static Bitmap ComposeDetail(IReadOnlyList<ConversionFailureRow> rows, int alpha)
+    /// <param name="maxWidthPx">
+    /// 面板總寬上限。<c>&lt;= 0</c>＝無上限（呼叫端查不到工作區時不猜數字）。
+    /// </param>
+    /// <returns>
+    /// 點陣圖，以及**真正交給 GDI+ 的那些字串**（<c>LaidOut</c>）。
+    ///
+    /// 為什麼要把字串一起回傳：驗收要斷言的是「畫出來的那一行還帶著完整原因」，
+    /// 而「我打算省略檔名」是自我報告——自我報告在這個專案裡是弱證據。
+    /// 回傳的是**排完版的那一份**，與點陣圖用的是同一份字串，不是另外算一次
+    /// （算兩次就可能不一致，而驗收會驗到一份沒有被畫出來的字串）。
+    /// </returns>
+    public static (Bitmap Bitmap, IReadOnlyList<string> LaidOut) ComposeDetail(
+        IReadOnlyList<ConversionFailureRow> rows, int alpha, int maxWidthPx = 0)
     {
         int shown = Math.Min(rows.Count, MaxDetailRows);
         int hidden = Math.Max(0, rows.Count - shown);
         int lines = shown + (hidden > 0 ? 1 : 0);
 
+        // 字型的唯一來源（面板與藥丸共用）。排版函式拿到的是**同一支**字型，
+        // 所以「量出來的字」與「畫出來的字」不可能因為字型不同而分歧。
         using var font = MakeFontPx(DetailFontPx);
-        var texts = new string[lines];
-        for (int i = 0; i < shown; i++) texts[i] = rows[i].Text;
-        if (hidden > 0) texts[lines - 1] = $"…還有 {hidden} 筆";
-
-        // 寬度依文字量測（同 Compose）。**不可改成固定寬度**：規格 §7.1 的原因字串
-        // （`broken.png 無法解碼`）比檔名長得多，裁掉就等於使用者看不到原因，
-        // 而那種失敗在畫面上看起來只是「字被切掉」——不會有任何錯誤訊息。
-        int width = BitmapWidth;
-        using (var measureBitmap = new Bitmap(1, 1))
-        using (var measure = Graphics.FromImage(measureBitmap))
-        {
-            foreach (string text in texts)
-            {
-                float needed = measure.MeasureString(text, font).Width;
-                width = Math.Max(width, (int)Math.Ceiling(needed) + DetailPadX * 2 + HorizontalPadding);
-            }
-        }
-
+        IReadOnlyList<string> texts = LayoutRows(rows, maxWidthPx, font);
+        int width = PanelWidthFor(rows, maxWidthPx, font);
         int height = lines * DetailRowHeight + DetailPadY * 2;
         var bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bitmap);
@@ -268,29 +332,28 @@ internal sealed class ProgressPresenter : IDisposable
         // 錯誤紅與藥丸同一個來源、同一個不透明度（236）：清單是藥丸的展開，
         // 兩者色差會讓人以為是兩個不同的東西。
         Color panel = Color.FromArgb((int)(236 * a / 255), WheelDesign.NoticeFill);
-        // 圓角半徑＝藥丸的半高：同一種「膠囊／圓角矩形」的語彙，不是第二種形狀。
-        using (var path = RoundedRect(new RectangleF(1, 1, width - 2, height - 2), BitmapHeight / 2f))
+        // D3：圓角半徑＝min(高度 / 2, 18)。1 列（高 62）→ 17、8 列（高 300）→ 18，
+        // 兩種列數的圓角在像素上只差 1 px。
+        //
+        // **藥丸不是這樣**：藥丸的半高膠囊是凍結的設計決定（見 Compose）。這裡改的只有面板。
+        // 原本面板借用 `BitmapHeight / 2`（＝27，一個與面板高度無關的常數），
+        // 結果 1 列的面板圓角比半高還大（變成膠囊）、8 列的面板相對就變成一般圓角矩形。
+        float radius = Math.Min(height / 2f, PanelCornerRadiusMax);
+        using (var path = RoundedRect(new RectangleF(1, 1, width - 2, height - 2), radius))
         using (var brush = new SolidBrush(panel))
         {
             g.FillPath(brush, path);
         }
 
         using (var ink = new SolidBrush(Color.FromArgb(a, 245, 247, 250)))
-        using (var format = new StringFormat
-        {
-            Alignment = StringAlignment.Near,
-            LineAlignment = StringAlignment.Center,
-            // NoWrap ＋ EllipsisCharacter：真的塞不下時**截斷並加省略號**，不是折到第二行。
-            // 折行的代價不只是難看：那一列會需要兩倍行高，而固定的行高會把第二行裁掉，
-            // 使用者看到的是半截中文——比「被截斷且有省略號」更難判斷自己在看什麼。
-            // （這段註解是驗收套件用「固定寬度」的假故障逼出來的：那時 real 那一列
-            //   在像素上變成兩個墨跡帶，也就是文字被折行了。正常寬度下永遠不會發生。）
-            Trimming = StringTrimming.EllipsisCharacter,
-            FormatFlags = StringFormatFlags.NoWrap
-        })
+        using (var format = RowFormat())
         {
             for (int i = 0; i < lines; i++)
             {
+                // 文字框左右各內縮 DetailTextInsetX → 可用文字寬度＝width − 28。
+                // 這條界線**必須與 LayoutRows 用來決定的那一條相同**：排版說「這樣塞得下」，
+                // 這裡就必須真的塞得下；否則 GDI+ 會自己截掉尾巴，被吃掉的是**原因**，
+                // 而那正是這個變更要防的靜默失敗。
                 var row = new RectangleF(DetailTextInsetX, DetailPadY + i * DetailRowHeight,
                                          width - DetailTextInsetX * 2, DetailRowHeight);
                 g.DrawString(texts[i], font, ink, row, format);
@@ -305,8 +368,162 @@ internal sealed class ProgressPresenter : IDisposable
             g.DrawLine(hair, DetailPadX, y, width - DetailPadX, y);
         }
 
-        return bitmap;
+        return (bitmap, texts);
     }
+
+    /// <summary>
+    /// 面板排版：把列資料變成**真正要畫的那些字串**。純函式——同樣的輸入永遠得到同樣的輸出，
+    /// 不碰到畫面、不碰到狀態。
+    ///
+    /// 規則（規格 §7.3 ＋ 這個變更的 D4）：
+    ///   • 塞得下就原封不動（**正常長度的那一列一個字都不准動**——過度截斷也是一種缺陷）；
+    ///   • 塞不下時**只縮檔名**：中略（`2026-09-30 家庭旅遊…最終版.png`），副檔名要留著；
+    ///   • **原因永遠不縮**：規格 §7.1 存在的目的就是讓使用者看得到原因，
+    ///     一個被截掉的原因就是這個專案明文禁止的靜默失敗。
+    /// </summary>
+    /// <param name="maxWidthPx">面板總寬上限；<c>&lt;= 0</c>＝無上限。</param>
+    public static IReadOnlyList<string> LayoutRows(
+        IReadOnlyList<ConversionFailureRow> rows, int maxWidthPx, Font font)
+    {
+        bool cap = maxWidthPx > 0;
+        // 文字可用寬度＝面板寬 − 左右內縮。上限換算成「文字可以多寬」只有這一處，
+        // 畫的那一端用的是同一條界線（見 ComposeDetail 的 rect）。
+        int available = cap ? Math.Max(1, maxWidthPx - DetailTextInsetX * 2) : 0;
+
+        using var measureBitmap = new Bitmap(1, 1);
+        using var measure = Graphics.FromImage(measureBitmap);
+        measure.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        using var format = RowFormat();
+
+        int shown = Math.Min(rows.Count, MaxDetailRows);
+        int hidden = Math.Max(0, rows.Count - shown);
+        int lines = shown + (hidden > 0 ? 1 : 0);
+        var texts = new string[lines];
+        for (int i = 0; i < shown; i++)
+            texts[i] = LayoutRow(rows[i], cap ? available : 0, font, measure, format);
+        if (hidden > 0) texts[lines - 1] = $"…還有 {hidden} 筆";
+        return texts;
+    }
+
+    private static string LayoutRow(ConversionFailureRow row, int available, Font font,
+                                    Graphics measure, StringFormat format)
+    {
+        if (available <= 0) return row.Text;          // 無上限：完全照原樣
+
+        string full = row.Text;
+        if (MeasureText(measure, full, font, format) <= available) return full;   // 塞得下就一個字都不動
+
+        if (row.FileName.Length == 0) return row.Text;   // 沒有檔名可縮（只有原因）→ 不捏造
+
+        string suffix = row.Reason.Length == 0 ? string.Empty : " " + row.Reason;
+        // 原因**不縮**。這裡先把「原因加一個空白」的寬度扣掉，剩下的才是檔名的額度。
+        int allowance = available - (int)Math.Ceiling(MeasureText(measure, suffix, font, format));
+        if (allowance < 1) return row.Text;           // 原因自己就超寬：縮檔名也救不了（原因優先）
+
+        string shortened = ShortenFileName(row.FileName, allowance, font, measure, format);
+        if (shortened.Length == 0) return row.Text;   // 連一個字都放不下 → 不要畫出空的一列
+        if (shortened == row.FileName) return row.Text;
+        return shortened + suffix;
+    }
+
+    /// <summary>
+    /// 檔名的中略：保留開頭、一個 U+2026、以及**含副檔名的結尾**。
+    /// 尾端至少留 <see cref="MinTailChars"/> 個字元，否則連 `.png` 都會被吃掉。
+    /// 找不到放得下的長度時回傳空字串（呼叫端會退回原字串，不畫出半個檔名）。
+    /// </summary>
+    private static string ShortenFileName(string fileName, int allowance, Font font,
+                                          Graphics measure, StringFormat format)
+    {
+        int best = 0;
+        for (int keep = fileName.Length - 1; keep >= 1; keep--)
+        {
+            int head = Math.Max(1, keep - keep / 2);
+            int tail = Math.Max(MinTailChars, keep - head);
+            if (head + tail > fileName.Length) continue;
+            string candidate = fileName.Substring(0, head) + Ellipsis +
+                               fileName.Substring(fileName.Length - tail);
+            if (MeasureText(measure, candidate, font, format) <= allowance) { best = keep; break; }
+        }
+        if (best == 0) return string.Empty;
+
+        int h = Math.Max(1, best - best / 2);
+        int t = Math.Max(MinTailChars, best - h);
+        // 副檔名優先：尾端若放得下，至少留到最後一個 '.' 之前的那一段（`….png`），
+        // 也就是「使用者還看得出這是哪一種檔」。放不下就維持 MinTailChars。
+        int dot = fileName.LastIndexOf('.');
+        if (dot > 0)
+        {
+            int dotTail = fileName.Length - dot;
+            if (dotTail > t && dotTail <= Math.Max(MinTailChars, best / 2)) t = dotTail;
+        }
+        if (h + t > fileName.Length) t = Math.Max(MinTailChars, fileName.Length - h);
+        if (h + t > fileName.Length) h = Math.Max(1, fileName.Length - t);
+        return fileName.Substring(0, h) + Ellipsis + fileName.Substring(fileName.Length - t);
+    }
+
+    /// <summary>
+    /// 面板的總寬：依文字量測，但不超過 <paramref name="maxWidthPx"/>（D4）。
+    ///
+    /// 「依文字量測」不可改成固定寬度：規格 §7.1 的原因字串比檔名長得多，
+    /// 裁掉就等於使用者看不到原因，而那種失敗在畫面上看起來只是「字被切掉」——
+    /// 不會有任何錯誤訊息。上限則是「極端檔名不得無限變寬」那一條。
+    /// </summary>
+    public static int PanelWidthFor(IReadOnlyList<ConversionFailureRow> rows, int maxWidthPx, Font font)
+    {
+        using var measureBitmap = new Bitmap(1, 1);
+        using var measure = Graphics.FromImage(measureBitmap);
+        measure.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        using var format = RowFormat();
+
+        int shown = Math.Min(rows.Count, MaxDetailRows);
+        int hidden = Math.Max(0, rows.Count - shown);
+
+        int width = BitmapWidth;
+        for (int i = 0; i < shown; i++)
+            width = Math.Max(width, (int)Math.Ceiling(MeasureText(measure, rows[i].Text, font, format))
+                                    + DetailPadX * 2 + HorizontalPadding);
+        if (hidden > 0)
+            width = Math.Max(width, (int)Math.Ceiling(MeasureText(measure, $"…還有 {hidden} 筆", font, format))
+                                    + DetailPadX * 2 + HorizontalPadding);
+        if (maxWidthPx > 0) width = Math.Min(width, Math.Max(BitmapWidth, maxWidthPx));
+        return width;
+    }
+
+    /// <summary>
+    /// 量一行字的寬度。用**與繪製完全相同**的 <see cref="StringFormat"/>（同一組 trimming、
+    /// 同一個 NoWrap、同一個 Near/Center）：若量測與繪製用不同的格式，排版就會說「塞得下」
+    /// 而 GDI+ 實際上截掉了尾巴，被截掉的正好是原因。
+    /// </summary>
+    private static float MeasureText(Graphics measure, string text, Font font, StringFormat format)
+        => measure.MeasureString(text, font, int.MaxValue, format).Width;
+
+    /// <summary>
+    /// 量一列排版後的字有多寬（像素）。給 dump 的 JSON 用：那個數字必須與畫面同源，
+    /// 否則「字串對了但畫出來的東西不對」就驗不出來。
+    /// </summary>
+    public static float MeasureDetailRowWidth(string text)
+    {
+        using var font = MakeFontPx(DetailFontPx);
+        using var bitmap = new Bitmap(1, 1);
+        using var g = Graphics.FromImage(bitmap);
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        using var format = RowFormat();
+        return MeasureText(g, text, font, format);
+    }
+
+    /// <summary>面板文字用的 <see cref="StringFormat"/>：量測與繪製**共用同一個定義**。</summary>
+    private static StringFormat RowFormat() => new()
+    {
+        Alignment = StringAlignment.Near,
+        LineAlignment = StringAlignment.Center,
+        // NoWrap ＋ EllipsisCharacter：真的塞不下時**截斷並加省略號**，不是折到第二行。
+        // 折行的代價不只是難看：那一列會需要兩倍行高，而固定的行高會把第二行裁掉，
+        // 使用者看到的是半截中文——比「被截斷且有省略號」更難判斷自己在看什麼。
+        // （這段註解是驗收套件用「固定寬度」的假故障逼出來的：那時 real 那一列
+        //   在像素上變成兩個墨跡帶，也就是文字被折行了。正常寬度下永遠不會發生。）
+        Trimming = StringTrimming.EllipsisCharacter,
+        FormatFlags = StringFormatFlags.NoWrap
+    };
 
     /// <summary>
     /// 畫出那一行。抽成 static 是為了讓 `--progress-dump` 能在**沒有畫面**的情況下驗證字形
