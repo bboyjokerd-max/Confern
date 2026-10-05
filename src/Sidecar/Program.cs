@@ -230,6 +230,8 @@ internal sealed class Options
           --wheel-dump <path>       with --wheel-demo: write the painted frame as PNG and exit
           --wheel-dump-raw <path>   with --wheel-demo: same frame but with alpha preserved
           --wheel-tools             with --wheel-demo: paint the SECOND layer (tool wheel) instead
+          --rotate90 <path>         run tool rotate90 (90 deg clockwise) on <path> and report;
+                                    output goes next to the source, the source is never touched
                                     (the only way to check the alpha contract: the glass body
                                     must be alpha 255, everything outside must be a pure layer)
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
@@ -324,6 +326,12 @@ internal sealed class Options
     /// ——不是另外畫一張示意圖。這樣「第二層長什麼樣」才有一份可重複產生的證據。
     /// </summary>
     public bool WheelTools;
+    /// <summary>
+    /// M3 診斷：`--rotate90 &lt;path&gt;` 直接對這個檔案跑工具 `rotate90`（順時針 90 度）。
+    /// **走的是 worker 用的同一個引擎**，但同一個行程內直接呼叫——跨管道的 `op` 欄位還沒接。
+    /// 存在的理由：工具的「能不能做」必須先是可重複量測的事實，才准出現在介面上。
+    /// </summary>
+    public string? Rotate90;
     /// <summary>
     /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
     /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
@@ -531,6 +539,7 @@ internal sealed class Options
                 case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
                 case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
                 case "--wheel-tools": o.WheelTools = true; break;
+                case "--rotate90": if (i + 1 < args.Length) o.Rotate90 = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -790,6 +799,9 @@ internal static class App
         hit.EnsureCreated();      // 預先建立、保持隱藏（規格 §9.3：升起 < 30 ms）
 
         if (opt.CycleTest > 0) return CycleTest(hit, evidence, opt.CycleTest);
+
+        if (opt.Rotate90 != null)
+            return Rotate90Diagnostic(evidence, opt);
 
         if (opt.WheelDemoX.HasValue)
             return WheelDemo(hit, guard, evidence, opt);
@@ -1131,6 +1143,64 @@ internal static class App
             return 0;
         }
         return RunMessageLoop(evidence);
+    }
+
+    /// <summary>
+    /// M3 診斷：`--rotate90 &lt;path&gt;`。走的是 **worker 用的同一個引擎**
+    /// （<see cref="ConversionEngine.Rotate90"/>），所以量到的就是產品的能力；
+    /// 只差沒有跨管道（worker 協議的 `op` 欄位是下一步）。
+    ///
+    /// 它刻意把三件事印成可斷言的事實：
+    ///   ①引擎回報的成功／失敗與輸出檔名；
+    ///   ②日誌裡 `rotate90: WxH -> WxH` 那一行（非方形圖的長寬必須對調）；
+    ///   ③來源檔**完全沒被動到**——SHA256／長度／mtime 三項前後比對（規格 §5 的第一名）。
+    /// 回傳碼：0 成功、1 來源被動到（§5 紅線）、2 找不到來源、3 引擎失敗。
+    /// </summary>
+    private static int Rotate90Diagnostic(Evidence evidence, Options opt)
+    {
+        string source = opt.Rotate90!;
+        if (!File.Exists(source))
+        {
+            evidence.Line($"--rotate90: source not found: {source}");
+            return 2;
+        }
+
+        string beforeHash = Sha256Of(source);
+        long beforeLength = new FileInfo(source).Length;
+        DateTime beforeWrite = File.GetLastWriteTimeUtc(source);
+
+        var registry = new CodecRegistry();
+        var engine = new ConversionEngine(registry, evidence.Line);
+        ConversionResult result = engine.Rotate90(source);
+
+        string afterHash = Sha256Of(source);
+        bool untouched = beforeHash == afterHash
+                         && new FileInfo(source).Length == beforeLength
+                         && File.GetLastWriteTimeUtc(source) == beforeWrite;
+
+        evidence.Line($"tool rotate90: ok={result.Ok} error={result.Error} output={result.OutputPath ?? "-"}");
+        evidence.Line($"tool rotate90: source-untouched={untouched} " +
+                      $"(sha256 {beforeHash.Substring(0, 12)} -> {afterHash.Substring(0, 12)}, " +
+                      $"len {beforeLength}, mtime {(beforeWrite == File.GetLastWriteTimeUtc(source) ? "same" : "CHANGED")})");
+
+        if (!result.Ok)
+        {
+            evidence.Line($"--rotate90 FAILED: {result.UserMessage}");
+            return 3;
+        }
+        if (!untouched)
+        {
+            evidence.Line("--rotate90 FAILED: the source file was modified (spec 5 violation)");
+            return 1;
+        }
+        return 0;
+    }
+
+    /// <summary>檔案內容的 SHA256（十六進位大寫）。診斷用，不進產品路徑。</summary>
+    private static string Sha256Of(string path)
+    {
+        using var fs = File.OpenRead(LongPath.Prepare(path));
+        return System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs));
     }
 
     /// <summary>
