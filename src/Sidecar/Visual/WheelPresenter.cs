@@ -30,6 +30,9 @@ internal sealed class WheelPresenter
     private string _sourceFormat = "?";
     private IReadOnlyList<string> _targets = Array.Empty<string>();
     private Func<int, string?>? _preview;
+    private Func<int, string?>? _caption;
+    private IReadOnlyList<ToolIcon>? _icons;
+    private WheelMode _mode = WheelMode.Format;
     private string? _notice;
     private int _selected;
     private int _cursorX, _cursorY;
@@ -44,6 +47,23 @@ internal sealed class WheelPresenter
 
     /// <summary>來源檔案的縮圖（穿透中心鏤空）。**由呼叫端擁有**，這裡只讀不釋放；null 時畫佔位圖。</summary>
     private Bitmap? _sourceThumbnail;
+
+    /// <summary>
+    /// 輪盤的兩層（規格 §9.4:390 的工具輪盤擴充點）。
+    /// <see cref="Format"/>＝M1 的既有行為，**一行都不變**；<see cref="Tool"/>＝M3，
+    /// 觸發鍵改為「觸發鍵 ＋ Ctrl」。
+    ///
+    /// 這只是一個模式旗標：**幾何（<see cref="WheelGeometry"/>）、配色（<see cref="WheelDesign"/>）、
+    /// 命中測試（<c>SelectAt</c>）兩層完全共用**——第二層不是第二顆輪盤，是同一顆換一組扇區。
+    /// </summary>
+    internal enum WheelMode
+    {
+        /// <summary>格式輪盤：扇區是目標格式，圓心顯示「原格式 → 目標格式」。</summary>
+        Format,
+
+        /// <summary>工具輪盤：扇區是工具（圖示在上、文字在下），圓心顯示當前 hover 的動作。</summary>
+        Tool
+    }
 
     public bool IsVisible => _layer.IsVisible;
     public int Selected => _selected;
@@ -74,10 +94,18 @@ internal sealed class WheelPresenter
     /// <summary>
     /// 在游標處顯示輪盤。<paramref name="notice"/> 非空時取代檔名預覽（例如混合選取拒絕）；
     /// <paramref name="preview"/> 以「當前選中索引」為輸入，因此切換扇區時輸出檔名會跟著更新。
+    ///
+    /// 2026-10-05（M3 工具輪盤）：新增 <paramref name="mode"/> 與 <paramref name="caption"/>。
+    /// **第二層只是同一顆輪盤換一組扇區**——<see cref="WheelGeometry"/> 早就對扇區數泛化，
+    /// 所以這裡不新增任何幾何或色票；只有兩處不同：
+    /// ①工具扇區是「圖示在上、文字在下」（格式扇區只有一行字）；
+    /// ②圓心膠囊顯示**當前 hover 的工具動作**（格式輪盤顯示「原格式 → 目標格式」）。
     /// </summary>
     public void Show(int cursorX, int cursorY, string sourceFormat, IReadOnlyList<string> targets,
                      int selected = 0, Func<int, string?>? preview = null, string? notice = null,
-                     MonitorEntry[]? monitors = null, Bitmap? sourceThumbnail = null)
+                     MonitorEntry[]? monitors = null, Bitmap? sourceThumbnail = null,
+                     WheelMode mode = WheelMode.Format, Func<int, string?>? caption = null,
+                     IReadOnlyList<ToolIcon>? icons = null)
     {
         _cursorX = cursorX;
         _cursorY = cursorY;
@@ -85,6 +113,9 @@ internal sealed class WheelPresenter
         _targets = targets;
         _selected = targets.Count > 0 ? Math.Clamp(selected, 0, targets.Count - 1) : 0;
         _preview = preview;
+        _caption = caption;
+        _icons = icons;
+        _mode = mode;
         _notice = notice;
         _sourceThumbnail = sourceThumbnail;
 
@@ -102,10 +133,12 @@ internal sealed class WheelPresenter
         _originX = ox;
         _originY = oy;
 
+        // ⚠ mode= 只能**附加在行尾**：S7.8 的斷言比對 'wheel shown cursor='，插在中間會直接弄紅它。
         _evidence.Line($"wheel shown cursor=({cursorX},{cursorY}) origin=({ox},{oy}) " +
                        $"size={bmp.Width}x{bmp.Height} source={_sourceFormat} " +
                        $"targets=[{string.Join(",", _targets)}] selected={_selected} " +
-                       $"notice={(notice ?? "-")} preview={(_preview?.Invoke(_selected) ?? "-")}");
+                       $"notice={(notice ?? "-")} preview={(_preview?.Invoke(_selected) ?? "-")} " +
+                       $"mode={(_mode == WheelMode.Tool ? "tool" : "format")}");
     }
 
     /// <summary>
@@ -467,13 +500,45 @@ internal sealed class WheelPresenter
             (int)Math.Round(255 * WheelDesign.LabelDimOpacity), WheelDesign.Label));
         using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
         float ratio = WheelDesign.LabelRadiusRatio(count);
+        // 工具扇區是「**圖示在上、文字在下**」（參考版式；見 ui-redesign:51）。文字因此往下
+        // 讓開圖示的高度，圖示畫在同一個扇區中線的上方。
+        // **格式扇區一行都不動**：不按 Ctrl 的那條路徑必須與改動前逐位元相同（計畫 T8）。
+        float iconLift = _mode == WheelMode.Tool ? WheelDesign.ToolIconPx / 2f + 2f : 0f;
         for (int i = 0; i < count; i++)
         {
             double mid = WheelGeometry.SectorMidDeg(i, count) * Math.PI / 180.0;
             float lx = cx + (float)(Math.Cos(mid) * r * ratio);
             float ly = cy + (float)(Math.Sin(mid) * r * ratio);
-            g.DrawString(_targets[i], font, i == _selected ? bright : dim,
-                         new RectangleF(lx - 40, ly - 12, 80, 24), format);
+            var ink = i == _selected ? bright : dim;
+            if (_mode == WheelMode.Tool && _icons != null && i < _icons.Count)
+                DrawToolIcon(g, _icons[i], ink, lx, ly - iconLift);
+            g.DrawString(_targets[i], font, ink,
+                         new RectangleF(lx - 40, ly - 12 + iconLift, 80, 24), format);
+        }
+    }
+
+    /// <summary>
+    /// 工具扇區的線稿圖示。**全部用程式繪製、用既有的墨水色**（<see cref="WheelDesign.Label"/>）：
+    /// 本專案沒有圖示資產，而引進一張 PNG 會同時破壞「配色唯一權威」與離線不變式。
+    /// 圖示尺寸取自 <see cref="WheelDesign.ToolIconPx"/>，不在此硬編。
+    /// </summary>
+    private static void DrawToolIcon(Graphics g, ToolIcon icon, Brush ink, float cx, float cy)
+    {
+        float s = WheelDesign.ToolIconPx;
+        using var pen = new Pen(ink, Math.Max(1.4f, s / 9f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        switch (icon)
+        {
+            case ToolIcon.Rotate90:
+                // 順時針 90 度的開放弧 ＋ 箭頭。弧從左側 180° 起、順時針走到 12 點方向。
+                var box = new RectangleF(cx - s / 2f, cy - s / 2f, s, s);
+                g.DrawArc(pen, box, 200f, -250f);
+                // 箭頭接在弧的終點（約 -50° ＝右上）並指向切線方向。
+                float ax = cx + (float)(Math.Cos(-50.0 * Math.PI / 180) * s / 2f);
+                float ay = cy + (float)(Math.Sin(-50.0 * Math.PI / 180) * s / 2f);
+                float a = s * 0.22f;
+                g.DrawLine(pen, ax, ay, ax - a, ay - a * 0.2f);
+                g.DrawLine(pen, ax, ay, ax + a * 0.2f, ay + a);
+                break;
         }
     }
 
@@ -551,9 +616,13 @@ internal sealed class WheelPresenter
     /// <summary>中心膠囊：白底半透明、深色字 <c>原格式 → 目標格式</c>（字 17px、padding 5·16、alpha .85）。</summary>
     private void DrawCapsule(Graphics g, float cx, float cy)
     {
-        string label = _targets.Count == 0
-            ? _sourceFormat
-            : $"{_sourceFormat} → {_targets[_selected]}";
+        // 工具輪盤的膠囊顯示**當前 hover 的工具動作**（參考版式「中心顯示 hover 動作」）；
+        // 格式輪盤維持「原格式 → 目標格式」。兩者都只是字串——膠囊不知道兩者的差別。
+        string label = _mode == WheelMode.Tool && _caption != null
+            ? (_caption(_selected) ?? _targets[_selected])
+            : _targets.Count == 0
+                ? _sourceFormat
+                : $"{_sourceFormat} → {_targets[_selected]}";
 
         using var font = MakeFontPx(WheelDesign.CapFontPx);
         var size = g.MeasureString(label, font);

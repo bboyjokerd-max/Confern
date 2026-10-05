@@ -229,6 +229,7 @@ internal sealed class Options
           --wheel-demo <X> <Y>      raise both layers and show the wheel at (X,Y) (diagnostic)
           --wheel-dump <path>       with --wheel-demo: write the painted frame as PNG and exit
           --wheel-dump-raw <path>   with --wheel-demo: same frame but with alpha preserved
+          --wheel-tools             with --wheel-demo: paint the SECOND layer (tool wheel) instead
                                     (the only way to check the alpha contract: the glass body
                                     must be alpha 255, everything outside must be a pure layer)
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
@@ -317,6 +318,12 @@ internal sealed class Options
     public string? WheelDump;
     /// <summary>同 <see cref="WheelDump"/>，但**保留 alpha**（驗 alpha 語意紅線用）。</summary>
     public string? WheelDumpRaw;
+    /// <summary>
+    /// M3（2026-10-05）：讓 `--wheel-demo` 畫**第二層（工具輪盤）**而不是格式輪盤。
+    /// 扇區清單來自 <see cref="ToolCatalog"/>（唯一權威），所以 dump 出來的圖就是產品真的會畫的東西
+    /// ——不是另外畫一張示意圖。這樣「第二層長什麼樣」才有一份可重複產生的證據。
+    /// </summary>
+    public bool WheelTools;
     /// <summary>
     /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
     /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
@@ -523,6 +530,7 @@ internal sealed class Options
                 case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
                 case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
                 case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
+                case "--wheel-tools": o.WheelTools = true; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -1086,10 +1094,25 @@ internal static class App
             ? opt.WheelTargets
             : catalog.TargetsFor(opt.WheelSource).ToArray();
 
+        // M3（2026-10-05）第二層：`--wheel-tools` 時改畫**工具輪盤**。
+        // 扇區清單同樣來自唯一權威（ToolCatalog），這裡不硬寫任何工具名稱或圖示。
+        // 示範用的酬載狀態一律當成 Ready——這是「假設檔案可以轉」的那個前提，
+        // 與第一層示範同一套假設（真實路徑上這一格由 PayloadVerdict 決定）。
+        var tools = new ToolCatalog().ToolsFor(new PayloadVerdict(PayloadStatus.Ready, opt.WheelSource));
+        bool toolsMode = opt.WheelTools && tools.Count > 0;
+        if (opt.WheelTools && !toolsMode)
+            evidence.Line("--wheel-tools: catalog returned no tool for a Ready payload -> formats only");
+        if (toolsMode) targets = tools.Select(t => t.Label).ToArray();
+
         var sw = Stopwatch.StartNew();
         presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected,
-                       PreviewFactory(targets, catalog, new[] { $"holiday.{opt.WheelSource.ToLowerInvariant()}" },
-                                      opt.WheelPreviews));
+                       // 工具輪盤**不給檔名預覽**：轉完叫什麼名字是執行階段才知道的事，
+                       // 在這裡先寫一個名字就是承諾一件還沒決定的事（Slice B 才會定案）。
+                       toolsMode ? null : PreviewFactory(targets, catalog, new[] { $"holiday.{opt.WheelSource.ToLowerInvariant()}" },
+                                                         opt.WheelPreviews),
+                       mode: toolsMode ? WheelPresenter.WheelMode.Tool : WheelPresenter.WheelMode.Format,
+                       caption: toolsMode ? (i => i < tools.Count ? tools[i].Description : null) : null,
+                       icons: toolsMode ? tools.Select(t => t.Icon).ToArray() : null);
         sw.Stop();
 
         evidence.Line($"visual demo shown at ({x},{y}) " +

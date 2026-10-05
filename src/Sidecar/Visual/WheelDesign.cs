@@ -91,6 +91,17 @@ internal static class WheelDesign
         _ => 0.72f
     };
 
+    /// <summary>
+    /// 工具扇區的線稿圖示尺寸（px，1× 的真實像素）。M3 工具輪盤用。
+    ///
+    /// ⚠ **這個值不在原案的常數表裡**（M1 只有一層輪盤，沒有工具圖示），
+    /// 出處是參考版式 `docs/design/reference/wheel-tools-*.jpg`：工具扇區是「圖示在上、文字在下」，
+    /// 參考圖裡圖示的可視高度約為標籤字高的 1.5 倍 ⇒ <see cref="LabelFontPx"/>(1) = 11px × 1.5 ≈ 17px。
+    /// 量到的來源寫在這裡而不是散在繪製碼裡：**幾何值的唯一權威仍然只有這個檔案**。
+    /// 改它會連帶改變文字往下讓開的距離（`WheelPresenter.DrawWheel` 的 `iconLift`）。
+    /// </summary>
+    public const float ToolIconPx = 17f;
+
     // ================= 光暈／投影（依桌布亮度自動切換） =================
 
     /// <summary>桌布平均亮度門檻：高於它＝淺色桌布。**不是旗標**——正式程式只拿得到畫面，沒人會告訴它深淺。</summary>

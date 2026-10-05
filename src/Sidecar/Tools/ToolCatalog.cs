@@ -20,7 +20,13 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor Rotate90 = new(
         Id: "rotate90",
         Label: "ROTATE",
-        Description: "順時針轉 90 度",
+        // ⚠ 這行字**長度有上限**，不是隨便寫：圓心膠囊畫在中央鏤空裡，而那個洞的直徑是
+        // 94px（WheelDesign.CenterRatio = 47/110）。膠囊寬度 = 文字 + 左右內距，
+        // 所以文字必須 ≲ 68px 才不會壓到扇區上。實測：
+        //   "順時針轉 90 度" ≈ 119px → 膠囊約 145px，壓出去 25px／邊（第一版就是這樣，dump 圖上看得出來）
+        //   "轉 90°"        ≈ 47px  → 膠囊約 73px，**完全落在鏤空內**
+        // 語意沒有損失：圖示本身就是順時針的 90° 弧箭頭（見 WheelDesign 的 ToolIconPx 註解）。
+        Description: "轉 90°",
         Icon: ToolIcon.Rotate90);
 
     public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90 };
