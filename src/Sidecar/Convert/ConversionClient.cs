@@ -91,8 +91,16 @@ internal sealed class ConversionClient : IDisposable
     /// <paramref name="toolOp"/> 為 null 時＝格式轉換（**既有行為逐位元不變**）；
     /// 非 null 時走工具（例：<see cref="WorkerProtocol.OpRotate90"/>），此時
     /// <paramref name="targetFormat"/> 沒有意義——**工具自己決定輸出格式**。
+    ///
+    /// <paramref name="outputDir"/> 為 **null＝寫在來源檔旁邊**（＝不指定時的行為逐位元不變）；
+    /// 非 null＝寫進那個資料夾，不存在時由 <see cref="NamingPolicy"/> 回退到來源旁邊。
+    ///
+    /// ⚠ <paramref name="outputDir"/> 與 <paramref name="toolOp"/> **都是 `string?`**：
+    /// 兩者位置互換**編譯照過**，錯的是行為（把 `rotate90` 當成資料夾路徑、把資料夾路徑當成
+    /// 工具名稱）。所以呼叫端一律用**具名引數**指名這兩者，不靠位置。
     /// </summary>
-    public bool Start(string[] sourcePaths, string targetFormat, int quality, string? toolOp, out string? error)
+    public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
+                      string? toolOp, out string? error)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -161,7 +169,10 @@ internal sealed class ConversionClient : IDisposable
             sourcePaths = sourcePaths,
             targetFormat = targetFormat,
             quality = quality,
-            op = op
+            op = op,
+            // 照 op 的作法：null 不進訊息（JsonIgnoreCondition.WhenWritingNull），
+            // 而 worker 收到 null 的意思正是「來源檔旁邊」——缺席語意與意圖一致。
+            outputDir = outputDir
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
         _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, " +

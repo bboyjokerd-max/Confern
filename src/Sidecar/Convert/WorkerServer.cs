@@ -21,8 +21,16 @@ internal static class WorkerProtocol
     /// 使用者按了「轉 90 度」卻得到一個換格式的檔案，而且沒有任何錯誤。升版本讓這種配對
     /// 在連線階段就被擋掉（<see cref="ConversionClient"/> 偵測到版本不符會重啟 worker），
     /// 而不是變成一個靜默的錯誤結果。
+    ///
+    /// **2026-10-06 由 2 升到 3**：新增 <c>outputDir</c> 欄位（輸出資料夾）。
+    ///
+    /// 為什麼非升不可：`outputDir` 缺席時的語意是「來源檔旁邊」（見
+    /// <see cref="WorkerMessage.outputDir"/>），而這**正好是舊版的行為**——所以一個舊 worker
+    /// 收到帶資料夾的封包時不會報錯，它只會**默默把檔案寫到來源旁邊**。那正是本欄位要修掉的事：
+    /// 使用者設定了輸出資料夾、按下 Enter，卻什麼都沒發生，畫面上還顯示成功。缺席語意與新功能
+    /// 的意圖在這裡剛好相反，靠預設值擋不住，只能靠版本配對在連線階段拒絕。
     /// </summary>
-    public const int Version = 2;
+    public const int Version = 3;
 
     /// <summary>
     /// `WorkerMessage.op` 的合法值：這件工作**要做什麼**。
@@ -91,6 +99,18 @@ internal sealed class WorkerMessage
     /// 默默做掉，所以協議版本同時升到 2（見 <see cref="WorkerProtocol.Version"/>）。
     /// </summary>
     public string? op { get; set; }
+    /// <summary>
+    /// 輸出資料夾（2026-10-06 M4 新增），由 <see cref="Settings.ResolveOutputDirectory"/> 解析而來。
+    ///
+    /// **null／空字串＝寫在來源檔旁邊**：那是「這個欄位還不存在的年代」的封包該有的意思，
+    /// 也正是 <see cref="ConversionEngine"/> 的 <c>targetDirectory</c> 預設值——worker 直接把它
+    /// 原封不動傳下去，不在這裡再解析一次（解析規則只有 Settings 那一份）。
+    ///
+    /// 與 `op` 不同的是，這裡的缺席語意**與新功能的意圖相反**（缺席＝來源旁邊，而使用者要的是
+    /// 別的資料夾），所以配對錯誤不可能靠預設值擋，必須靠協議版本（見
+    /// <see cref="WorkerProtocol.Version"/>）。
+    /// </summary>
+    public string? outputDir { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -236,10 +256,13 @@ internal static class WorkerServer
 
             // 工作的分派就在這一處。**未知的 op 大聲失敗**：不丟例外、也絕不默默當成 convert
             // 來做（那會讓「按了工具卻得到一個格式轉換」變成靜默錯誤）。
+            // outputDir 原封不動傳下去（null＝來源旁邊）：解析規則只有 Settings 那一份，
+            // worker 不是第二個擁有者。資料夾不存在時的回退由 NamingPolicy 負責。
             ConversionResult result = op switch
             {
-                WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal),
-                WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal),
+                WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal,
+                                                           job.outputDir),
+                WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal, job.outputDir),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;

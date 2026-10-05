@@ -26,9 +26,13 @@ internal sealed class ConversionRunner : IDisposable
     /// 啟動一次工作。<paramref name="toolOp"/> 為 null 時＝格式轉換（**既有行為不變**）；
     /// 非 null 時走工具（見 <see cref="WorkerProtocol.OpRotate90"/>），此時
     /// <paramref name="targetFormat"/> 沒有意義——工具自己決定輸出格式。
+    ///
+    /// <paramref name="outputDir"/> 為 **null（預設）＝來源檔旁邊**，也就是這條路徑在
+    /// 這個參數出現之前的行為——因此既有呼叫端（診斷路徑等）一個字都不用改。
+    /// 非 null＝寫進那個資料夾（見 <see cref="Settings.ResolveOutputDirectory"/>）。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y,
-                      string? toolOp = null)
+                      string? toolOp = null, string? outputDir = null)
     {
         _progress.Start(x, y);
 
@@ -43,7 +47,10 @@ internal sealed class ConversionRunner : IDisposable
 
         try
         {
-            if (!_client.Start(sourcePaths, targetFormat, quality, toolOp, out string? error))
+            // outputDir 與 toolOp 都是 string?，位置互換也能編譯——所以這兩個**一律具名**，
+            // 不靠位置（見 ConversionClient.Start 的說明）。
+            if (!_client.Start(sourcePaths, targetFormat, quality,
+                               outputDir: outputDir, toolOp: toolOp, out string? error))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
                 ReportStartFailure(sourcePaths.Length);

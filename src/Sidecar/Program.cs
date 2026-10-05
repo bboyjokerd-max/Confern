@@ -1410,11 +1410,15 @@ internal static class App
         // 工具不問 QualityFor：旋轉固定用 100（見 ConversionEngine.Rotate90 的說明——
         // PNG／BMP／TIF 無損；JPEG 會重新壓縮，品質 100 是最接近無損的選擇）。
         // targetFormat 給空字串：工具自己決定輸出格式，格式欄位對它沒有意義。
+        // 輸出資料夾**當場解析成 null／路徑**再往下傳（規格 §9.5）：worker 只認那個值，
+        // 解析規則留在 Settings 這一處（worker 不是第二個擁有者）。
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"ENTER: outputDir={outputDir ?? "(source folder)"}");
         runner.Start(paths,
                      toolOp == null ? target : "",
                      toolOp == null ? settings.QualityFor(target) : 100,
                      centerX, centerY,
-                     toolOp);
+                     toolOp: toolOp, outputDir: outputDir);
         PendingPaths = Array.Empty<string>();
         PendingTools = Array.Empty<ToolDescriptor>();
         return true;
