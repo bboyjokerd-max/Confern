@@ -13,7 +13,28 @@ namespace Sidecar;
 /// </summary>
 internal static class WorkerProtocol
 {
-    public const int Version = 1;
+    /// <summary>
+    /// 協議版本。**2026-10-05 由 1 升到 2**：新增 <c>op</c> 欄位（工作種類）。
+    ///
+    /// 為什麼非升不可：`op` 缺席時的語意是 `convert`（見 <see cref="WorkerMessage.op"/>），
+    /// 所以一個**舊 worker** 收到帶 `op=rotate90` 的封包時，會把它當成一般的格式轉換照做——
+    /// 使用者按了「轉 90 度」卻得到一個換格式的檔案，而且沒有任何錯誤。升版本讓這種配對
+    /// 在連線階段就被擋掉（<see cref="ConversionClient"/> 偵測到版本不符會重啟 worker），
+    /// 而不是變成一個靜默的錯誤結果。
+    /// </summary>
+    public const int Version = 2;
+
+    /// <summary>
+    /// `WorkerMessage.op` 的合法值：這件工作**要做什麼**。
+    ///
+    /// 放在 <see cref="WorkerProtocol"/> 而不是 <see cref="WorkerMessageTypes"/>：
+    /// 後者是「封包是哪一種」（job／progress／result…），這裡是「工作種類」——兩套詞彙。
+    /// 混在一個類別裡，下一個讀的人會以為 `op` 也是一種封包類型。
+    /// </summary>
+    public const string OpConvert = "convert";
+
+    /// <summary>工具 `rotate90`（順時針 90 度，M3）。輸出格式＝來源格式，見 <see cref="ConversionEngine.Rotate90"/>。</summary>
+    public const string OpRotate90 = "rotate90";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -61,6 +82,15 @@ internal sealed class WorkerMessage
     public int jobId { get; set; }
     public string[]? sourcePaths { get; set; }
     public string? targetFormat { get; set; }
+    /// <summary>
+    /// 工作種類（2026-10-05 M3 新增）。<see cref="WorkerProtocol.OpConvert"/>＝格式轉換，
+    /// <see cref="WorkerProtocol.OpRotate90"/>＝工具旋轉。
+    ///
+    /// **null／空字串的語意是 `convert`**：那是「這個欄位還不存在的年代」的封包該有的意思，
+    /// 不是猜測。但配對錯誤**不能靠這個預設值擋**——一個舊 worker 會把 rotate90 當成 convert
+    /// 默默做掉，所以協議版本同時升到 2（見 <see cref="WorkerProtocol.Version"/>）。
+    /// </summary>
+    public string? op { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -174,9 +204,14 @@ internal static class WorkerServer
         string[] paths = job.sourcePaths ?? Array.Empty<string>();
         string target = (job.targetFormat ?? "").ToUpperInvariant();
         int quality = job.quality <= 0 ? 85 : job.quality;
+        // op 缺席＝convert：那是「這個欄位還不存在的年代」的封包該有的意思。到這裡一定同版本，
+        // 因為 protocolVersion 不符的封包在連線階段就被擋掉了（見 WorkerProtocol.Version）。
+        string op = string.IsNullOrEmpty(job.op) ? WorkerProtocol.OpConvert : job.op!;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        evidence.Line($"worker job {job.jobId}: files={paths.Length} target={target} quality={quality}");
+        // ⚠ op= 只**附加在行尾**：既有套件比對的是 `worker job N: files=... target=...`，
+        // 插在中間會直接弄紅它們（與 wheel shown 那行同一條規矩）。
+        evidence.Line($"worker job {job.jobId}: files={paths.Length} target={target} quality={quality} op={op}");
         link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Progress, jobId = job.jobId, done = 0, total = paths.Length,
@@ -199,7 +234,14 @@ internal static class WorkerServer
                 current = Path.GetFileName(paths[i])
             });
 
-            ConversionResult result = engine.Convert(paths[i], target, quality, journal);
+            // 工作的分派就在這一處。**未知的 op 大聲失敗**：不丟例外、也絕不默默當成 convert
+            // 來做（那會讓「按了工具卻得到一個格式轉換」變成靜默錯誤）。
+            ConversionResult result = op switch
+            {
+                WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal),
+                WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal),
+                _ => RejectUnknownOp(paths[i], op)
+            };
             if (result.Ok) succeeded++; else failed++;
 
             link.Send(new WorkerMessage
@@ -228,6 +270,16 @@ internal static class WorkerServer
             done = succeeded + failed, total = paths.Length
         });
     }
+
+    /// <summary>
+    /// 未知的 op：回一個**失敗的結果**（不丟例外，讓既有的失敗回報路徑接手），
+    /// 使用者訊息走 <see cref="ConversionError.Unknown"/> 的規格字串（UI 不必為它多寫一條路徑），
+    /// 真正的細節放在 detail 給日誌——那才是維修的人看得到的地方。
+    /// </summary>
+    private static ConversionResult RejectUnknownOp(string sourcePath, string op) =>
+        new(sourcePath, null, ConversionError.Unknown,
+            $"unknown op '{op}' (this worker speaks " +
+            $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90})");
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

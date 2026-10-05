@@ -85,8 +85,14 @@ internal sealed class ConversionClient : IDisposable
 
     public ConversionSnapshot Snapshot => _snapshot;
 
-    /// <summary>起 worker 並送出工作。回傳 false 代表連 worker 都沒起來（錯誤放在 <paramref name="error"/>）。</summary>
-    public bool Start(string[] sourcePaths, string targetFormat, int quality, out string? error)
+    /// <summary>
+    /// 起 worker 並送出工作。回傳 false 代表連 worker 都沒起來（錯誤放在 <paramref name="error"/>）。
+    ///
+    /// <paramref name="toolOp"/> 為 null 時＝格式轉換（**既有行為逐位元不變**）；
+    /// 非 null 時走工具（例：<see cref="WorkerProtocol.OpRotate90"/>），此時
+    /// <paramref name="targetFormat"/> 沒有意義——**工具自己決定輸出格式**。
+    /// </summary>
+    public bool Start(string[] sourcePaths, string targetFormat, int quality, string? toolOp, out string? error)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -147,15 +153,19 @@ internal sealed class ConversionClient : IDisposable
             }
         };
         _link.Start();
+        string op = toolOp ?? WorkerProtocol.OpConvert;
         _link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Job,
             jobId = 1,
             sourcePaths = sourcePaths,
             targetFormat = targetFormat,
-            quality = quality
+            quality = quality,
+            op = op
         });
-        _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, quality={quality})");
+        // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
+        _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, " +
+             $"quality={quality}, op={op})");
 
         _snapshot = new ConversionSnapshot(0, sourcePaths.Length, null, false, 0, 0,
                                            Array.Empty<string>(), null);

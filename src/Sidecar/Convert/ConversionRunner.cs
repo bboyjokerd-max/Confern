@@ -22,7 +22,13 @@ internal sealed class ConversionRunner : IDisposable
 
     public ConversionSnapshot Snapshot => _client?.Snapshot ?? ConversionSnapshot.Idle;
 
-    public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y)
+    /// <summary>
+    /// 啟動一次工作。<paramref name="toolOp"/> 為 null 時＝格式轉換（**既有行為不變**）；
+    /// 非 null 時走工具（見 <see cref="WorkerProtocol.OpRotate90"/>），此時
+    /// <paramref name="targetFormat"/> 沒有意義——工具自己決定輸出格式。
+    /// </summary>
+    public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y,
+                      string? toolOp = null)
     {
         _progress.Start(x, y);
 
@@ -37,7 +43,7 @@ internal sealed class ConversionRunner : IDisposable
 
         try
         {
-            if (!_client.Start(sourcePaths, targetFormat, quality, out string? error))
+            if (!_client.Start(sourcePaths, targetFormat, quality, toolOp, out string? error))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
                 ReportStartFailure(sourcePaths.Length);
