@@ -1292,6 +1292,17 @@ internal static class App
         _wheelPreview = PreviewFactory(targets, catalog, paths, 1);
         _wheelNotice = notice;
 
+        // 規格 §9.5（2026-10-05）：輸出資料夾與來源不同時，**目的地必須看得見**。
+        // 「該不該顯示」與「顯示什麼字」在這裡決定（這裡同時知道設定與來源路徑），
+        // 畫由 WheelPresenter 負責。destination 為 null 時，畫面與日誌都與改動前逐位元相同。
+        string? outputDir = (_settings ?? new Settings()).ResolveOutputDirectory();
+        presenter.Destination = DestinationFolderName(outputDir, paths);
+        evidence.Line($"wheel destination: outputDir={outputDir ?? "(source folder)"} " +
+                      $"sourceFolder={SourceFolderOf(paths)} " +
+                      $"wheelLabel={(presenter.Destination == null
+                          ? "(none: the output stays next to the source, preview unchanged)"
+                          : "-> " + presenter.Destination)}");
+
         bool showTools = (IsShiftDown() || _forceToolLayer) && PendingTools.Count > 0;
         RenderWheelLayer(presenter, showTools, p.X, p.Y);
         sw.Stop();
@@ -1301,6 +1312,44 @@ internal static class App
                       $"notice={(notice ?? "-")} latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms) " +
                       $"layer={(showTools ? "tool" : "format")} tools={PendingTools.Count}");
     }
+
+    /// <summary>
+    /// 輪盤上要顯示的目的地資料夾名（規格 §9.5）。**回傳 null＝不顯示**，也就是「輸出就在來源檔旁邊」：
+    /// 那是預設值（<paramref name="outputDir"/> 為 null），畫面必須與改動前逐位元相同——回歸判準。
+    ///
+    /// 判斷規則刻意是「**解析出來的目的地**與來源檔所在資料夾同不同」，不是「設定有沒有寫」：
+    /// 使用者把自訂資料夾填成來源所在的那一個資料夾時，畫面本來就該維持乾淨（顯示「→ 來源資料夾」
+    /// 只會讓他以為檔案跑到別的地方去了）。多檔時比對**每一個**來源檔的資料夾，任一不同就顯示。
+    ///
+    /// 只回資料夾名而不是全路徑：輪盤上塞不下路徑（規格 §9.5 原文），全路徑寫進日誌。
+    /// </summary>
+    private static string? DestinationFolderName(string? outputDir, IReadOnlyList<string> paths)
+    {
+        if (outputDir == null || paths.Count == 0) return null;
+
+        string target = Path.TrimEndingDirectorySeparator(outputDir);
+        bool sameForEveryFile = true;
+        foreach (string path in paths)
+        {
+            string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (dir == null) return null;                 // 取不到來源資料夾：不猜，維持畫面不變
+            if (!string.Equals(Path.TrimEndingDirectorySeparator(dir), target,
+                               StringComparison.OrdinalIgnoreCase))
+            {
+                sameForEveryFile = false;                 // 至少一個來源檔不在目的地裡 → 要顯示
+                break;
+            }
+        }
+        if (sameForEveryFile) return null;                // 每一個來源檔的旁邊就是目的地
+
+        string name = Path.GetFileName(target);
+        // 根目錄（例如 `C:\`）沒有資料夾名可顯示：顯示路徑本身，總比顯示一片空白好
+        return name.Length > 0 ? name : target;
+    }
+
+    /// <summary>日誌用的來源資料夾（取第一筆；`-` 代表這一批沒有檔案）。</summary>
+    private static string SourceFolderOf(IReadOnlyList<string> paths) =>
+        paths.Count == 0 ? "-" : (Path.GetDirectoryName(Path.GetFullPath(paths[0])) ?? "-");
 
     /// <summary>
     /// 真的把輪盤畫出來（**唯一一處**）。初始顯示與 Shift 切層都走這裡——兩條路各畫一次的話，
@@ -1550,7 +1599,10 @@ internal static class App
         Settings good = settings with
         {
             JpgQuality = 71, WebpQuality = 92, TriggerKey = "Tab",
-            CaptureTimeoutSeconds = 45, Diagnostics = true, StartWithWindows = false, Language = "en"
+            CaptureTimeoutSeconds = 45, Diagnostics = true, StartWithWindows = false, Language = "en",
+            // 第十個欄位（規格 §9.5，2026-10-05）：桌面這一條分支過去沒有任何自動驗證，
+            // 所以由設定頁這條**真的按下儲存**的路徑量它——值進 UI 控制項、再由控制項回到檔案。
+            OutputFolder = "desktop"
         };
         bool saved = SettingsUi.SelfTestSave(good, 5000, out string saveDetail, lines.Enqueue);
         evidence.Line($"settings ui selftest: save via the real Save button ok={saved} detail={saveDetail}");
@@ -1559,6 +1611,12 @@ internal static class App
         bool refused = SettingsUi.SelfTestSave(bad, 5000, out string badDetail, lines.Enqueue);
         evidence.Line($"settings ui selftest: an invalid value is refused (save ok={refused}) detail={badDetail}");
 
+        // 新的欄位也要能被拒絕：相對路徑的意思是「看誰在跑、從哪裡跑」，而檔案落在哪裡不該取決於那種事。
+        Settings badFolder = settings with { OutputFolder = "relative-output" };
+        bool refusedFolder = SettingsUi.SelfTestSave(badFolder, 5000, out string badFolderDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: a relative output folder is refused " +
+                      $"(save ok={refusedFolder}) detail={badFolderDetail}");
+
         Thread.Sleep(700);      // 讓 WPF 真的完成第一次繪製，而不是只把物件建起來就說「開好了」
         SettingsUi.Close();
         bool closed = WaitFor(() => !SettingsUi.IsOpen, 3000);
@@ -1566,9 +1624,10 @@ internal static class App
 
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
 
-        bool ok = opened && singleInstance && closed && saved && !refused;
+        bool ok = opened && singleInstance && closed && saved && !refused && !refusedFolder;
         evidence.Line($"settings ui selftest done: ok={ok} (opened={opened} singleInstance={singleInstance} " +
-                      $"closed={closed} saved={saved} refusedInvalid={refused})");
+                      $"closed={closed} saved={saved} refusedInvalid={refused} " +
+                      $"refusedRelativeOutputFolder={refusedFolder})");
         return ok ? 0 : 1;
     }
 

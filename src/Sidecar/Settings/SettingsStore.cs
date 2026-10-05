@@ -88,22 +88,46 @@ internal static class SettingsStore
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    /// <summary>規格 §8 的九個鍵。**唯一擁有者**：未知鍵警告、`--settings-set`、設定頁都走這裡。</summary>
+    /// <summary>
+    /// 規格 §8 的九個鍵 ＋ <see cref="Settings.OutputFolder"/>（規格 §9.5，2026-10-05 追加的第十個）。
+    /// **唯一擁有者**：未知鍵警告、`--settings-set`、設定頁都走這裡。
+    ///
+    /// ⚠ <c>OutputFolder</c> 曾經漏列：設定檔裡出現它會被當成打錯字而警告一次
+    /// （C1a 加了欄位卻沒加鍵，2026-10-05 的 C1 補上）。這種警告一旦是假警報，
+    /// 真正打錯字的那一則就沒人會看。
+    /// </summary>
     public static readonly string[] KnownKeys =
     {
         nameof(Settings.JpgQuality), nameof(Settings.WebpQuality), nameof(Settings.TriggerKey),
         nameof(Settings.StartWithWindows), nameof(Settings.Language), nameof(Settings.NamingCollision),
-        nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics)
+        nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics),
+        nameof(Settings.OutputFolder)
     };
 
     public static string DefaultPath() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductInfo.Name, "settings.json");
 
-    /// <summary>一行說完目前生效的設定。日誌、probe、設定頁摘要共用，避免三份不同說法。</summary>
+    /// <summary>
+    /// 一行說完目前生效的設定。日誌、probe、設定頁摘要共用，避免三份不同說法。
+    ///
+    /// ⚠ <c>outputFolder=</c> 只**附加在行尾**（2026-10-05 的 C1）：既有驗收腳本比對的是這行的
+    /// 前綴與各 <c>key=value</c> 欄位，插在中間會弄紅它們；行尾追加則兩種都保留。
+    /// </summary>
     public static string Describe(Settings s) =>
         $"jpgQuality={s.JpgQuality} webpQuality={s.WebpQuality} capture={s.CaptureTimeoutSeconds} " +
         $"trigger={s.TriggerKey} collision={s.NamingCollision} hotkey={s.EmergencyHotkey} " +
-        $"diagnostics={s.Diagnostics} startWithWindows={s.StartWithWindows} language={s.Language}";
+        $"diagnostics={s.Diagnostics} startWithWindows={s.StartWithWindows} language={s.Language} " +
+        $"outputFolder={DescribeOutputFolder(s)}";
+
+    /// <summary>
+    /// <see cref="Settings.OutputFolder"/> 的顯示寫法（日誌與探針共用）。空字串＝**來源檔旁邊**，
+    /// 這個用語與 <see cref="Program"/> 既有的 `outputDir=(source folder)` 一致。
+    /// </summary>
+    public static string DescribeOutputFolder(Settings s)
+    {
+        string value = (s.OutputFolder ?? "").Trim();
+        return value.Length == 0 ? "(source folder)" : value;
+    }
 
     public static Settings Load(string? path, Action<string> log)
     {
@@ -240,6 +264,42 @@ internal static class SettingsStore
                 if (!bool.TryParse(v, out bool dg)) { log($"settings: reject diagnostics='{value}' (not true/false)"); return false; }
                 next = current with { Diagnostics = dg };
                 return true;
+            case "outputfolder":
+                // 規格 §9.5（2026-10-05 使用者裁定）的三種寫法：空字串或 `source`／`sibling`＝
+                // **來源檔旁邊**（預設）、`desktop`＝桌面、其他＝資料夾路徑。
+                // ⚠ 設定頁的下拉顯示的是「來源檔旁邊／桌面／自訂資料夾」這些**標籤**，
+                // 但寫回檔案的必須是這三種寫法之一——`ResolveOutputDirectory()` 只認它們。
+                if (v.Length == 0 || v.Equals("source", StringComparison.OrdinalIgnoreCase) ||
+                    v.Equals("sibling", StringComparison.OrdinalIgnoreCase))
+                {
+                    next = current with { OutputFolder = "" };     // 正規寫法是空字串，不是 "source"
+                    return true;
+                }
+                if (v.Equals("desktop", StringComparison.OrdinalIgnoreCase))
+                {
+                    next = current with { OutputFolder = "desktop" };
+                    return true;
+                }
+                if (!Path.IsPathRooted(v))
+                {
+                    // 相對路徑的意思取決於「誰在跑、從哪裡跑」，而檔案**落在哪裡**不可以取決於那種事
+                    log($"settings: reject outputFolder='{value}' " +
+                        "(not an absolute folder path; use '', 'desktop' or a full path)");
+                    return false;
+                }
+                try
+                {
+                    next = current with
+                    {
+                        OutputFolder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(v))
+                    };
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    log($"settings: reject outputFolder='{value}' (not a usable path: {ex.GetType().Name})");
+                    return false;
+                }
             case "language":
                 string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"
                             : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ? "zh-Hant"

@@ -41,6 +41,17 @@ internal partial class SettingsWindow : Window
     /// <summary>規格 §8 允許直接挑的常用觸發鍵（其他單鍵走「按下新鍵」）。</summary>
     private static readonly string[] PresetTriggerKeys = { "Space", "Tab", "CapsLock", "Escape", "Shift" };
 
+    /// <summary>
+    /// 輸出資料夾的三個選項（規格 §9.5）。<c>Tag</c> 就是**寫回設定檔的值**，<c>Key</c> 是畫面上的標籤；
+    /// 兩者刻意分開，因為設定檔只認 `''／desktop／路徑` 這三種寫法，而畫面上寫的是中文標籤。
+    /// <c>custom</c> 不是存進檔案的寫法，它是「用旁邊那個文字框的路徑」這個 UI 狀態——
+    /// 真正送進 <see cref="SettingsStore.TryApply"/> 的是文字框的內容，不是這個字。
+    /// </summary>
+    private static readonly (string Tag, string Key)[] OutputPresets =
+    {
+        ("", "out.source"), ("desktop", "out.desktop"), ("custom", "out.custom")
+    };
+
     private readonly string _path;
     private readonly Action<Settings>? _onSaved;
     private readonly Action<string>? _log;
@@ -51,6 +62,12 @@ internal partial class SettingsWindow : Window
 
     /// <summary>目前 UI 上的觸發鍵正規名（例如 <c>Space</c>）。建構時由 <see cref="LoadFromSettings"/> 指派。</summary>
     private string _triggerKey = "Space";
+
+    /// <summary>
+    /// 目前 UI 上選的輸出資料夾選項：空字串＝來源檔旁邊（預設）／<c>desktop</c>／<c>custom</c>。
+    /// 建構時由 <see cref="LoadFromSettings"/> 指派。寫回檔案的值由 <see cref="OutputValueFromUi"/> 決定。
+    /// </summary>
+    private string _outputPreset = "";
 
     /// <summary>真的按下「儲存」且成功時，才記下來給呼叫端。</summary>
     private Settings _saved = new();
@@ -95,6 +112,8 @@ internal partial class SettingsWindow : Window
 
         TriggerPresetBox.SelectionChanged += OnTriggerPresetChanged;
         LanguageBox.SelectionChanged += OnLanguageChanged;
+        OutputPresetBox.SelectionChanged += OnOutputPresetChanged;
+        OutputPathBox.TextChanged += OnOutputPathChanged;
 
         SaveButton.Click += OnSaveClick;
         CancelButton.Click += OnCancelClick;
@@ -139,6 +158,9 @@ internal partial class SettingsWindow : Window
 
         RebuildTriggerItems();
         RebuildLanguageItems();
+        LoadOutputFolder(s.OutputFolder);
+        RebuildOutputItems();
+        RefreshOutput();
     }
 
     /// <summary>把設定檔裡的觸發鍵正規化；解析不了就保留原字串並在 warning 行說出來（在 <see cref="RefreshTrigger"/>）。</summary>
@@ -175,6 +197,7 @@ internal partial class SettingsWindow : Window
         StartupStubBadge.Text = L("stub.badge");
 
         LanguageLabel.Text = L("field.language");
+        OutputLabel.Text = L("field.outputFolder");
 
         JpgLabel.Text = L("field.jpgQuality");
         WebpLabel.Text = L("field.webpQuality");
@@ -203,7 +226,9 @@ internal partial class SettingsWindow : Window
 
         RebuildTriggerItems();
         RebuildLanguageItems();
+        RebuildOutputItems();
         RefreshTrigger();
+        RefreshOutput();
         RenderStatus();
     }
 
@@ -435,6 +460,102 @@ internal partial class SettingsWindow : Window
     }
 
     // =====================================================================================
+    // 輸出資料夾（規格 §9.5，2026-10-05 使用者裁定）
+    //
+    // 「設定值」與「畫面」兩邊的寫法**不一樣**，而且必須一直不一樣：
+    //   畫面＝標籤（來源檔旁邊／桌面／自訂資料夾），設定檔＝`''／desktop／資料夾路徑`。
+    // 轉換的權威是 <see cref="SettingsStore.TryApply"/>（鍵→欄位的唯一擁有者）：
+    // 這裡只把「選了哪一項」換成它的 Tag，再把 Tag 送進去，不自己判斷路徑可不可用。
+    // =====================================================================================
+
+    /// <summary>把下拉的項目重建一次（語言切換時整個重跑，所以標籤會跟著換）。</summary>
+    private void RebuildOutputItems()
+    {
+        bool previous = _suppressComboEvents;
+        _suppressComboEvents = true;
+        try
+        {
+            OutputPresetBox.Items.Clear();
+            foreach ((string tag, string key) in OutputPresets)
+                OutputPresetBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+
+            OutputPresetBox.SelectedItem = OutputPresetBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag as string, _outputPreset, StringComparison.Ordinal));
+        }
+        finally
+        {
+            _suppressComboEvents = previous;
+        }
+    }
+
+    /// <summary>
+    /// 設定檔的值 → 畫面（<see cref="LoadFromSettings"/> 與 <see cref="ApplyEdited"/> 共用）。
+    /// 認不得的一律當成「自訂資料夾」並把原文放進文字框——**不靜默改成預設**：
+    /// 使用者自己改過設定檔時，他打的那個路徑要原樣出現在畫面上。
+    /// </summary>
+    private void LoadOutputFolder(string? value)
+    {
+        string v = (value ?? "").Trim();
+        if (v.Length == 0 ||
+            v.Equals("source", StringComparison.OrdinalIgnoreCase) ||
+            v.Equals("sibling", StringComparison.OrdinalIgnoreCase))
+        {
+            _outputPreset = "";
+            OutputPathBox.Text = "";
+            return;
+        }
+
+        if (v.Equals("desktop", StringComparison.OrdinalIgnoreCase))
+        {
+            _outputPreset = "desktop";
+            OutputPathBox.Text = "";
+            return;
+        }
+
+        _outputPreset = "custom";
+        OutputPathBox.Text = v;
+    }
+
+    private void OnOutputPresetChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressComboEvents) return;
+        if (OutputPresetBox.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        _outputPreset = tag;
+        RefreshOutput();
+        MarkDirty();
+    }
+
+    private void OnOutputPathChanged(object sender, TextChangedEventArgs e)
+    {
+        RefreshOutput();
+        MarkDirty();
+    }
+
+    /// <summary>
+    /// 更新這一行的可編輯狀態與提示。合法性**只有 <see cref="SettingsStore.TryApply"/> 說了算**——
+    /// 這裡刻意把文字框的內容餵進去問一次（與存檔走同一條路），而不是自己寫一份「什麼叫可用的路徑」。
+    /// 那個 <c>_ => { }</c> 的日誌：使用者每打一個字都會被拒絕一次，寫進證據檔只會洗版。
+    /// </summary>
+    private void RefreshOutput()
+    {
+        bool custom = string.Equals(_outputPreset, "custom", StringComparison.Ordinal);
+        OutputPathBox.IsEnabled = custom;
+
+        bool usable = SettingsStore.TryApply(_saved, "outputFolder", OutputPathBox.Text ?? "",
+                                             _ => { }, out Settings _);
+        OutputNoticeText.Text = custom && !usable ? SettingsStrings.Get("out.needPath", _language) : "";
+    }
+
+    /// <summary>
+    /// 這一格要送進 <see cref="SettingsStore.TryApply"/> 的值：選了自訂就送文字框的路徑（可能是空的，
+    /// 那就會被拒絕並說出來，不是靜默存成別的東西），否則送 Tag 本身（`''` 或 `desktop`）。
+    /// </summary>
+    private string OutputValueFromUi() =>
+        string.Equals(_outputPreset, "custom", StringComparison.Ordinal) ? (OutputPathBox.Text ?? "") : _outputPreset;
+
+    // =====================================================================================
     // 開關與滑桿
     // =====================================================================================
 
@@ -566,7 +687,8 @@ internal partial class SettingsWindow : Window
             new("webpQuality", ((int)Math.Round(WebpSlider.Value)).ToString()),
             new("captureTimeoutSeconds", ((int)Math.Round(TimeoutSlider.Value)).ToString()),
             new("emergencyHotkey", hotkeyOn ? HotkeyBox.Text.Trim() : ""),
-            new("diagnostics", (DiagnosticsToggle.IsChecked == true).ToString())
+            new("diagnostics", (DiagnosticsToggle.IsChecked == true).ToString()),
+            new("outputFolder", OutputValueFromUi())
         };
 
         foreach (KeyValuePair<string, string> field in fields)

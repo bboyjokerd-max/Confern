@@ -82,7 +82,7 @@ internal static class SettingsStrings
         {
             // ---- 視窗外框 ----
             ["window.title"] = "Confern 設定",
-            ["window.subtitle"] = "規格 §8 的九個設定。變更按下「儲存」後才寫入檔案。",
+            ["window.subtitle"] = "規格 §8 的九個設定，加上規格 §9.5 的輸出資料夾。變更按下「儲存」後才寫入檔案。",
 
             // ---- 頁面 ----
             ["page.behaviour"] = "行為",
@@ -105,6 +105,15 @@ internal static class SettingsStrings
             // ---- 開機啟動 ----
             ["field.startWithWindows"] = "開機啟動",
             ["field.language"] = "語言",
+
+            // ---- 輸出資料夾（規格 §9.5）----
+            // ⚠ 這些是**畫面上的標籤**，不是寫進設定檔的值：寫進檔案的永遠是
+            // `/ 空字串（來源旁邊）/ desktop / 資料夾路徑`，由 SettingsStore.TryApply 決定。
+            ["field.outputFolder"] = "輸出資料夾",
+            ["out.source"] = "來源檔旁邊",
+            ["out.desktop"] = "桌面",
+            ["out.custom"] = "自訂資料夾",
+            ["out.needPath"] = "自訂資料夾請填完整的路徑（例如 C:\\輸出）。",
 
             // ---- 品質 ----
             ["field.jpgQuality"] = "JPG 品質",
@@ -168,7 +177,7 @@ internal static class SettingsStrings
         [En] = new(StringComparer.Ordinal)
         {
             ["window.title"] = "Confern Settings",
-            ["window.subtitle"] = "The nine settings of spec section 8. Changes are written only when you press Save.",
+            ["window.subtitle"] = "The nine settings of spec section 8, plus the output folder of section 9.5. Changes are written only when you press Save.",
 
             ["page.behaviour"] = "Behaviour",
             ["page.quality"] = "Image quality and timeouts",
@@ -188,6 +197,13 @@ internal static class SettingsStrings
 
             ["field.startWithWindows"] = "Start with Windows",
             ["field.language"] = "Language",
+
+            // Output folder (spec 9.5). Labels only: the file stores '' / 'desktop' / a path.
+            ["field.outputFolder"] = "Output folder",
+            ["out.source"] = "Next to the source",
+            ["out.desktop"] = "Desktop",
+            ["out.custom"] = "Custom folder",
+            ["out.needPath"] = "Enter a full path for the custom folder (for example C:\\Output).",
 
             ["field.jpgQuality"] = "JPG quality",
             ["field.webpQuality"] = "WebP quality",

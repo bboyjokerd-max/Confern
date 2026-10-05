@@ -10,12 +10,20 @@
        palette, which itself derives from WheelDesign. Nothing is bound: there is no
        DataContext and no DataBinding, so every value on screen is pushed explicitly.
 
-  Layout contract (measured, not guessed): each of the nine settings is ONE grid row of
+  Layout contract (measured, not guessed): each of the ten settings is ONE grid row of
   Height=28, and each card carries at most one wrapped explanation line. That is what
-  keeps all nine settings plus the footer inside the window at the baseline 100% DPI
+  keeps all ten settings plus the footer inside the window at the baseline 100% DPI
   with no scrollbar, which is a hard requirement. Do NOT move a per-row explanation back
   into a row (as a second TextBlock under the label): measured, that costs about 10px per
   row, needs 100 extra pixels of window, and the Save button leaves the screen.
+
+  The tenth row (output folder, spec 9.5, 2026-10-05) went into the behaviour card and
+  costs one row (28px + 6px margin) plus its reserved notice line. MEASURED, not guessed:
+  at Height=780 the row did NOT fit: the vertical scrollbar appeared (a #CDCDCD track
+  at x=507..523, verified in the settings-ui dump frame), the cards lost 17px of width
+  and the card descriptions rewrapped. The height therefore went 780 -> 820 and the page
+  is scrollbar-free again; the measured slack at 100% DPI is 15px (last card bottom border
+  at y=672, footer top border at y=702, both read out of the dump).
 
   Element names are referenced by SettingsWindow.xaml.cs; renaming one here without
   renaming it there is a compile error (the generated fields are typed), which is the
@@ -25,7 +33,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:ClassModifier="internal"
-        Width="540" Height="780"
+        Width="540" Height="820"
         ResizeMode="CanMinimize"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False"
@@ -98,6 +106,37 @@
                             <ComboBox x:Name="LanguageBox" Grid.Column="2" Height="26" Width="150"
                                       VerticalAlignment="Center" FontSize="12" />
                         </Grid>
+
+                        <!--
+                          Spec 9.5 (2026-10-05): where the output file goes. One row, the same
+                          92px label column as every other setting. The combo carries the three
+                          STORED spellings ('' = next to the source file, 'desktop', a folder
+                          path); the text box holds the custom path and is enabled only while the
+                          custom item is selected. No Chinese label is ever written to the file:
+                          the tags come from the code behind, never from the visible text.
+                        -->
+                        <Grid x:Name="OutputRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="OutputLabel" FontSize="13" VerticalAlignment="Center" />
+                            <TextBox x:Name="OutputPathBox" Grid.Column="1" Height="26" Margin="10,0,8,0"
+                                     VerticalAlignment="Center" FontSize="12" VerticalContentAlignment="Center" />
+                            <ComboBox x:Name="OutputPresetBox" Grid.Column="2" Height="26" Width="150"
+                                      VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+
+                        <!--
+                          Empty unless the custom item is selected AND the typed path is not one
+                          that SettingsStore accepts. Same conditional warning line pattern as
+                          TriggerWarningText below the trigger row. Measured: the line is
+                          RESERVED even while empty (about 19px), so the warning can appear and
+                          disappear without moving anything else on the page, which is also
+                          why the window is 40px taller than it used to be.
+                        -->
+                        <TextBlock x:Name="OutputNoticeText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
 

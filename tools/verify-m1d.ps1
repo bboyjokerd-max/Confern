@@ -309,8 +309,14 @@ if (Test-Path -LiteralPath $workerLog) {
   $workerFresh = $wi.LastWriteTime -ge $payloadStarted
   $workerText = (Get-Content -LiteralPath $workerLog -Encoding UTF8) -join "`n"
 }
+# 2026-10-05: this pattern used to pin "protocolVersion=1". That pin is incidental to what
+# the check is for (only THIS run's worker may satisfy it -- established by deleting the
+# file above plus $workerFresh), so every legitimate protocol bump turned it into a false
+# negative instead of a caught regression: it went red the moment the protocol became 2 and
+# stayed red. Match the readiness line, not the number. Pinning the protocol version, if
+# ever wanted, needs its own check whose stated purpose is exactly that.
 Check 'S12.10f worker reported ready (this run only: the log was deleted first)' `
-  ($workerFresh -and ($workerText -match 'worker: ready protocolVersion=1')) `
+  ($workerFresh -and ($workerText -match 'worker: ready protocolVersion=\d+')) `
   "beforeRun=${staleWorkerBytes}B now=${workerBytes}B fresh=$workerFresh"
 Check 'S12.10g no leftover worker process' (@(Get-Process -Name Confern -ErrorAction SilentlyContinue).Count -eq 0) ''
 

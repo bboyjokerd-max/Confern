@@ -23,6 +23,7 @@ using FontFamily = System.Windows.Media.FontFamily;
 using GdiColor = System.Drawing.Color;
 using GdiColors = System.Drawing.Color;
 using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using TextBox = System.Windows.Controls.TextBox;
 using ToggleButton = System.Windows.Controls.Primitives.ToggleButton;
 
 namespace Sidecar;
@@ -683,6 +684,7 @@ internal static class SettingsUi
             foreach (TextBlock t in new[]
             {
                 window.TitleText, window.TriggerLabel, window.StartupLabel, window.LanguageLabel,
+                window.OutputLabel,
                 window.JpgLabel, window.WebpLabel, window.NamingLabel, window.TimeoutLabel,
                 window.HotkeyLabel, window.DiagnosticsLabel, window.TriggerValueText, window.JpgValueText,
                 window.WebpValueText, window.TimeoutValueText, window.NamingValueText
@@ -704,6 +706,8 @@ internal static class SettingsUi
 
             window.TriggerWarningText.Foreground = WarningFg;
             window.NamingReasonText.Foreground = WarningFg;
+            // 輸出資料夾那一行的提示（規格 §9.5）：與觸發鍵的警告同一個顏色、同一種語意
+            window.OutputNoticeText.Foreground = WarningFg;
             window.HotkeyStubText.Foreground = StubFg;
             window.StartupStubBadge.Foreground = StubFg;
 
@@ -711,7 +715,7 @@ internal static class SettingsUi
             SecondaryButton(window.CancelButton);
             SecondaryButton(window.CaptureButton);
 
-            foreach (ComboBox box in new[] { window.TriggerPresetBox, window.LanguageBox })
+            foreach (ComboBox box in new[] { window.TriggerPresetBox, window.LanguageBox, window.OutputPresetBox })
             {
                 box.Background = SurfaceBg;
                 box.Foreground = TextMain;
@@ -719,11 +723,15 @@ internal static class SettingsUi
                 box.FontFamily = Font;
             }
 
-            window.HotkeyBox.Background = SurfaceBg;
-            window.HotkeyBox.Foreground = TextMain;
-            window.HotkeyBox.BorderBrush = CardBorder;
-            window.HotkeyBox.CaretBrush = TextMain;
-            window.HotkeyBox.FontFamily = Font;
+            // 輸出資料夾的自訂路徑：與緊急熱鍵的文字框同一種外觀（這一頁只有這一種輸入框樣式）
+            foreach (TextBox input in new[] { window.HotkeyBox, window.OutputPathBox })
+            {
+                input.Background = SurfaceBg;
+                input.Foreground = TextMain;
+                input.BorderBrush = CardBorder;
+                input.CaretBrush = TextMain;
+                input.FontFamily = Font;
+            }
 
             foreach (ToggleButton toggle in new[]
             { window.StartupToggle, window.HotkeyToggle, window.DiagnosticsToggle })

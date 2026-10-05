@@ -77,7 +77,35 @@ internal sealed class WheelPresenter
     public string? SelectedTarget => _targets.Count > 0 ? _targets[_selected] : null;
 
     /// <summary>目前這一格會顯示的預覽文字（與 <c>Compose</c> 用的是同一個來源）。</summary>
-    public string? CurrentPreview => _notice ?? _preview?.Invoke(_selected);
+    public string? CurrentPreview => ComposePreviewText();
+
+    /// <summary>
+    /// 輸出目的地的**資料夾名**（規格 §9.5，2026-10-05 使用者裁定）。非空時，檔名預覽會接上
+    /// <c>→ 名字</c>；<b>null 或空＝輸出與來源檔同一個資料夾（預設值），此時畫面與改動前逐位元相同</b>
+    /// ——這是這一條的回歸判準，所以判斷「該不該顯示」**不在這裡**：由呼叫端（知道設定與來源路徑）
+    /// 決定，這裡只負責畫。
+    ///
+    /// 只放資料夾名而不是全路徑：輪盤上塞不下路徑（規格 §9.5 原文）；全路徑寫進日誌。
+    /// 與 <see cref="TriggerKeyLabel"/> 同一種作法：由 <see cref="Program"/> 在顯示前設定一次。
+    /// </summary>
+    public string? Destination { get; set; }
+
+    /// <summary>
+    /// 檔名預覽那一行的**唯一**組裝點（畫面上、日誌裡、<see cref="CurrentPreview"/> 都用它）。
+    /// 三個地方各組一次的話，遲早會出現「日誌說有目的地、畫面沒有」這種查不出來的分歧。
+    ///
+    /// 拒絕狀態（<see cref="_notice"/>）一律原樣回傳：那一行說的是「為什麼不能做」，
+    /// 夾帶目的地的話，m1b 對拒絕訊息的斷言與使用者的理解都會變模糊。
+    /// </summary>
+    private string? ComposePreviewText()
+    {
+        if (_notice != null) return _notice;
+
+        string? line = _preview?.Invoke(_selected);
+        if (string.IsNullOrEmpty(Destination)) return line;         // 預設：來源檔旁邊，不加任何字
+
+        return string.IsNullOrEmpty(line) ? $"→ {Destination}" : $"{line} → {Destination}";
+    }
 
     /// <summary>非空代表目前是**拒絕狀態**（例如混合選取）：顯示訊息、沒有可執行的選項。</summary>
     public string? Notice => _notice;
@@ -144,7 +172,7 @@ internal sealed class WheelPresenter
         _evidence.Line($"wheel shown cursor=({cursorX},{cursorY}) origin=({ox},{oy}) " +
                        $"size={bmp.Width}x{bmp.Height} source={_sourceFormat} " +
                        $"targets=[{string.Join(",", _targets)}] selected={_selected} " +
-                       $"notice={(notice ?? "-")} preview={(_preview?.Invoke(_selected) ?? "-")} " +
+                       $"notice={(notice ?? "-")} preview={(ComposePreviewText() ?? "-")} " +
                        $"mode={(_mode == WheelMode.Tool ? "tool" : "format")}");
     }
 
@@ -711,7 +739,8 @@ internal sealed class WheelPresenter
 
     private void DrawPreview(Graphics g, float cx, float wheelBottom)
     {
-        string? line = _notice ?? _preview?.Invoke(_selected);
+        // 目的地（規格 §9.5）就在這一行裡：檔名預覽是使用者按 Enter 前唯一會看的地方。
+        string? line = ComposePreviewText();
         if (string.IsNullOrEmpty(line)) return;
 
         float py = wheelBottom + WheelGeometry.KeyGapPx + WheelGeometry.KeycapPx +
