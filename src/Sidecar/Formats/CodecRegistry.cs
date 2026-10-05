@@ -91,6 +91,20 @@ internal sealed class CodecRegistry
         _ => null,
     };
 
+    /// <summary>
+    /// 這個格式有沒有「**不解碼**的容器層去 metadata」路徑（工具 `strip-metadata`，規格 §9.4）。
+    ///
+    /// 政策寫在這裡的理由與 <see cref="CreateEncoder"/> 一樣：**格式知識只有一個擁有者**。
+    /// 機制（怎麼拆 JPEG 的 marker）在 <see cref="JpegMetadataStrip"/>，但「哪些格式有這條路」
+    /// 屬於格式知識——散到引擎裡就會出現第二個知道格式清單的地方。
+    ///
+    /// 目前只有 `JPG`。刻意**不**為 PNG／WebP 寫解剖器：它們走重編碼就已經逐像素相同
+    /// （PNG／BMP／TIF／GIF 是無損容器），多寫兩個解析器只是多兩個要保養的東西
+    /// ——規格 §9.4「被拒絕的選項 (b)」記的就是這件事。
+    /// </summary>
+    public static bool HasLosslessMetadataStrip(string format) =>
+        string.Equals(format, "JPG", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>規格 §6.1 宣告的**輸入**格式（MVP 承諾）。</summary>
     private static readonly string[] MvpInputs = { "JPG", "PNG", "BMP", "TIF", "GIF", "WEBP", "HEIC" };
 

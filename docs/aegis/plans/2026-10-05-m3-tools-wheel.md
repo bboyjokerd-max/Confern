@@ -213,3 +213,51 @@ M3 七項的相依盤點：
 | **C2** | `NamingPolicy.ResolveOutputPath(source, ext, targetDirectory)`；null＝現行行為 | 輸出路徑的唯一擁有者仍然只有 `NamingPolicy`——**不得**出現第二個決定輸出路徑的地方 |
 | **C3** | 目的地經由 worker 傳遞（job 訊息加 `outputDir`，`WorkerProtocol.Version` 升到 3）＋輪盤顯示目的地 | 協議升級必須跟 C1/C2 一起落地，否則會出現「UI 有設定、worker 不知道」的半套狀態 |
 | **D** | 把今天的量測變成套件斷言 ＋ 假故障演練（改壞→紅→還原→綠） | 今天所有證明都是一次性的，不進套件就會退化 |
+
+### 10.4 工具 ②「去 metadata」：兩條路徑，走哪一條由容器決定（2026-10-06）
+
+規格已先寫（§9.4）。這裡記的是**被拒絕的選項**與量到的數字。
+
+| 選項 | 裁定 | 理由 |
+|---|---|---|
+| 全面重編碼（＝照工具①的字面形狀做） | **否** | 當場量到：Q100 的 JPEG 重編碼改動 48×28 那張圖 5376 個位元組裡的 **949** 個、單通道最大差 **3** ⇒ 達不到「像素完全相同」這條斷言，而 EXIF 只長在 JPEG 上 |
+| 全面容器手術（JPEG＋PNG＋WebP 都自己解容器） | **否** | PNG／WebP 的解析在驗收上沒有好處（無損容器走重編碼就已逐像素相同），只是多兩個要保養的解剖器 |
+| WIC 壓縮域轉碼（`BitmapEncoder.CreateForTranscoding`） | **否** | 2026-10-06 查證：.NET 8 的 WPF `PresentationCore` **沒有**這個 API（ref `8.0.31` 與 runtime `8.0.6` 兩份組件都查過字串）。要走得自己接 `IWIC*`，那是新的一條寫檔路徑 |
+| **JPEG 走容器層移除、其他格式走重編碼** | **是** | 兩邊都當場可量：JPEG 的掃描資料一個位元組都不動 ⇒ 位元組級的保證；其餘格式沿用既有路徑，無損容器逐像素相同 |
+| 只去 EXIF、保留 ICC | **否** | 去識別化的場合 ICC 與 EXIF 同等級；而且「保留什麼」需要一個介面，會與品質設定搶位置 |
+
+---
+
+## 11. 追加切片：工具 ②「去 metadata」（`strip-metadata`，2026-10-06）
+
+規格裁定見 §9.4 的新增條目。範圍寫法沿用 §2。
+
+### 做
+
+1. **工具目錄增加第二格**：`ToolCatalog` 加 `strip-metadata`／扇區標籤 `CLEAN`／新圖示
+   `ToolIcon.StripMetadata`（線稿、程式繪製，`WheelPresenter.DrawToolIcon` 多一個 case）。
+   輪盤的扇區數＝目錄回報的數目，而 `WheelGeometry` 早就對扇區數泛化，所以第二格會自己出現。
+2. **`ConversionEngine.StripMetadata(sourcePath, journal, targetDirectory)`**：骨架與 `Rotate90`
+   逐項對齊（格式檢查 → `AtomicWriter.Exists` → `ProbeDecode` → `NamingPolicy.ResolveOutputPath`
+   → 處理 → `AtomicWriter.Write` ＋ 同一套 3 次重試與同一組錯誤分類），並且接受 `targetDirectory`。
+3. **「處理」那一步有兩條，由容器決定**（規格 §9.4）：JPEG 走容器層移除
+   （`Formats/JpegMetadataStrip.cs`，掃描資料不動）；其他格式走既有的「解碼 → 丟 metadata →
+   以來源格式重編碼」。政策 `CodecRegistry.HasLosslessMetadataStrip(format)`、
+   機制在 `Formats/` 底下——格式知識的擁有者仍然只有一個。
+4. **worker 協議加 `op=strip-metadata`** 並在 `RunJob` 的 switch 裡派送。
+5. **無頭診斷 `--strip-metadata <path>`**，形狀照 `--rotate90`：同一條「設定 → `NamingPolicy` →
+   寫檔」的可無頭驗證路徑，輸出資料夾由 `Settings.OutputFolder` 決定。
+
+### 不做
+
+- **不動協議版本**（維持 3）：未知的 `op` 已經會走 `RejectUnknownOp` 具名報錯，舊 worker 收到
+  `strip-metadata` 只會**拒絕**，不會靜默做錯事。這與 `op` 缺席語意是 `convert` 的那一次不同——
+  那一次舊 worker 會「照做而且做錯」，那才非升版本不可。
+- 不做「選擇性保留」（留 ICC 只去 EXIF 之類）。
+- 不做 PNG／WebP 的容器手術。
+- 不新增設定項：這一刀**沒有旋鈕**，品質固定 100、輸出路徑沿用 §9.5。
+- 不動第一層（格式輪盤）；不按 Shift 時必須逐位元相同。
+- 不動凍結的視覺設計（方向 D 配色、`WheelDesign.GlowEnabled=false`、`SectorCornerPx=7`）；
+  不新增色票、不新增圓角值。
+- 不改既有套件（`tools/verify-m1*.ps1`）：把這一刀變成套件斷言是 §10.3 的 **D 切片**，
+  今天只留當場量到的證據。

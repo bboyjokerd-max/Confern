@@ -264,6 +264,206 @@ internal sealed class ConversionEngine
     }
 
     /// <summary>
+    /// 工具：去 metadata（工具 id `strip-metadata`，M3 的第二個工具；規格 §9.4）。
+    ///
+    /// **骨架與 <see cref="Rotate90"/> 逐項對齊**（格式檢查 → <see cref="AtomicWriter.Exists"/> →
+    /// <see cref="CodecRegistry.ProbeDecode"/> → <see cref="NamingPolicy.ResolveOutputPath"/> →
+    /// 處理 → <see cref="AtomicWriter.Write"/> ＋ 同一套 3 次重試）：規格 §5 的寫入契約只有一個擁有者，
+    /// 工具不得自己另開一條。
+    ///
+    /// **「處理」那一步有兩條，走哪一條由容器決定**（政策＝
+    /// <see cref="CodecRegistry.HasLosslessMetadataStrip"/>）：
+    ///   ①**JPEG**：容器層移除（<see cref="JpegMetadataStrip"/>，熵編碼的掃描資料整段照抄）
+    ///     ⇒ 解出來的像素與來源**逐位元組相同**；
+    ///   ②**其他格式**：解碼 → 丟掉 metadata／ICC → 以**來源格式**重編碼（品質 100）。
+    ///     PNG／BMP／TIF／GIF 是無損容器 ⇒ 逐像素相同；**WebP 有損 ⇒ 會重新編碼**，
+    ///     這與 <see cref="Rotate90"/> 已明講的「不要寫成無損」是同一條裁定。
+    ///
+    /// ⚠ **唯一會動到像素的情況**：來源的 EXIF 方向 ≠ 1。方向 tag 一清掉，遵循 tag 的檢視器就沒東西
+    /// 可以遵循，圖會躺下——所以那一種**必須**走重編碼並先把方向烤進像素。方向只有在不為 1 時才會
+    /// 改變像素，而且它一定會寫進日誌，不會默默發生。
+    /// </summary>
+    public ConversionResult StripMetadata(string sourcePath, TempJournal? journal = null,
+                                          string? targetDirectory = null)
+    {
+        string? sourceFormat = _codecs.FormatOfPath(sourcePath);
+        if (sourceFormat == null)
+            return Fail(sourcePath, ConversionError.Unsupported, "extension is not in the format table");
+        if (_codecs.Capability(sourceFormat) is { Decode: DecodeSupport.No })
+            return Fail(sourcePath, ConversionError.Unsupported, $"no decoder for {sourceFormat}");
+        if (!AtomicWriter.Exists(sourcePath))
+            return Fail(sourcePath, ConversionError.SourceMissing, "source disappeared before stripping");
+
+        DecodeOutcome probe = _codecs.ProbeDecode(sourcePath);
+        if (probe.Status != DecodeStatus.Ok)
+            return Fail(sourcePath, MapDecodeStatus(probe.Status), probe.Detail);
+
+        string? extension = _codecs.PrimaryExtension(sourceFormat);
+        if (extension == null)
+            return Fail(sourcePath, ConversionError.TargetUnavailable, "no extension for source format");
+
+        string targetPath;
+        try
+        {
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**：
+            // 靜默的回退會讓使用者以為設定生效了，然後找不到檔案（規格 §9.5）。
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        // 方向只有在**不為 1** 時才影響選擇：方向＝1（或沒有 tag）可以走容器層，像素一位元組都不動；
+        // 方向 ≠ 1 必須把方向烤進像素再丟 tag，否則圖會躺下（見方法說明）。
+        int orientation = ReadOrientationOfFile(sourcePath);
+        bool lossless = CodecRegistry.HasLosslessMetadataStrip(sourceFormat) && orientation < 2;
+        if (CodecRegistry.HasLosslessMetadataStrip(sourceFormat) && orientation >= 2)
+        {
+            _log($"strip-metadata: EXIF orientation={orientation} -> re-encoding to bake it into pixels " +
+                 $"before dropping the tag (the container path would leave the image sideways)");
+        }
+
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                long written = 0;
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                AtomicWriter.Write(targetPath, stream =>
+                {
+                    if (lossless)
+                    {
+                        JpegMetadataStrip.Result stripped = JpegMetadataStrip.Strip(sourcePath, stream);
+                        if (stripped.Parsed)
+                        {
+                            _log($"strip-metadata: {Path.GetFileName(sourcePath)} container path " +
+                                 $"(jpeg) removed {stripped.RemovedSummary} ({stripped.RemovedBytes}B), " +
+                                 $"scan data copied verbatim");
+                            if (stripped.RemovedSegments == 0)
+                                _log($"strip-metadata: note: {Path.GetFileName(sourcePath)} carried no " +
+                                     "metadata segment at all; the output is the source, byte for byte");
+                        }
+                        else
+                        {
+                            // 走不下去就退回重編碼——**但先說出來**。半成品留在輸出流裡的話，
+                            // 使用者會拿到一個截斷的檔案，那比慢一點嚴重得多。
+                            _log($"strip-metadata: container path failed ({stripped.Detail}) -> " +
+                                 "falling back to decode + re-encode");
+                            stream.SetLength(0);
+                            stream.Position = 0;
+                            StripByReencode(sourcePath, sourceFormat, stream);
+                        }
+                    }
+                    else
+                    {
+                        StripByReencode(sourcePath, sourceFormat, stream);
+                    }
+                    written = stream.Length;
+                }, journal);
+                timer.Stop();
+
+                _log($"stripped {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+                     $"({written}B, {(lossless ? "container" : "re-encode")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
+                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+                    $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
+            }
+            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
+            {
+                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
+                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                Thread.Sleep(150 * attempt);
+            }
+            catch (Exception ex)
+            {
+                // 備援路徑上的**解碼**失敗要沿用解碼的分類（規格 §7.1 的訊息不可以因為
+                // 「這一條是備援」就降級成 Unknown）。
+                if (ex is StripDecodeFailure decodeFailure && decodeFailure.InnerException is { } inner)
+                {
+                    return Fail(sourcePath,
+                        MapDecodeStatus(CodecRegistry.ClassifyDecodeException(inner, sourceFormat, sourcePath)),
+                        $"{inner.GetType().Name}: {inner.Message}");
+                }
+                return Fail(sourcePath, ClassifyWriteFailure(ex),
+                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
+            }
+        }
+
+        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+    }
+
+    /// <summary>
+    /// 去 metadata 的第二條路：解碼 → **不夾帶任何 metadata／ICC** → 以來源格式重編碼。
+    ///
+    /// <c>keepMetadata: false</c> 同時丟掉 <see cref="BitmapMetadata"/> 與 <c>ColorContexts</c>，
+    /// 而後者就是 ICC profile 的來源——「保留 ICC」在這是**刻意沒有**的（規格 §9.4：
+    /// 去識別化的場合 ICC 與 EXIF 同等級）。
+    /// </summary>
+    private void StripByReencode(string sourcePath, string sourceFormat, Stream stream)
+    {
+        BitmapSource frame;
+        try
+        {
+            (frame, int frameCount) = DecodeFirstFrame(sourcePath);
+            if (frameCount > 1)
+                _log($"note: {Path.GetFileName(sourcePath)} has {frameCount} frames; only the first is stripped (spec 6.1)");
+        }
+        catch (Exception ex)
+        {
+            throw new StripDecodeFailure(
+                $"decode failed while stripping {Path.GetFileName(sourcePath)} " +
+                $"({ex.GetType().Name}: {ex.Message})", ex);
+        }
+
+        int orientation = ReadOrientation(frame);
+        if (orientation >= 2)
+        {
+            frame = ApplyOrientation(frame, orientation);
+            _log($"strip-metadata: EXIF={orientation} baked into pixels before the tag was dropped " +
+                 $"({frame.PixelWidth}x{frame.PixelHeight})");
+        }
+
+        // 品質 100：重編碼路徑最接近無損的一檔（與 Rotate90 同一個值，同一個理由）。
+        Encode(frame, sourcePath, sourceFormat, 100, stream, keepMetadata: false,
+               bakedOrientation: orientation >= 2);
+    }
+
+    /// <summary>
+    /// 備援路徑（重編碼）的解碼失敗。存在的理由是**分類**：沒有它，一個「備援路上才發現的
+    /// 解碼失敗」會在 <see cref="ClassifyWriteFailure"/> 眼裡變成 Unknown，
+    /// 使用者看到「未知的錯誤」而不是「無法解碼」（規格 §7.1）。
+    /// </summary>
+    private sealed class StripDecodeFailure(string message, Exception inner) : Exception(message, inner);
+
+    /// <summary>
+    /// 讀一個檔案的 EXIF 方向（tag 274），**不解整個檔**（<see cref="BitmapCacheOption.None"/>：
+    /// 只讀標頭與中繼資料，規格 §5 的「大檔不整檔載入記憶體」）。
+    /// 讀不到一律回 1（正常）：那是「沒有方向宣告」的意思，不是「不知道」。
+    /// </summary>
+    private static int ReadOrientationOfFile(string path)
+    {
+        try
+        {
+            using var input = new FileStream(LongPath.Prepare(path), FileMode.Open, FileAccess.Read,
+                                             FileShare.ReadWrite);
+            BitmapDecoder decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat,
+                                                         BitmapCacheOption.None);
+            return decoder.Frames.Count == 0 ? 1 : ReadOrientation(decoder.Frames[0]);
+        }
+        catch
+        {
+            return 1;
+        }
+    }
+
+    /// <summary>
     /// 解碼第一頁／第一格。來源**唯讀**開啟且允許他人共用——
     /// 這一條是規格 §7.2 的第一名（原檔被修改／被刪／被搬移），不能靠「記得不要寫」來保證。
     /// </summary>

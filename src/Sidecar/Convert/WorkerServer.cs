@@ -29,6 +29,17 @@ internal static class WorkerProtocol
     /// 收到帶資料夾的封包時不會報錯，它只會**默默把檔案寫到來源旁邊**。那正是本欄位要修掉的事：
     /// 使用者設定了輸出資料夾、按下 Enter，卻什麼都沒發生，畫面上還顯示成功。缺席語意與新功能
     /// 的意圖在這裡剛好相反，靠預設值擋不住，只能靠版本配對在連線階段拒絕。
+    ///
+    /// **2026-10-06 新增 `op=strip-metadata`——刻意「不」由 3 升到 4。**
+    ///
+    /// 理由：升版本的用途是擋掉**靜默做錯事**的配對。`op` 缺席會落到 `convert`（舊 worker 會把
+    /// 旋轉當成換格式照做，而且回報成功），所以那一次非升不可；`outputDir` 的缺席語意與新功能
+    /// 意圖相反，所以那一次也非升不可。**但這個新 op 不屬於那一類**：一個還不認識
+    /// <c>strip-metadata</c> 的舊 worker 會走到 <see cref="WorkerServer.RejectUnknownOp"/>，
+    /// 回一個具名的失敗（`unknown op 'strip-metadata' (this worker speaks convert/rotate90)`），
+    /// 使用者看到的是「這個工具在這個 worker 上做不到」而不是「按了 CLEAN 卻轉了格式」。
+    /// 換句話說：**未知 op 已經有明確的失敗路徑，版本閘門在這裡是多的**，
+    /// 而多升一次版本會讓「舊 exe 配新 exe」的升級情境無謂地多斷一次線。
     /// </summary>
     public const int Version = 3;
 
@@ -43,6 +54,13 @@ internal static class WorkerProtocol
 
     /// <summary>工具 `rotate90`（順時針 90 度，M3）。輸出格式＝來源格式，見 <see cref="ConversionEngine.Rotate90"/>。</summary>
     public const string OpRotate90 = "rotate90";
+
+    /// <summary>
+    /// 工具 `strip-metadata`（去 metadata，M3 第二個工具）。輸出格式＝來源格式，
+    /// 見 <see cref="ConversionEngine.StripMetadata"/> 與規格 §9.4。
+    /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由寫在 <see cref="Version"/> 的註解裡。
+    /// </summary>
+    public const string OpStripMetadata = "strip-metadata";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -263,6 +281,7 @@ internal static class WorkerServer
                 WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal,
                                                            job.outputDir),
                 WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal, job.outputDir),
+                WorkerProtocol.OpStripMetadata => engine.StripMetadata(paths[i], journal, job.outputDir),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
@@ -298,11 +317,15 @@ internal static class WorkerServer
     /// 未知的 op：回一個**失敗的結果**（不丟例外，讓既有的失敗回報路徑接手），
     /// 使用者訊息走 <see cref="ConversionError.Unknown"/> 的規格字串（UI 不必為它多寫一條路徑），
     /// 真正的細節放在 detail 給日誌——那才是維修的人看得到的地方。
+    ///
+    /// **列出認識的 op 是刻意的**：這一行就是「未知 op 不會靜默變成 convert」這句話的可觀測證據，
+    /// 也是不升協議版本的理由（見 <see cref="WorkerProtocol.Version"/>）。加工具時**要一起更新它**，
+    /// 否則這句失敗訊息會說謊。
     /// </summary>
     private static ConversionResult RejectUnknownOp(string sourcePath, string op) =>
         new(sourcePath, null, ConversionError.Unknown,
             $"unknown op '{op}' (this worker speaks " +
-            $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90})");
+            $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata})");
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

@@ -235,6 +235,10 @@ internal sealed class Options
                                     the source file is never touched
                                     (the only way to check the alpha contract: the glass body
                                     must be alpha 255, everything outside must be a pure layer)
+          --strip-metadata <path>   run tool strip-metadata on <path> and report; JPEG loses its
+                                    metadata in the container (pixels stay byte-identical),
+                                    everything else is decoded and re-encoded without metadata;
+                                    the source file is never touched
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
           --wheel-targets <a,b,c>   with --wheel-demo: target format list (default PNG,JPG,WEBP,BMP)
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
@@ -333,6 +337,12 @@ internal sealed class Options
     /// 存在的理由：工具的「能不能做」必須先是可重複量測的事實，才准出現在介面上。
     /// </summary>
     public string? Rotate90;
+    /// <summary>
+    /// M3 診斷（2026-10-06）：`--strip-metadata &lt;path&gt;` 直接對這個檔案跑工具 `strip-metadata`。
+    /// 形狀與 <see cref="Rotate90"/> 一字不差（同一個引擎、同一條設定→命名→寫檔鏈），
+    /// 差別只在它驗的是「**像素不變、metadata 消失**」而不是「長寬對調」。
+    /// </summary>
+    public string? StripMetadata;
     /// <summary>
     /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
     /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
@@ -541,6 +551,7 @@ internal sealed class Options
                 case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
                 case "--wheel-tools": o.WheelTools = true; break;
                 case "--rotate90": if (i + 1 < args.Length) o.Rotate90 = args[++i]; break;
+                case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -803,6 +814,8 @@ internal static class App
 
         if (opt.Rotate90 != null)
             return Rotate90Diagnostic(evidence, opt);
+        if (opt.StripMetadata != null)
+            return StripMetadataDiagnostic(evidence, opt);
 
         // 診斷：--wheel-tools 讓無頭驗收能走到第二層，不必合成鍵盤輸入（產品路徑不讀這個旗標）。
         _forceToolLayer = opt.WheelTools;
@@ -1208,6 +1221,59 @@ internal static class App
         if (!untouched)
         {
             evidence.Line("--rotate90 FAILED: the source file was modified (spec 5 violation)");
+            return 1;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// M3 診斷：`--strip-metadata &lt;path&gt;`。走的是 **worker 用的同一個引擎**
+    /// （<see cref="ConversionEngine.StripMetadata"/>），所以量到的就是產品的能力。
+    ///
+    /// 它刻意把三件事印成可斷言的事實（與 <see cref="Rotate90Diagnostic"/> 同一個形狀）：
+    ///   ①引擎回報的成功／失敗與輸出檔名；
+    ///   ②輸出**落在哪一條路徑**（容器層 or 重編碼）與移除了哪些區段——那在日誌裡，
+    ///     因為那是引擎自己的事實，在這裡重講一遍就是第二個擁有者；
+    ///   ③來源檔**完全沒被動到**——SHA256／長度／mtime 三項前後比對（規格 §5 的第一名）。
+    /// 回傳碼：0 成功、1 來源被動到（§5 紅線）、2 找不到來源、3 引擎失敗。
+    /// </summary>
+    private static int StripMetadataDiagnostic(Evidence evidence, Options opt)
+    {
+        string source = opt.StripMetadata!;
+        if (!File.Exists(source))
+        {
+            evidence.Line($"--strip-metadata: source not found: {source}");
+            return 2;
+        }
+
+        string beforeHash = Sha256Of(source);
+        long beforeLength = new FileInfo(source).Length;
+        DateTime beforeWrite = File.GetLastWriteTimeUtc(source);
+
+        var registry = new CodecRegistry();
+        var engine = new ConversionEngine(registry, evidence.Line);
+        string? outputDir = (_settings ?? new Settings()).ResolveOutputDirectory();
+        evidence.Line($"tool strip-metadata: outputDir={outputDir ?? "(source folder)"}");
+        ConversionResult result = engine.StripMetadata(source, journal: null, targetDirectory: outputDir);
+
+        string afterHash = Sha256Of(source);
+        bool untouched = beforeHash == afterHash
+                         && new FileInfo(source).Length == beforeLength
+                         && File.GetLastWriteTimeUtc(source) == beforeWrite;
+
+        evidence.Line($"tool strip-metadata: ok={result.Ok} error={result.Error} output={result.OutputPath ?? "-"}");
+        evidence.Line($"tool strip-metadata: source-untouched={untouched} " +
+                      $"(sha256 {beforeHash.Substring(0, 12)} -> {afterHash.Substring(0, 12)}, " +
+                      $"len {beforeLength}, mtime {(beforeWrite == File.GetLastWriteTimeUtc(source) ? "same" : "CHANGED")})");
+
+        if (!result.Ok)
+        {
+            evidence.Line($"--strip-metadata FAILED: {result.UserMessage}");
+            return 3;
+        }
+        if (!untouched)
+        {
+            evidence.Line("--strip-metadata FAILED: the source file was modified (spec 5 violation)");
             return 1;
         }
         return 0;

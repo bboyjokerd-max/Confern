@@ -8,7 +8,14 @@ namespace Sidecar;
 internal enum ToolIcon
 {
     /// <summary>順時針 90 度的轉向箭頭（兩個弧形箭頭）。</summary>
-    Rotate90
+    Rotate90,
+
+    /// <summary>
+    /// 被劃掉的中繼資料標籤（tag）——「把檔案裡那些看不見的標籤去掉」。
+    /// 選這個形狀是因為 EXIF／ICC／文字註解在容器裡是**同一種東西**（掛在影像資料外的區段），
+    /// 而 17px 的線稿畫不了「三種各畫一個」；標籤＋斜線是唯一一個能在這個尺寸辨識的形狀。
+    /// </summary>
+    StripMetadata
 }
 
 /// <summary>

@@ -574,6 +574,29 @@ internal sealed class WheelPresenter
                 g.DrawLine(pen, ax, ay, ax - a, ay - a * 0.2f);
                 g.DrawLine(pen, ax, ay, ax + a * 0.2f, ay + a);
                 break;
+
+            case ToolIcon.StripMetadata:
+                // 標籤（tag）＋ 斜線：**被劃掉的標籤**。標籤的尖角朝左、右邊是矩形，
+                // 中間一個小孔。17px 之下只有這個對比撐得住（弧箭頭與它一眼可分辨）。
+                using (var tag = new GraphicsPath())
+                {
+                    tag.AddPolygon(new[]
+                    {
+                        new PointF(cx - s * 0.10f, cy - s * 0.42f),
+                        new PointF(cx + s * 0.42f, cy - s * 0.42f),
+                        new PointF(cx + s * 0.42f, cy + s * 0.42f),
+                        new PointF(cx - s * 0.10f, cy + s * 0.42f),
+                        new PointF(cx - s * 0.44f, cy),
+                    });
+                    tag.CloseFigure();
+                    g.DrawPath(pen, tag);
+                }
+                // 標籤的穿孔。**直接用扇區的墨水筆刷**（不另外 new 一個 SolidBrush）：
+                // 這樣選中／未選中的兩段不透明度會自動跟著走，不會多出一個要同步的顏色。
+                g.FillEllipse(ink, cx - s * 0.12f, cy - s * 0.08f, s * 0.16f, s * 0.16f);
+                // 斜線畫在標籤**上面**（同一支筆、同一個墨水色）：這條線就是「去掉」的意思本體。
+                g.DrawLine(pen, cx - s * 0.52f, cy + s * 0.52f, cx + s * 0.52f, cy - s * 0.52f);
+                break;
         }
     }
 

@@ -5,9 +5,9 @@ namespace Sidecar;
 /// <see cref="ToolDescriptor"/> ＋ 對應的執行實作，輪盤與命中測試不必改一行
 /// （<see cref="WheelGeometry"/> 早就對扇區數泛化：<c>SweepDeg(count)</c>／<c>SectorAt(…, count)</c>）。
 ///
-/// 目前只有一個工具，這是刻意的：**已經能執行的才放上來**。M3 的其餘六項
-/// （裁切、壓縮、去 metadata、讀 QR、合併 PDF、去背）各自需要新互動或新相依，
-/// 見 `docs/aegis/plans/2026-10-05-m3-tools-wheel.md` §1 的相依盤點。
+/// 目前有兩個工具（2026-10-06），兩個都是**已經能執行**才放上來的：`ROTATE`（順時針 90°）
+/// 與 `CLEAN`（去 metadata）。M3 的其餘五項（裁切、壓縮、讀 QR、合併 PDF、去背）各自需要
+/// 新互動或新相依，見 `docs/aegis/plans/2026-10-05-m3-tools-wheel.md` §1 的相依盤點。
 /// </summary>
 internal sealed class ToolCatalog : IToolCatalog
 {
@@ -35,7 +35,33 @@ internal sealed class ToolCatalog : IToolCatalog
         Description: "轉 90°",
         Icon: ToolIcon.Rotate90);
 
-    public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90 };
+    /// <summary>
+    /// M3 的第二個工具：**去 metadata**（`strip-metadata`）。選它當第二刀的理由與旋轉同一條
+    /// ——**不需要新相依**（只用 WIC 與既有的 `AtomicWriter`），而且驗收可以寫成客觀斷言：
+    /// **像素必須完全相同、metadata 必須消失**，兩件都能當場量（規格 §9.4）。
+    ///
+    /// ⚠ **不要寫成「重新編碼」**：這一個工具**預設不解碼**。JPEG 走容器層移除
+    /// （`Formats/JpegMetadataStrip`：丟掉 APP1／APP2／…／COM，熵編碼的掃描資料一個位元組都不動），
+    /// 所以像素是**位元組級的相同**；其他格式才走「解碼 → 丟 metadata → 重編碼」，
+    /// 而 PNG／BMP／TIF／GIF 是無損容器，結果同樣逐像素相同。**WebP 是有損的**，
+    /// 對它而言「重新編碼」是真的會動到像素——與旋轉工具同一條既有裁定。詳見 `Convert/ConversionEngine.StripMetadata`。
+    ///
+    /// 中心膠囊的文字長度有預算（圓心鏤空直徑 94px、膠囊最小寬 100px）：
+    /// 實測 17px Segoe UI Bold 下 `轉 90°` = 55.6px、`去中繼資料` = 97.3px（膠囊 129px）。
+    /// 第一層在正常情況下畫的就是 138–145px 的膠囊（`JPG → WEBP` = 110.3px），
+    /// 所以 129px 落在產品**既有**的範圍內，不是新開的先例。
+    /// </summary>
+    private static readonly ToolDescriptor StripMetadata = new(
+        Id: "strip-metadata",
+        Label: "CLEAN",
+        Description: "去中繼資料",
+        Icon: ToolIcon.StripMetadata);
+
+    /// <summary>
+    /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
+    /// 輪盤與命中測試不必改一行。
+    /// </summary>
+    public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90, StripMetadata };
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {
@@ -44,9 +70,11 @@ internal sealed class ToolCatalog : IToolCatalog
         // 在第二層變成「可以按」，而兩層的訊息會互相矛盾。
         if (verdict.Status != PayloadStatus.Ready) return Array.Empty<ToolDescriptor>();
 
-        // 旋轉對所有「本產品支援的圖片」都成立，所以目前沒有更細的條件。
-        // 未來的工具會有：裁切（要能取像素）、去 metadata（要有 metadata 容器）、
-        // 讀 QR（只適用於解碼得動的點陣圖）。那些條件寫在這裡，不寫在 UI 裡。
+        // 兩個工具對所有「本產品支援的圖片」都成立，所以目前沒有更細的條件。
+        // 這不是「以後也一定如此」的宣告：`strip-metadata` 的適用性其實取決於「這個容器有沒有
+        // metadata 容器」（一個沒有 EXIF／ICC／註解的 JPEG 也會成功，只是沒東西可丟——
+        // 仍然產出一個檔案，這比「按下去沒反應」誠實）。真正的細條件會寫在**這裡**，不寫在 UI 裡。
+        // 未來的工具會有：裁切（要能取像素）、讀 QR（只適用於解碼得動的點陣圖）。
         return Tools;
     }
 }
