@@ -474,3 +474,42 @@ BMP／TIF／GIF／WebP 的逐像素沒有實測（無損容器是推論）；EXI
 偏弱（放大 3 倍才確認是「被劃掉的標籤」），語意主要由扇區文字 CLEAN 承載；
 工具說明「去中繼資料」在 17px 量到 97.3px，比 ToolCatalog 註解寫的 68px 預算寬
 （膠囊 129px 仍在第一層既有的 138-145px 範圍內）。
+
+## 2026-10-05（第七段）更正上一段：Shift 即時切層其實是**真的壞掉**，現已修好並有自動化證據
+
+上一段寫「沒有任何無頭路徑同時具備鉤子與送達的拖放，所以這一格只有真人能驗」——**那是錯的**，
+而且錯得很有意思：把兩個開關一起打開（`--raise-with-hooks`）就都成立，我當時只是沒想到要一起開。
+真正的原因是**產品缺陷**：
+
+- 鉤子的 Shift 分支比對的是通用 `VK_SHIFT`（0x10），但**真實鍵盤的低階鉤子送來的是
+  `VK_LSHIFT`（0xA0）／`VK_RSHIFT`（0xA1）**。所以「輪盤顯示期間按 Shift」對真人**從來沒有生效過**
+  ——唯一還能用的路是「拖曳前就先按住 Shift」（顯示時用 `GetAsyncKeyState` 判定的另一條路），
+  而那正是 2026-10-05 裁定要淘汰的舊行為。
+- 也就是說：我前面五輪的 INCONCLUSIVE **不是測試工具的錯**，是產品真的壞了。
+  我把它歸因於 harness，是我判斷錯誤——這一條要記著：**當一個功能怎麼測都測不出來時，
+  下一個假設應該是「功能本身沒作用」，不是「我的工具爛」。**
+
+修法（`3bfb44a`）：條件改成 `vk == VK_SHIFT || 0xA0 || 0xA1`，並新增
+`--raise-with-hooks`（raise 的同時裝鉤子）與 `--wheel-layer-probe <png>`（唯一可自動化入口），
+把鉤子回呼抽成 `WireHooks()` 全專案唯一一處，否則「探針過了」只證明探針那一份是對的。
+注入必須從**另一個執行緒**做：`WH_KEYBOARD_LL` 的回呼在安裝鉤子的執行緒上執行，同執行緒送鍵
+會互相等待，系統在 `LowLevelHooksTimeout` 後放行並可能移除鉤子 ⇒ 造成假陰性。
+
+證據（探針原始日誌，`hookKeysSeen=[0xA0-down]` 正是那個 bug 的值）：
+```
+wheel shown ... targets=[ROTATE,CLEAN] selected=0 notice=- preview=- mode=tool
+wheel layer switch: format -> tool (shift down, selection reset to first)
+after injected Shift DOWN -> mode=tool hookKeyCallbacks=0->1 hookKeysSeen=[0xA0-down]
+PASS  the keyboard hook callback really ran for the injected key (not a direct in-process call)
+wheel layer switch: tool -> format (shift up, selection reset to first)
+after injected Shift UP -> mode=format hookKeyCallbacks=1->2 hookKeysSeen=[0xA0-down,0xA0-up]
+wheel-layer-probe: PASS (exit 0) hookKeyCallbacks=2
+```
+
+⚠ **我自己在這一段裡又踩了一次同樣的坑**：第一次跑探針時我用 `& $exe ...` 呼叫 GUI 行程，
+PowerShell **不會等待**，`$LASTEXITCODE` 拿到的是前一個指令（建置）的 0，而且我緊接著就把 fixture
+刪了 ⇒ 探針回 `no such file -> exit 1`，我卻以為通過並據此提交。**GUI 行程一律用
+`Start-Process -Wait -PassThru` 讀 `ExitCode`**，而且 fixture 要活到行程結束為止。
+（這一條先前已經記過一次，還是再犯——所以它不是「知道」的問題，是每次都要真的照做。）
+
+待辦：0xA0／0xA1 應該搬進 `Native` 與 `VK_SHIFT` 放在一起（金鑰常數只有一個家）。
