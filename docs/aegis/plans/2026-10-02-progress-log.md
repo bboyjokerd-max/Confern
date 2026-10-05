@@ -414,3 +414,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 `
 1. **Shift 顯示期間切層**那一行仍是 INCONCLUSIVE（測試工具時機問題）。最省事的驗法是
    請使用者拖曳後按一下 Shift（約 2 秒），或把它寫成套件斷言。
 2. 續做 M3 的下一個工具（計畫 §1 的相依清單）。
+
+## 2026-10-05（第五段）Shift 即時切層：查清楚為什麼無頭測不到，以及要怎麼才測得到
+
+試了五輪合成驗證，全部 INCONCLUSIVE。不是白試——原因查清楚了，而且發現一個結構性的事實。
+
+1. **合成輸入是有效的**：注入的空白鍵在日誌留下 `trigger key DOWN/UP`；而且全專案找不到
+   `LLKHF_INJECTED` 之類的過濾——產品**沒有**刻意拒絕合成按鍵。
+2. **`--raise` 診斷模式會送達真的 OLE 拖放**（`OLE DragEnter` → `wheel shown ... mode=format`），
+   但**它不安裝鍵盤鉤子**（只有常駐路徑裝），所以在那裡注入 Shift 沒有聽眾。
+3. **常駐路徑有鉤子，但合成拖放送不達**：日誌停在 `trigger key DOWN (state=Idle)`，沒有
+   `OLE DragEnter`——只按觸發鍵不足以進入 Armed/Capturing。
+   （m1a 的 S4 之所以成功，正是因為它用 `--raise`，也就是沒有鉤子的那一條。）
+⇒ **結構性結論：目前專案沒有任何一條無頭路徑同時具備「鍵盤鉤子」與「送達的拖放」**，
+   所以「輪盤顯示期間按 Shift 切層」這一格只有**真人按鍵**能驗。要讓它可自動化，需要一個
+   新診斷模式（`--raise` 但**同時**安裝鉤子）——那是一個小而明確的後續切片，已列入下一步。
+   ⚠ 在此之前，不要再重複這五輪的做法（DragSim＋注入）去撞這一格。
+
+附帶學到的兩件事：
+- 常駐路徑**不理 `--log`**（只有診斷路徑吃它），所以要讀預設位置
+  `%LOCALAPPDATA%\Confern\logs\confern.log`；用時間戳前綴過濾「這一輪」的行，比用位移量可靠。
+- 這台機器沒有 `pwsh`；套件要用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` 跑。
