@@ -803,6 +803,9 @@ internal static class App
         if (opt.Rotate90 != null)
             return Rotate90Diagnostic(evidence, opt);
 
+        // 診斷：--wheel-tools 讓無頭驗收能走到第二層，不必合成鍵盤輸入（產品路徑不讀這個旗標）。
+        _forceToolLayer = opt.WheelTools;
+
         if (opt.WheelDemoX.HasValue)
             return WheelDemo(hit, guard, evidence, opt);
 
@@ -1263,13 +1266,45 @@ internal static class App
             : Array.Empty<string>();
         if (notice == null && targets.Count == 0) notice = "沒有可轉換的目標格式";
 
-        presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", targets, 0,
-                       PreviewFactory(targets, catalog, paths, 1), notice);
+        // M3（規格 §9.4:390）：**觸發鍵 ＋ Ctrl ＝ 第二層（工具輪盤）**。
+        // Ctrl 的狀態在輪盤顯示的**這一刻**決定——那就是「和弦」的字面意思（不是拖曳途中可切換的開關）。
+        // ⚠ 不按 Ctrl 的路徑一個字都沒變：下面 else 分支就是原本那兩行（驗收 T8 比對的就是它）。
+        // 保險 #5 是 Ctrl＋Alt＋Shift：兩者不衝突，而且真的三個都按著時停用會先生效（輪盤根本不會出現）。
+        IReadOnlyList<ToolDescriptor> tools = notice == null && (IsControlDown() || _forceToolLayer)
+            ? new ToolCatalog().ToolsFor(verdict)
+            : Array.Empty<ToolDescriptor>();
+        PendingTools = tools;
+
+        if (tools.Count > 0)
+        {
+            presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", tools.Select(t => t.Label).ToArray(), 0,
+                           preview: null, notice: null,
+                           mode: WheelPresenter.WheelMode.Tool,
+                           caption: i => i < tools.Count ? tools[i].Description : null,
+                           icons: tools.Select(t => t.Icon).ToArray());
+        }
+        else
+        {
+            presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", targets, 0,
+                           PreviewFactory(targets, catalog, paths, 1), notice);
+        }
         sw.Stop();
+        // tools= 附加在行尾（既有套件比對的是這行的前綴）。
         evidence.Line($"wheel from OLE payload: files={paths.Length} status={verdict.Status} " +
                       $"source={verdict.SourceFormat ?? "UNKNOWN"} targets={targets.Count} " +
-                      $"notice={(notice ?? "-")} latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+                      $"notice={(notice ?? "-")} latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms) " +
+                      $"layer={(tools.Count > 0 ? "tool" : "format")} tools={tools.Count}");
     }
+
+    /// <summary>Ctrl 是否按著（工具輪盤的觸發和弦）。與保險 #5 的 Ctrl＋Alt＋Shift 不衝突。</summary>
+    private static bool IsControlDown() =>
+        (Native.GetAsyncKeyState((int)Native.VK_CONTROL) & 0x8000) != 0;
+
+    /// <summary>
+    /// 診斷用：假裝 Ctrl 按著（給自動驗收用）。產品路徑**不讀這個旗標**——
+    /// 它只在 <c>--wheel-tools</c> 時才為 true，讓無頭測試能走到第二層而不必合成鍵盤輸入。
+    /// </summary>
+    private static bool _forceToolLayer;
 
     /// <summary>
     /// Enter：只有「有選項且不在拒絕狀態」才執行（規格 §4.3：混合選取要拒絕、只允許 Esc）。
@@ -1288,7 +1323,27 @@ internal static class App
         string target = presenter.SelectedTarget!;
         string[] paths = PendingPaths;
         var (centerX, centerY) = presenter.CenterOnScreen;
-        evidence.Line($"ENTER: commit -> {target}, files={paths.Length}, " +
+
+        // M3：第二層（工具輪盤）的提交。工具的「目標」是**工具 id**，不是格式——所以走 op，
+        // targetFormat 留空（工具自己決定輸出格式）。id 由顯示時那一份清單推導，
+        // 不在這裡硬寫任何字串。
+        string? toolOp = null;
+        if (presenter.Mode == WheelPresenter.WheelMode.Tool)
+        {
+            int index = presenter.Selected;
+            toolOp = index >= 0 && index < PendingTools.Count ? PendingTools[index].Id : null;
+            evidence.Line($"ENTER: tool layer -> index={index} op={(toolOp ?? "UNRESOLVED")} " +
+                          $"tools=[{string.Join(",", PendingTools.Select(t => t.Id))}]");
+            if (toolOp == null)
+            {
+                // 認不出工具就**不執行**（規格 §4.3 的拒絕語意，輪盤留在畫面上等 Esc）：
+                // 寧可什麼都不做，也不要猜一個工具跑——猜錯就是「按下去了但做的是別的事」。
+                evidence.Line("ENTER: tool layer refused (selected index does not map to a tool)");
+                return false;
+            }
+        }
+
+        evidence.Line($"ENTER: commit -> {(toolOp ?? target)}, files={paths.Length}, " +
                       $"wheelCenter=({centerX},{centerY}) (real conversion via worker, spec 9.1)");
 
         guard.OnUserResolved("enter");      // 收起輪盤（收層是幂等的）
@@ -1305,13 +1360,29 @@ internal static class App
         }
 
         Settings settings = _settings ?? new Settings();
-        runner.Start(paths, target, settings.QualityFor(target), centerX, centerY);
+        // 工具不問 QualityFor：旋轉固定用 100（見 ConversionEngine.Rotate90 的說明——
+        // PNG／BMP／TIF 無損；JPEG 會重新壓縮，品質 100 是最接近無損的選擇）。
+        // targetFormat 給空字串：工具自己決定輸出格式，格式欄位對它沒有意義。
+        runner.Start(paths,
+                     toolOp == null ? target : "",
+                     toolOp == null ? settings.QualityFor(target) : 100,
+                     centerX, centerY,
+                     toolOp);
         PendingPaths = Array.Empty<string>();
+        PendingTools = Array.Empty<ToolDescriptor>();
         return true;
     }
 
     /// <summary>最近一次拖曳／注入的檔案清單——Enter 要靠它才知道要轉哪些檔。</summary>
     private static string[] PendingPaths = Array.Empty<string>();
+
+    /// <summary>
+    /// 顯示第二層時那一份工具清單（Enter 要靠它把「選中的索引」換成工具 id）。
+    /// 與 <see cref="PendingPaths"/> 同一種作法、同一個生命週期：顯示時寫、提交後清。
+    /// 不在 <see cref="CommitWheel"/> 裡重新推導——那裡拿不到分類用的目錄，
+    /// 而且重新推導等於假設兩次分類結果一致（那就是第二個擁有者）。
+    /// </summary>
+    private static IReadOnlyList<ToolDescriptor> PendingTools = Array.Empty<ToolDescriptor>();
 
     /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
     private static Settings? _settings;

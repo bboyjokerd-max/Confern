@@ -66,6 +66,13 @@ internal sealed class WheelPresenter
     }
 
     public bool IsVisible => _layer.IsVisible;
+
+    /// <summary>
+    /// 目前畫的是哪一層（M3）。提交端要靠它決定「這一輪的選擇是格式還是工具」——
+    /// 兩層的提交走同一條 worker 路徑，只有 op 不同（見 <see cref="CommitWheel"/>）。
+    /// </summary>
+    public WheelMode Mode => _mode;
+
     public int Selected => _selected;
     public string? SelectedTarget => _targets.Count > 0 ? _targets[_selected] : null;
 
