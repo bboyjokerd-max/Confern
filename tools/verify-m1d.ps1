@@ -432,6 +432,326 @@ foreach ($name in $firstHashes.Keys) {
 Check 'S12.13e second batch did not overwrite the first' $untouched ''
 Check 'S12.13d no .tmp-* after batch' (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0) ''
 
+# =============================================================================
+#  D slice (2026-10-06): the one-off measurements of 2026-10-05/06 turned into
+#  assertions. APPEND ONLY -- nothing above this line was touched and no check
+#  here re-judges an existing one.
+#
+#  Why each check can fail:
+#    S12.16a-d  the output folder (spec 9.5): EMPTY (= the default writing) means
+#                next to the source, "desktop" means the real shell desktop, a
+#                custom path means that folder. The artifact is read from the
+#                tool's OWN log line (output=<path>) -- never re-derived from the
+#                naming rule here, or this would be a second owner of the path.
+#    S12.17a-b  a configured folder that does NOT exist falls back next to the
+#                source AND says so. Silent fallback is the thing spec 9.5 forbids.
+#    S12.18a-d  strip-metadata: the fixture is PROVED to carry metadata first (raw
+#                segments AND through the decoder), then the output carries none,
+#                the decoded pixels are byte-identical, and the source is untouched.
+#    S12.19     anti-drift: WorkerProtocol.Version in the source vs. the number the
+#                worker of THIS run reported. On 2026-10-05 the protocol went 2 -> 3
+#                and S12.10f stayed red because it pinned the old number; that check
+#                was fixed to match the line, not the number. This one is the other
+#                direction: a bump that is not really compiled in (or a stale exe)
+#                fails here instead of silently pairing mismatched processes.
+#    S12.20     with NO key held the wheel stays on the FORMAT layer even though the
+#                tool catalog is not empty (tools=N, N >= 1), and the payload path
+#                really dumps that frame. The sector list and the preview text of the
+#                same path are already asserted by m1b's S7.16b/S7.17 -- deliberately
+#                NOT repeated here.
+#
+#  Desktop hygiene: the "desktop" case writes ONE file onto the user's real desktop.
+#  It is deleted and its absence is re-checked before the next check runs.
+# =============================================================================
+Expect 12
+
+# The tool's own report: "... output=<path>" on the last matching line, or "".
+function Get-DToolOutputPath([string]$text, [string]$marker) {
+  $line = ($text -split "`n" | Where-Object { $_ -match $marker } | Select-Object -Last 1)
+  if (-not $line) { return '' }
+  $at = $line.IndexOf('output=')
+  if ($at -lt 0) { return '' }
+  $value = $line.Substring($at + 7).Trim()
+  if ($value.Length -eq 0 -or $value -eq '-') { return '' }
+  return $value
+}
+
+function Test-DSameFolder([string]$a, [string]$b) {
+  if (-not $a -or -not $b) { return $false }
+  $x = [System.IO.Path]::GetFullPath($a).TrimEnd([char[]]@([char]92, [char]47))
+  $y = [System.IO.Path]::GetFullPath($b).TrimEnd([char[]]@([char]92, [char]47))
+  return [string]::Equals($x, $y, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Raw JPEG segment names, in file order, up to the start of the scan data.
+function Get-DJpegSegments([string]$path) {
+  $b = [System.IO.File]::ReadAllBytes($path)
+  $names = New-Object System.Collections.ArrayList
+  if ($b.Length -lt 2 -or $b[0] -ne 0xFF -or $b[1] -ne 0xD8) { return @('NOT-JPEG') }
+  $i = 2
+  while ($i + 3 -lt $b.Length) {
+    if ($b[$i] -ne 0xFF) { [void]$names.Add("BAD@$i"); break }
+    $m = $b[$i + 1]
+    if ($m -eq 0xDA -or $m -eq 0xD9) {
+      if ($m -eq 0xD9) { [void]$names.Add('EOI') } else { [void]$names.Add('SOS') }
+      break
+    }
+    if ($m -eq 0xE0) { [void]$names.Add('APP0') }
+    elseif ($m -ge 0xE1 -and $m -le 0xEF) { [void]$names.Add("APP$($m - 0xE0)") }
+    elseif ($m -eq 0xFE) { [void]$names.Add('COM') }
+    else { [void]$names.Add(('0x{0:X2}' -f $m)) }
+    $len = ($b[$i + 2] -shl 8) + $b[$i + 3]
+    if ($len -lt 2) { [void]$names.Add('BADLEN'); break }
+    $i += 2 + $len
+  }
+  return @($names)
+}
+
+# The decoded pixels of a file, as raw bytes (32bpp ARGB). Two equal buffers mean
+# every channel of every pixel is equal -- byte-identical, not "close enough".
+function Get-DPixelBytes([string]$path) {
+  $img = [System.Drawing.Bitmap]::FromFile($path)
+  try {
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $img.Width, $img.Height
+    $data = $img.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+                          [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+      $bytes = New-Object byte[] ($data.Stride * $data.Height)
+      [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+      return $bytes
+    } finally { $img.UnlockBits($data) }
+  } finally { $img.Dispose() }
+}
+
+function Invoke-DTool([string[]]$arguments) {
+  $script:logCounter++
+  $log = Join-Path $logDir "dslice-$($script:logCounter).log"
+  $started = Get-Date
+  $p = Start-Process -FilePath $Exe -ArgumentList ($arguments + @('--quiet', '--log', $log)) `
+       -PassThru -Wait -WindowStyle Hidden
+  return @{ Exit = $p.ExitCode; Log = $log; Start = $started;
+            Text = (Get-Content -LiteralPath $log -Encoding UTF8) -join "`n" }
+}
+
+# A settings file whose ONLY field matters here. ASCII, no BOM (the loader must not
+# be given a different document shape than the one the product writes).
+function Write-DSettings([string]$path, [string]$outputFolder) {
+  $json = '{ "OutputFolder": "' + $outputFolder + '" }'
+  [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+"=== S12.16-S12.20 D slice: the 2026-10-05/06 measurements, as assertions ==="
+
+# ---- fixture: a real JPEG that really carries metadata ----
+$metaW = 64; $metaH = 48
+$metaBmp = [System.Drawing.Bitmap]::new($metaW, $metaH)
+for ($y = 0; $y -lt $metaH; $y++) {
+  for ($x = 0; $x -lt $metaW; $x++) {
+    $metaBmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, ($x * 255 / $metaW),
+                                                                  ($y * 255 / $metaH),
+                                                                  (($x * 3 + $y * 5) % 256)))
+  }
+}
+$metaSrc = Join-Path $Work 'm1d-meta.jpg'
+$metaBmp.Save($metaSrc, $jpgCodec, $ep)
+$metaBmp.Dispose()
+
+# Inject what a camera writes: APP1/EXIF (with an Orientation tag) and a COM comment,
+# right after SOI. Built byte by byte so "it has metadata" is a fact, not a hope.
+$metaRaw = [System.IO.File]::ReadAllBytes($metaSrc)
+$metaMs = New-Object System.IO.MemoryStream
+$metaMs.WriteByte(0xFF); $metaMs.WriteByte(0xD8)
+$exif = New-Object System.Collections.Generic.List[byte]
+foreach ($c in [System.Text.Encoding]::ASCII.GetBytes('Exif')) { $exif.Add($c) }
+$exif.Add(0); $exif.Add(0)
+# TIFF little-endian, one IFD entry: Orientation (0x0112) type 3 count 1 value 1
+foreach ($c in [byte[]](0x49,0x49,0x2A,0x00, 0x08,0x00,0x00,0x00, 0x01,0x00,
+                        0x12,0x01,0x03,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+                        0x00,0x00,0x00,0x00)) { $exif.Add($c) }
+$app1Len = $exif.Count + 2
+$metaMs.WriteByte(0xFF); $metaMs.WriteByte(0xE1)
+$metaMs.WriteByte([byte](($app1Len -shr 8) -band 0xFF)); $metaMs.WriteByte([byte]($app1Len -band 0xFF))
+$metaMs.Write($exif.ToArray(), 0, $exif.Count)
+$comText = [System.Text.Encoding]::ASCII.GetBytes('made by the m1d verifier')
+$comLen = $comText.Length + 2
+$metaMs.WriteByte(0xFF); $metaMs.WriteByte(0xFE)
+$metaMs.WriteByte([byte](($comLen -shr 8) -band 0xFF)); $metaMs.WriteByte([byte]($comLen -band 0xFF))
+$metaMs.Write($comText, 0, $comText.Length)
+$metaMs.Write($metaRaw, 2, $metaRaw.Length - 2)
+[System.IO.File]::WriteAllBytes($metaSrc, $metaMs.ToArray())
+$metaMs.Dispose()
+
+$metaSegs = @(Get-DJpegSegments $metaSrc)
+$metaBmpView = [System.Drawing.Bitmap]::FromFile($metaSrc)
+$metaItems = @($metaBmpView.PropertyItems | ForEach-Object { '0x{0:X4}' -f $_.Id })
+$metaBmpView.Dispose()
+# (S12.18a is asserted further down, right before the strip run it is a precondition for.)
+
+# ---- S12.16a output folder EMPTY: next to the source ----
+$cfgSource = Join-Path $Work 'dslice-source.json'
+Write-DSettings $cfgSource ''
+$rotUnsetSrc = Join-Path $Work 'm1d-unset.jpg'
+Copy-Item -LiteralPath $metaSrc -Destination $rotUnsetSrc -Force
+$runUnset = Invoke-DTool @('--settings-file', $cfgSource, '--rotate90', $rotUnsetSrc)
+$outUnset = Get-DToolOutputPath $runUnset.Text 'tool rotate90: ok='
+Check 'S12.16a output folder unset (empty string) -> the file lands next to the source' `
+  (($runUnset.Exit -eq 0) -and ($outUnset -ne '') -and (Test-DSameFolder ([System.IO.Path]::GetDirectoryName($outUnset)) $Work)) `
+  "exit=$($runUnset.Exit) output='$outUnset'"
+
+# ---- S12.16b/c output folder "desktop": the real shell desktop, then cleaned up ----
+$dDesktop = [Environment]::GetFolderPath('DesktopDirectory')
+$deskStem = 'm1d-desk-' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+$deskSrc = Join-Path $Work "$deskStem.jpg"
+Copy-Item -LiteralPath $metaSrc -Destination $deskSrc -Force
+$cfgDesktop = Join-Path $Work 'dslice-desktop.json'
+Write-DSettings $cfgDesktop 'desktop'
+$deskOut = ''
+$deskExit = -1
+$deskText = ''
+try {
+  $runDesk = Invoke-DTool @('--settings-file', $cfgDesktop, '--rotate90', $deskSrc)
+  $deskExit = $runDesk.Exit
+  $deskOut = Get-DToolOutputPath $runDesk.Text 'tool rotate90: ok='
+} finally {
+  # The artifact this suite created must not survive the suite, whatever happened.
+  $deskBefore = @(Get-ChildItem -LiteralPath $dDesktop -Filter 'm1d-desk-*' -File -ErrorAction SilentlyContinue)
+  foreach ($f in $deskBefore) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+  $script:deskRemoved = $deskBefore.Count
+  $script:deskLeft = @(Get-ChildItem -LiteralPath $dDesktop -Filter 'm1d-desk-*' -File -ErrorAction SilentlyContinue)
+  "[cleanup] desktop: removed $($script:deskRemoved) artifact(s) this suite created " +
+  "($($deskBefore.Name -join ',')), remaining m1d-desk-* files now = $($script:deskLeft.Count)"
+}
+Check 'S12.16b output folder "desktop" -> the file lands on the real shell desktop' `
+  (($deskExit -eq 0) -and ($deskOut -ne '') -and (Test-DSameFolder ([System.IO.Path]::GetDirectoryName($deskOut)) $dDesktop)) `
+  "exit=$deskExit desktop='$dDesktop' exists=$(Test-Path -LiteralPath $dDesktop) output='$deskOut'"
+Check 'S12.16c that desktop artifact was deleted and is confirmed gone' `
+  (($script:deskLeft.Count -eq 0) -and `
+   (($deskOut -eq '') -or (-not (Test-DSameFolder ([System.IO.Path]::GetDirectoryName($deskOut)) $dDesktop)) -or `
+    (-not (Test-Path -LiteralPath $deskOut)))) `
+  "removed=$($script:deskRemoved) remaining=$($script:deskLeft.Count) reportedOutput='$deskOut' stillThere=$(if ($deskOut) { Test-Path -LiteralPath $deskOut } else { 'n/a' })"
+
+# ---- S12.16d output folder = a custom (existing) folder ----
+$customOut = Join-Path $Work 'dslice-custom-out'
+New-Item -ItemType Directory -Force -Path $customOut | Out-Null
+$cfgCustom = Join-Path $Work 'dslice-custom.json'
+Write-DSettings $cfgCustom ($customOut -replace '\\', '\\')
+$rotCustomSrc = Join-Path $Work 'm1d-custom.jpg'
+Copy-Item -LiteralPath $metaSrc -Destination $rotCustomSrc -Force
+$runCustom = Invoke-DTool @('--settings-file', $cfgCustom, '--rotate90', $rotCustomSrc)
+$outCustom = Get-DToolOutputPath $runCustom.Text 'tool rotate90: ok='
+Check 'S12.16d output folder = a custom path -> the file lands in that folder' `
+  (($runCustom.Exit -eq 0) -and ($outCustom -ne '') -and (Test-DSameFolder ([System.IO.Path]::GetDirectoryName($outCustom)) $customOut)) `
+  "exit=$($runCustom.Exit) wanted='$customOut' output='$outCustom'"
+
+# ---- S12.17 a configured folder that does not exist: fall back, and SAY so ----
+$goneOut = Join-Path $Work ('dslice-no-such-dir-' + ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+$cfgGone = Join-Path $Work 'dslice-gone.json'
+Write-DSettings $cfgGone ($goneOut -replace '\\', '\\')
+$rotGoneSrc = Join-Path $Work 'm1d-gone.jpg'
+Copy-Item -LiteralPath $metaSrc -Destination $rotGoneSrc -Force
+$runGone = Invoke-DTool @('--settings-file', $cfgGone, '--rotate90', $rotGoneSrc)
+$outGone = Get-DToolOutputPath $runGone.Text 'tool rotate90: ok='
+Check 'S12.17a output folder that does not exist -> the file falls back next to the source' `
+  (($runGone.Exit -eq 0) -and ($outGone -ne '') -and (Test-DSameFolder ([System.IO.Path]::GetDirectoryName($outGone)) $Work) -and (-not (Test-Path -LiteralPath $goneOut))) `
+  "exit=$($runGone.Exit) wanted='$goneOut' output='$outGone'"
+$fallbackLine = ($runGone.Text -split "`n" | Where-Object { $_ -match 'fell back to the source folder' } | Select-Object -Last 1)
+Check 'S12.17b the fallback is reported, not silent (spec 9.5)' `
+  ([bool]$fallbackLine -and $fallbackLine.Contains("output dir: '$goneOut' unavailable -> fell back to the source folder")) `
+  "$($fallbackLine -replace '^\d\d:\d\d:\d\d\.\d\d\d ', '')"
+
+# ---- S12.18b-d strip-metadata: metadata gone, pixels identical, source untouched ----
+# S12.18a first: if this fixture did not really carry metadata, everything below
+# would pass while proving nothing at all.
+Check 'S12.18a the strip fixture really carries metadata (proved, not assumed)' `
+  (($metaSegs -contains 'APP1') -and ($metaSegs -contains 'COM') -and ($metaItems -contains '0x0112')) `
+  "segments=$($metaSegs -join ',') exifItems=$($metaItems -join ',')"
+$metaHash = (Get-FileHash -LiteralPath $metaSrc -Algorithm SHA256).Hash
+$metaStamp = (Get-Item -LiteralPath $metaSrc).LastWriteTimeUtc.ToString('o')
+$metaLen = (Get-Item -LiteralPath $metaSrc).Length
+$runStrip = Invoke-DTool @('--settings-file', $cfgSource, '--strip-metadata', $metaSrc)
+$stripOut = Get-DToolOutputPath $runStrip.Text 'tool strip-metadata: ok='
+$outSegs = @()
+if ($stripOut -and (Test-Path -LiteralPath $stripOut)) { $outSegs = @(Get-DJpegSegments $stripOut) }
+$containerPath = [bool]($runStrip.Text -match 'strip-metadata: .* container path \(jpeg\) removed ')
+$removedLine = ($runStrip.Text -split "`n" | Where-Object { $_ -match 'container path \(jpeg\) removed' } | Select-Object -Last 1)
+Check 'S12.18b strip-metadata: the metadata is really gone from the output (container path)' `
+  (($runStrip.Exit -eq 0) -and ($stripOut -ne '') -and (Test-Path -LiteralPath $stripOut) -and $containerPath -and `
+   (-not ($outSegs -contains 'APP1')) -and (-not ($outSegs -contains 'COM'))) `
+  "exit=$($runStrip.Exit) output='$stripOut' segments=$($outSegs -join ',') $($removedLine -replace '^\d\d:\d\d:\d\d\.\d\d\d ', '')"
+
+$pixelDiff = -1
+$pixelBytes = 0
+if ($stripOut -and (Test-Path -LiteralPath $stripOut)) {
+  $pxBefore = Get-DPixelBytes $metaSrc
+  $pxAfter = Get-DPixelBytes $stripOut
+  $pixelBytes = $pxBefore.Length
+  if ($pxBefore.Length -ne $pxAfter.Length) { $pixelDiff = -2 }
+  else {
+    $pixelDiff = 0
+    for ($k = 0; $k -lt $pxBefore.Length; $k++) { if ($pxBefore[$k] -ne $pxAfter[$k]) { $pixelDiff++ } }
+  }
+}
+Check 'S12.18c strip-metadata: every channel of every decoded pixel is identical' `
+  (($pixelDiff -eq 0) -and ($pixelBytes -gt 0)) `
+  "compared=$pixelBytes bytes (32bpp ARGB of ${metaW}x${metaH}) differing=$pixelDiff"
+Check 'S12.18d strip-metadata: the source file is untouched (hash + mtime + length)' `
+  (((Get-FileHash -LiteralPath $metaSrc -Algorithm SHA256).Hash -eq $metaHash) -and `
+   ((Get-Item -LiteralPath $metaSrc).LastWriteTimeUtc.ToString('o') -eq $metaStamp) -and `
+   ((Get-Item -LiteralPath $metaSrc).Length -eq $metaLen) -and `
+   [bool]($runStrip.Text -match 'tool strip-metadata: source-untouched=True')) `
+  "sha256 same=$((Get-FileHash -LiteralPath $metaSrc -Algorithm SHA256).Hash -eq $metaHash) mtime same=$((Get-Item -LiteralPath $metaSrc).LastWriteTimeUtc.ToString('o') -eq $metaStamp) len=$metaLen"
+
+# ---- S12.19 anti-drift: the protocol number in the source == the one the worker reported ----
+$srcRoot = (Get-Item -LiteralPath $Exe).Directory
+while ($srcRoot -ne $null -and -not (Test-Path -LiteralPath (Join-Path $srcRoot.FullName 'src\Sidecar\Convert\WorkerServer.cs'))) {
+  $srcRoot = $srcRoot.Parent
+}
+if (-not $srcRoot) {
+  Expect -1
+  Inconclusive 'S12.19 WorkerProtocol.Version matches the running worker' `
+    'src\Sidecar\Convert\WorkerServer.cs not reachable from the exe path'
+} else {
+  $wsText = [System.IO.File]::ReadAllText((Join-Path $srcRoot.FullName 'src\Sidecar\Convert\WorkerServer.cs'))
+  $verMatch = [regex]::Match($wsText, 'public\s+const\s+int\s+Version\s*=\s*(\d+)')
+  $srcVersion = if ($verMatch.Success) { [int]$verMatch.Groups[1].Value } else { -1 }
+  $workerLog = Join-Path $env:LOCALAPPDATA 'Confern\worker.log'
+  if (Test-Path -LiteralPath $workerLog) { Remove-Item -LiteralPath $workerLog -Force -ErrorAction SilentlyContinue }
+  $verRun = Invoke-DTool @('--settings-file', $cfgSource, '--wheel-payload', $metaSrc, '--no-autostart')
+  $verWorker = ''
+  $verFresh = $false
+  if (Test-Path -LiteralPath $workerLog) {
+    $wi = Get-Item -LiteralPath $workerLog
+    $verFresh = $wi.LastWriteTime -ge $verRun.Start
+    $verWorker = ((Get-Content -LiteralPath $workerLog -Encoding UTF8 | Where-Object { $_ -match 'worker: ready protocolVersion=' }) | Select-Object -Last 1)
+  }
+  $runVersion = -1
+  $vm = [regex]::Match([string]$verWorker, 'protocolVersion=(\d+)')
+  if ($vm.Success) { $runVersion = [int]$vm.Groups[1].Value }
+  Check 'S12.19 WorkerProtocol.Version in the source == the version this run worker reported' `
+    (($srcVersion -gt 0) -and ($srcVersion -eq $runVersion) -and $verFresh) `
+    "source=$srcVersion worker=$runVersion freshLog=$verFresh (a bump that is not compiled in, or a stale exe, fails here)"
+}
+
+# ---- S12.20 no key held: the FORMAT layer is what a payload shows, and it dumps ----
+$layerPng = Join-Path $Work 'm1d-layer.png'
+$layerBmp = [System.Drawing.Bitmap]::new(96, 64)
+$layerBmp.Save($layerPng, [System.Drawing.Imaging.ImageFormat]::Png)
+$layerBmp.Dispose()
+$layerDump = Join-Path $Work 'm1d-layer-frame.png'
+if (Test-Path -LiteralPath $layerDump) { Remove-Item -LiteralPath $layerDump -Force }
+$layerRun = Invoke-DTool @('--settings-file', $cfgSource, '--wheel-payload', $layerPng,
+                           '--wheel-dump', $layerDump, '--no-autostart')
+$payloadLine = ($layerRun.Text -split "`n" | Where-Object { $_ -match 'wheel from OLE payload:' } | Select-Object -Last 1)
+$layerTools = -1
+if ($payloadLine) {
+  $tm = [regex]::Match($payloadLine, 'tools=(\d+)')
+  if ($tm.Success) { $layerTools = [int]$tm.Groups[1].Value }
+}
+$dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $layerDump).Length } else { -1 }
+Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (tools available) and dumps that frame' `
+  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -ge 1) -and ($dumpLen -gt 8000)) `
+  "exit=$($layerRun.Exit) tools=$layerTools dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+
 "=== result ==="
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"
 if ($script:Checks -eq 0) { "NO CHECKS RAN"; exit 2 }
