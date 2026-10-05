@@ -301,3 +301,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 `
 - 想先看舊的失敗清單功能：`_S4m_test\run-failure-demo.cmd`（失敗藥丸現在 2 秒就走）。
 - 想做首發驗收：`docs/TEST-PLAN-M1-first-run.md` 的 17 項，以及 S4m 的 S4a（**不按**觸發鍵拖 3 次）。
   這兩件需要你的手；`drop-here\` 已經清空，可以直接拖。
+
+## 2026-10-05（下半場）M3：Shift 即時切層、輸出位置 C2、以及使用者自己的實測結果
+
+### 使用者自己的實測（他自己的日誌為證，17:22）
+- 測試 A：拖曳 → **格式輪盤**出現 → 產出 `測試圖-100x60.jpg` ✓
+- 測試 B：**Shift 顯示前判定正確** — `wheel shown ... source=JPG targets=[ROTATE] mode=tool` ✓
+- 他隨後按了 Esc 取消（沒有提交）。
+⇒ **「Shift 顯示前判定」這條路徑，已經是真實按鍵驗證過的**；
+  「輪盤顯示期間按 Shift 切層」那一行仍未驗（見下方測試工具的限制）。
+
+### 已完成並提交
+- `b7c8ec4` **A2**：Shift 即時切層。三個設計要點：`RenderWheelLayer` 是唯一一處真的畫輪盤
+  （初始顯示與切層共用）；鉤子的 Shift 分支必須寫在 `isDown` 判斷**之外**（放開也要送進來，
+  否則切不回格式層）；自己抓到一個 bug——工具清單原本只在 Shift 按著時才算，那樣
+  「先顯示格式層、之後才按 Shift」會找不到工具可切。
+- `29b9b80` **C2**：`NamingPolicy.ResolveOutputPath(source, ext, targetDirectory = null)`。
+  null＝來源旁邊且逐位元不變（已用 `--rotate90` 與 `--convert` 兩條無頭路徑回歸驗證）；
+  指定的資料夾不存在時**回退到來源旁邊並說出來**（靜默的回退會讓人以為設定生效了卻找不到檔案）。
+  路徑的唯一權威仍然只有 `NamingPolicy`。
+
+### 未完成（下一輪照這個順序）
+- **C1**：`Settings.OutputFolder`（來源旁邊／桌面／指定）＋設定頁欄位＋持久化。
+- **C3**：job 訊息加 `outputDir`、`WorkerProtocol.Version` 升到 3、worker 傳給引擎、
+  輪盤顯示目的地（與來源不同時顯示資料夾名；中心孔只有 94 px，只放資料夾名，全路徑進日誌）。
+- **D**：把今天的量測變成套件斷言（含 Shift 切層那一格）＋假故障演練。
+
+### 測試工具的限制（照實記，免得下一個人重踩）
+- 合成輸入**是有效的**：17:25:57 的 `trigger key DOWN/UP` 就是我注入的空白鍵。
+- 但 DragSim 的拖曳時機抓不準（它要先開一個來源視窗才開始拖），而且**用位移量讀日誌不可靠**
+  → 「Shift 顯示期間切層」兩次都沒抓到。判定：**INCONCLUSIVE，是測試工具的問題，不是產品**。
+- 要驗那一格最省事的是人手按一次（約 2 秒）：拖曳 → 格式層出現 → 按 Shift →
+  應出現 `wheel layer switch: format -> tool (shift down)`，放開再一行 `tool -> format (shift up)`。
+
+### 環境備註
+- 建置前必須先結束 Confern（它會鎖住 exe，build 會以 MSB3027 失敗）。我曾經因此誤殺使用者
+  正在測的實例——**只殺自己啟動的那一個 PID**（`Start-Process -PassThru`）。
