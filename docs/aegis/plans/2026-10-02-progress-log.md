@@ -337,3 +337,41 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1a.ps1 `
 ### 環境備註
 - 建置前必須先結束 Confern（它會鎖住 exe，build 會以 MSB3027 失敗）。我曾經因此誤殺使用者
   正在測的實例——**只殺自己啟動的那一個 PID**（`Start-Process -PassThru`）。
+
+## 2026-10-05（第三段）C1a 完成，以及 C3 的做法決定
+
+### 已完成並提交
+- `31b1248` **C1a**：`Settings.OutputFolder`（空字串／`source`＝來源旁邊、`desktop`＝桌面、
+  其他＝資料夾路徑）＋ `Settings.ResolveOutputDirectory()`（**回傳 null ＝來源旁邊**，正好是
+  引擎 `targetDirectory` 要的預設值，所以「設定→引擎」的對應只發生在這一處）。
+  `Load`／`Save` 是整份序列化，新欄位自動往返，讀寫一行都不用改。
+- `rotate90` 診斷改走設定 → 它同時成為「設定 → NamingPolicy → 寫檔」整條鏈的可無頭驗證路徑。
+- 驗證（`--settings-file` 指向臨時設定檔，兩次都當場量）：設定指向存在的資料夾 → 輸出真的落在
+  該資料夾；指向不存在的資料夾 → 留下 `output dir: '...' unavailable -> fell back to the source
+  folder` 一行且輸出落回來源旁邊。兩次的來源 SHA256 都沒變。
+
+### 狀態誠實聲明
+⚠ **設定目前只有「診斷路徑」看得到**。真正的 UI 路徑是「UI → 管道 → worker → 引擎」，
+而 `outputDir` 還沒有經過管道——所以現在改設定檔，**從輪盤操作時不會生效**。
+這是下一步（C3）要收掉的，而且必須**先於**把它做成設定頁欄位（不然就是「存得下但沒生效」）。
+
+### C3 的做法決定（下一輪照這個做）
+原計畫 §10.3 寫的是「job 訊息加 `outputDir`、協議升到 3」。實作前重新想過，改採**命令列**
+而不是 job 訊息，理由：
+- 這個值是**每個 worker 行程一個**（設定檔不會在一批轉檔中途改變），不是「每個工作一個」——
+  放進 job 訊息等於把常數當變數傳，而且逼著升協議版本（雙方必須同時換，風險比較大）。
+- 命令列參數是 worker **啟動時**就固定的，語意更準確，也讓 `--worker` 自己就能被測試
+  （不必先建立一個假的 job）。
+- 代價：worker 多一個參數解析（`--output-dir <path>`）。仍然只有一個來源——UI 讀設定檔，
+  再傳給它啟動的 worker；**不讓 worker 自己去讀設定檔**（那會變成兩個擁有者，設定檔中途改變
+  時兩邊會看到不同的值）。
+
+切片順序：① worker 接受 `--output-dir` 並傳進 `Convert`／`Rotate90`；② client 啟動 worker 時
+帶上它（來源仍是 UI 的設定）；③ 輪盤上顯示目的地（與來源不同時顯示資料夾名，全路徑進日誌）；
+④ 設定頁欄位；⑤ 套件斷言。
+
+### 工具教訓（兩條，都踩過）
+1. **PowerShell 5.1 會把多行字串按換行拆開**再傳給原生程式，所以 commit 訊息裡只要有一行以
+   連字號開頭（例如 `--rotate90 ...`），git 就會把它當成選項並失敗。改用 `git commit -F <檔案>`。
+2. 訊息檔用 `Set-Content -Encoding UTF8` 會**帶 BOM**（標題會多一個看不見的字元）。改用
+   `[System.IO.File]::WriteAllText($p, $msg, (New-Object System.Text.UTF8Encoding($false)))`。
