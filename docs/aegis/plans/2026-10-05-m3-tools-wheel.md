@@ -125,7 +125,7 @@ M3 七項的相依盤點：
 | | 檔案 | 說明 |
 |---|---|---|
 | **產品本體** | `src\Sidecar\bin\Release\net8.0-windows\Confern.exe` | 唯一的程式。UI 與 worker 都是它（兩個行程是正常的） |
-| **桌面捷徑** | `桌面\Tangerine Converter.lnk` | 唯一的「正常使用者路徑」——**只有它不帶 `--no-autostart`**，也就是只有它會寫開機啟動 |
+| **桌面捷徑** | `桌面\Confern.lnk` | 唯一的「正常使用者路徑」：**直接指向 `Confern.exe`、不經 `.cmd`**，所以只有它會套用 `StartWithWindows`。2026-10-05 改名（原 `Tangerine Converter.lnk`）並修好壞掉的圖示（原本指著已不存在的 `Sidecar.exe`） |
 | **隔離啟動（測試用）** | `Confern.exe --no-autostart` | 三態旗標的 `null` 值：**完全不碰** `HKCU\...\Run`。所有驗收與你自己試玩都用這條 |
 | **驗收套件** | `tools\verify-m1{a,b,c,d,f,g,h}.ps1` | 八套，**一律序列執行**（併跑會互相搶行程與輸入） |
 
@@ -161,6 +161,6 @@ M3 七項的相依盤點：
 
 | 目標 | 問題 | 處置 |
 |---|---|---|
-| `tools\start-tangerine.cmd` | 文字與圖示仍是改名前（`Sidecar.exe`） | 更新或刪除，讓「唯一入口」是對的 |
-| 桌面捷徑 `Tangerine Converter.lnk` | 名稱與圖示未跟著改名 | 改名 `Confern` ＋ 修圖示 |
+| `tools\start-tangerine.cmd` | 名稱與文字仍是改名前，且啟動時**沒帶 `--no-autostart`** | ✅ **2026-10-05 完成**：`git mv` 改名為 `start-confern.cmd`（保留歷史）＋文字更新＋改帶 `--no-autostart`——它從此就是**隔離測試啟動器** |
+| 桌面捷徑 `Tangerine Converter.lnk` | 名稱未改名、圖示指著已不存在的 `Sidecar.exe`，而且**是走 `.cmd` 的** | ✅ **2026-10-05 完成**：改名 `Confern.lnk`、改指 `Confern.exe`（讀回驗證 target／args／icon）。⚠ 這同時更正了 §8.1 原本的錯誤說法——舊捷徑經由 `.cmd` 啟動，所以它從來就不是「唯一會套用開機啟動的路徑」 |
 | `src\Sidecar\bin`／`obj`、`tools\*\bin`／`obj` | 可重建的建置產物 | **保留**：`verify-m1a` 會自動偵測 `tools\dragsim\bin\...\DragSim.exe`，刪了 S4 會退回 INCONCLUSIVE |

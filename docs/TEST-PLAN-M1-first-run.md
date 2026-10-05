@@ -11,10 +11,11 @@
 
 ## 0. 開始之前
 
-**啟動**（兩種都行）：
+**啟動**（兩種都行，但**副作用不同**）：
 
-1. 雙擊 `tools\start-tangerine.cmd`
-2. 或雙擊桌面的 `啟動 Tangerine Converter.cmd`
+1. 雙擊桌面 **`Confern`** 捷徑＝正常的產品路徑。⚠ 它會依規格 §8 的預設
+   （`StartWithWindows=true`）把 Confern 加進**開機啟動**——那是產品行為，不是測試副作用。
+2. 或雙擊 `tools\start-confern.cmd`＝**隔離測試用**：帶 `--no-autostart`，完全不碰開機啟動機碼。
 
 畫面不會出現任何視窗——這是正常的（本程式沒有主視窗，只在拖曳時出現輪盤）。
 若想確認它活著：工作管理員應該看得到 `Confern.exe`。

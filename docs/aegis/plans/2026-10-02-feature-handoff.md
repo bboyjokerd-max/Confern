@@ -107,7 +107,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $
 跟著改的：exe 名（`Confern.exe`）、`AssemblyName`、`%LOCALAPPDATA%\Confern\`（設定／日誌／暫存日記）、
 日誌檔名（`confern.log`）、單一實例 mutex、驗收腳本用來找視窗的**視窗類別名**
 （`ConfernHitLayer`／`ConfernVisualLayer`）、worker pipe 名、暫存檔名、設定頁標題、啟動器
-`tools/start-tangerine.cmd`。
+`tools/start-confern.cmd`（2026-10-05 由 `start-tangerine.cmd` 改名；桌面捷徑同時改名為
+`Confern.lnk` 並改指產品本體）。
 
 **名稱的唯一擁有者＝`src/Sidecar/ProductInfo.cs`**（`Name` 與由它推導的 `Slug`）。散著硬寫的話，
 改名會留下一個沒改到的副本——而那**不會報錯**，只會在使用者 AppData 底下長出第二套目錄、

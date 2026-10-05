@@ -1,8 +1,13 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem  Tangerine Converter (Windows) - first testable build (M1d/M1e/M1f-lite)
+rem  Confern (Windows) - test launcher
 rem  Messages are ASCII on purpose: cmd.exe on a zh-TW system would mangle UTF-8.
 rem  The human test plan lives in docs\TEST-PLAN-M1-first-run.md
+rem
+rem  Renamed from start-tangerine.cmd on 2026-10-05 (the product is Confern).
+rem  It launches with --no-autostart so a test run NEVER writes the Windows
+rem  autostart key: the desktop shortcut is the normal user path and is the
+rem  only launcher that applies the StartWithWindows setting.
 rem ---------------------------------------------------------------------------
 setlocal
 set "EXE=%~dp0..\src\Sidecar\bin\Release\net8.0-windows\Confern.exe"
@@ -20,15 +25,17 @@ if not exist "%EXE%" (
 
 tasklist /fi "imagename eq Confern.exe" 2>nul | find /i "Confern.exe" >nul
 if not errorlevel 1 (
-  echo [i] Confern.exe is already running - this build is single-instance.
-  echo     Close it first ^(Task Manager, or run: taskkill /im Confern.exe /f^)
+  echo [i] Confern.exe is already running - one UI instance at a time.
+  echo     Two processes is normal ^(the UI plus its conversion worker^);
+  echo     this check only prevents a SECOND UI instance.
+  echo     To stop everything: taskkill /im Confern.exe /f
   echo.
   pause
   exit /b 0
 )
 
-start "" "%EXE%"
-echo [ok] Tangerine Converter started.
+start "" "%EXE%" --no-autostart
+echo [ok] Confern started (this launcher does not touch the autostart key).
 echo.
 echo   How to convert: in Explorer, drag files while holding SPACE.
 echo     - the wheel appears at the cursor
