@@ -24,7 +24,12 @@ internal sealed class ConversionEngine
         _log = log;
     }
 
-    public ConversionResult Convert(string sourcePath, string targetFormat, int quality, TempJournal? journal = null)
+    /// <param name="targetDirectory">
+    /// 輸出資料夾（規格 §9.5）。null／空白＝來源檔旁邊，也就是**預設且逐位元不變**的行為。
+    /// 指定的資料夾不存在時 <see cref="NamingPolicy"/> 會回退到來源旁邊，這裡負責說出來。
+    /// </param>
+    public ConversionResult Convert(string sourcePath, string targetFormat, int quality,
+                                    TempJournal? journal = null, string? targetDirectory = null)
     {
         // 1) 格式判定與能力——唯一格式知識來源（UI 不得自己看副檔名）
         string? sourceFormat = _codecs.FormatOfPath(sourcePath);
@@ -52,7 +57,16 @@ internal sealed class ConversionEngine
         string targetPath;
         try
         {
-            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension);
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**：
+            // 靜默的回退會讓使用者以為設定生效了，然後找不到檔案（規格 §9.5）。
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
         }
         catch (Exception ex)
         {
@@ -146,7 +160,8 @@ internal sealed class ConversionEngine
     ///     「來源轉 90°」；**JPEG 會重新壓縮**，100 只是最接近無損的一檔，不是真正的無損旋轉
     ///     （真正的無損 JPEG 轉向需要另一條 WIC 路徑，見計畫 §1 的相依盤點）。
     /// </summary>
-    public ConversionResult Rotate90(string sourcePath, TempJournal? journal = null)
+    public ConversionResult Rotate90(string sourcePath, TempJournal? journal = null,
+                                     string? targetDirectory = null)
     {
         string? sourceFormat = _codecs.FormatOfPath(sourcePath);
         if (sourceFormat == null)
@@ -167,7 +182,16 @@ internal sealed class ConversionEngine
         string targetPath;
         try
         {
-            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension);
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**：
+            // 靜默的回退會讓使用者以為設定生效了，然後找不到檔案（規格 §9.5）。
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
         }
         catch (Exception ex)
         {

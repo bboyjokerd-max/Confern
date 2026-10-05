@@ -11,10 +11,28 @@ internal static class NamingPolicy
 {
     private const int MaxAttempts = 9999;
 
-    /// <summary>算出一個**還不存在**的輸出路徑。</summary>
-    public static string ResolveOutputPath(string sourcePath, string targetExtension)
+    /// <summary>
+    /// 算出一個**還不存在**的輸出路徑。
+    ///
+    /// <paramref name="targetDirectory"/>（規格 §9.5，2026-10-05 使用者裁定）：
+    /// **null／空白＝來源檔旁邊**——這是預設，也是唯一的回退路徑。指定的資料夾不存在時
+    /// **一律回退到來源旁邊**（不建立、不丟錯、不寫到別的地方去）；呼叫端負責把「回退了」
+    /// 這件事寫進日誌，因為靜默的回退正是這個專案最反對的東西。
+    ///
+    /// 「輸出到哪裡」的決定仍然只發生在這一個方法裡（路徑與檔名的唯一權威），
+    /// 別的地方不得自己組路徑。
+    /// </summary>
+    public static string ResolveOutputPath(string sourcePath, string targetExtension,
+                                           string? targetDirectory = null)
     {
-        string dir = Path.GetDirectoryName(Path.GetFullPath(sourcePath)) ?? ".";
+        string sourceDir = Path.GetDirectoryName(Path.GetFullPath(sourcePath)) ?? ".";
+        string dir = sourceDir;
+        if (!string.IsNullOrWhiteSpace(targetDirectory))
+        {
+            string wanted = Path.GetFullPath(targetDirectory);
+            if (Directory.Exists(LongPath.Prepare(wanted))) dir = wanted;
+        }
+
         string stem = Path.GetFileNameWithoutExtension(sourcePath);
         if (string.IsNullOrWhiteSpace(stem)) stem = "output";
 
