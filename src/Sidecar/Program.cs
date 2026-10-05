@@ -219,6 +219,17 @@ internal sealed class Options
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
+          --raise-with-hooks        diagnostic: exactly --raise, EXCEPT the low-level hooks ARE
+                                    installed (same wiring as the resident path). This is the only
+                                    mode that both receives a synthetic OLE drag and has a keyboard
+                                    hook, so it is the only headless way to observe
+                                    "wheel layer switch: ..." while Shift is injected.
+          --wheel-layer-probe <png> diagnostic: show the wheel (format layer) for that image, then
+                                    send a REAL synthetic Shift keydown, confirm the switch to the
+                                    tool layer, send keyup, confirm the switch back; exit 0 when both
+                                    happened, 1 otherwise. The keys are injected from another thread
+                                    so the WH_KEYBOARD_LL callback can actually run; nothing here
+                                    calls the layer switch directly (see the method comment).
           --watchdog-seconds <N>    override guard #3 visible timeout (default 30)
           --assume-explorer-foreground
                                     diagnostic: arm without the explorer-foreground
@@ -300,6 +311,28 @@ internal sealed class Options
     public bool ShowVersion;
     public bool DumpMonitors;
     public bool ForceRaiseHitLayer;
+
+    /// <summary>
+    /// `--raise-with-hooks`：**與 <see cref="ForceRaiseHitLayer"/> 完全同一件事，差別只在鉤子照裝**。
+    ///
+    /// 為什麼不是直接改 `--raise`：`--raise` 是 m1a 套件（tools/verify-m1a.ps1，本次不得修改）
+    /// 的 S3b／S4／S5 用的診斷，而那三節是**對著它現在這個行為**驗收過的（「沒有鉤子」是它當時
+    /// 被量到的性質之一）。改它會讓那三節量到的東西在沒有人改腳本的情況下悄悄換掉。
+    /// 這一條是**新增**的第三種組合，任何既有路徑一個位元組都不動。
+    ///
+    /// 結構上的缺口（2026-10-05 第五段量到的）：`--raise` 送得達真的 OLE 拖放但沒有鍵盤鉤子；
+    /// 常駐路徑有鉤子，合成拖放卻送不達（日誌停在 trigger key DOWN (state=Idle)，沒有 DragEnter）。
+    /// 於是「Shift 顯示期間切層」那兩行沒有任何一條自動化路徑碰得到。加上這一條之後有：
+    ///   ① 接收層**開場就升起**（不靠觸發鍵，合成拖放送得達）；
+    ///   ② 鉤子裝著（Shift 有聽眾），而且接線與常駐路徑是**同一份**（見 <see cref="WireHooks"/>）。
+    /// </summary>
+    public bool RaiseWithHooks;
+
+    /// <summary>
+    /// `--wheel-layer-probe &lt;png&gt;`：只驗一件事——輪盤顯示期間的 Shift 切層**走的是鍵盤鉤子那條路**。
+    /// 見 <see cref="WheelLayerProbe"/>。
+    /// </summary>
+    public string? WheelLayerProbe;
     public string? LogPath;
     public uint TriggerKey = Program.DefaultTriggerKey;
     public int CycleTest;
@@ -546,6 +579,8 @@ internal sealed class Options
                 case "--version" or "-v": o.ShowVersion = true; break;
                 case "--dump-monitors": o.DumpMonitors = true; break;
                 case "--raise": o.ForceRaiseHitLayer = true; break;
+                case "--raise-with-hooks": o.RaiseWithHooks = true; break;
+                case "--wheel-layer-probe": if (i + 1 < args.Length) o.WheelLayerProbe = args[++i]; break;
                 case "--assume-explorer-foreground": o.AssumeExplorerForeground = true; break;
                 case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
                 case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
@@ -1069,41 +1104,245 @@ internal static class App
         }
 
         using var hooks = new Hooks();
-        if (opt.ForceRaiseHitLayer)
+        // 診斷：Shift 切層那兩行的**唯一**可自動化入口。順序刻意與下面兩條相反（先接線、先裝鉤子、
+        // 再叫輪盤），因為它一進去就自己送合成按鍵，鉤子必須已經在聽。
+        if (opt.WheelLayerProbe != null)
+            return WheelLayerProbe(opt.WheelLayerProbe, hooks, detector, presenter, catalog,
+                                   guard, evidence, runner);
+
+        if (opt.RaiseWithHooks)
+        {
+            // --raise-with-hooks：與 --raise 同一件事，差別只在鉤子照裝（理由見 Options.RaiseWithHooks）。
+            // 接線用的是**同一份** WireHooks，所以這裡量到的切層行為就是常駐路徑的行為。
+            WireHooks(hooks, detector, presenter, guard, evidence, runner);
+            hooks.Install(evidence);
+            guard.OnCaptured();       // 用真正的保險 #3 計時收層，不用替代品
+        }
+        else if (opt.ForceRaiseHitLayer)
         {
             evidence.Line("--raise: hooks NOT installed");
             guard.OnCaptured();       // 用真正的保險 #3 計時收層，不用替代品
         }
         else
         {
-            hooks.MouseEvent += detector.OnMouse;
-            hooks.KeyEvent += (vk, isDown) =>
-            {
-                if (isDown && vk == Native.VK_Q && IsCtrlAltShiftDown())
-                {
-                    guard.OnKillSwitch();     // 保險 #5
-                    detector.Disable();
-                    return;
-                }
-                // 第二層的**即時**切換（規格 §9.4，2026-10-05 使用者裁定）：Shift 按下換成工具層、
-                // 放開切回格式層。這一條必須在下面那行**之前**，而且**不能在 isDown 判斷裡面**——
-                // 放開（isDown=false）也要送進來，否則切不回格式層。
-                // 輪盤沒顯示時 Shift 完全不受影響（照樣傳給 detector）。
-                if (presenter.IsVisible && vk == Native.VK_SHIFT)
-                {
-                    SwapWheelLayer(isDown, presenter, evidence);
-                    return;
-                }
-                // 輪盤可見時，方向鍵／Enter／Esc 屬於輪盤（規格 §4.3 鍵盤表）
-                if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence, runner))
-                    return;
-                detector.OnKey(vk, isDown);
-            };
+            WireHooks(hooks, detector, presenter, guard, evidence, runner);
             hooks.Install(evidence);
         }
 
         evidence.Line("message loop starting");
         return RunMessageLoop(evidence);
+    }
+
+    /// <summary>
+    /// 把低階鉤子的事件接到偵測器與輪盤。**全專案唯一一處**（常駐路徑、`--raise-with-hooks`、
+    /// `--wheel-layer-probe` 三條路都呼叫它）。
+    ///
+    /// 為什麼要抽出來：Shift 切層那一行住在**鉤子的回呼**裡。若探針自己再接一份長得差不多的
+    /// 回呼，那麼「探針過了」只證明探針那一份是對的，而產品跑的是另一份——那正是這一格一直
+    /// 沒有證據的原因（驗的東西與跑的東西不是同一份）。抽成一份之後，探針量到的就是常駐
+    /// 路徑量到的。
+    /// </summary>
+    private static void WireHooks(Hooks hooks, DragDetector detector, WheelPresenter presenter,
+                                  ReleaseGuard guard, Evidence evidence, ConversionRunner runner)
+    {
+        hooks.MouseEvent += detector.OnMouse;
+        hooks.KeyEvent += (vk, isDown) =>
+        {
+            if (isDown && vk == Native.VK_Q && IsCtrlAltShiftDown())
+            {
+                guard.OnKillSwitch();     // 保險 #5
+                detector.Disable();
+                return;
+            }
+            // 第二層的**即時**切換（規格 §9.4，2026-10-05 使用者裁定）：Shift 按下換成工具層、
+            // 放開切回格式層。這一條必須在下面那行**之前**，而且**不能在 isDown 判斷裡面**——
+            // 放開（isDown=false）也要送進來，否則切不回格式層。
+            // 輪盤沒顯示時 Shift 完全不受影響（照樣傳給 detector）。
+            // ⚠ 0xA0／0xA1 是 VK_LSHIFT／VK_RSHIFT：**真實鍵盤的低階鉤子送來的是這兩個**，
+            // 不是通用的 VK_SHIFT（0x10）。只比對 VK_SHIFT 的話，真人按住 Shift 拖檔案時畫面
+            // 不會有任何反應——只有「拖曳前就先按住 Shift」那條舊路有效，而那正是 2026-10-05
+            // 裁定要淘汰的行為。（探針當場量到鉤子送的是 0xA0；把條件放寬後兩行切層日誌立刻出現。）
+            // 待辦：這兩個常數應該搬進 Native 與 VK_SHIFT 放在一起（金鑰常數只有一個家）。
+            if (presenter.IsVisible &&
+                (vk == Native.VK_SHIFT || vk == 0xA0 || vk == 0xA1))
+            {
+                SwapWheelLayer(isDown, presenter, evidence);
+                return;
+            }
+            // 輪盤可見時，方向鍵／Enter／Esc 屬於輪盤（規格 §4.3 鍵盤表）
+            if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence, runner))
+                return;
+            detector.OnKey(vk, isDown);
+        };
+    }
+
+    /// <summary>
+    /// 診斷探針（`--wheel-layer-probe &lt;png&gt;`）：格式層 → 合成 Shift keydown → 工具層 →
+    /// 合成 Shift keyup → 格式層，兩次都成立回 0，否則回 1。
+    ///
+    /// <para>
+    /// <b>這一條證明什麼、不證明什麼（最重要的一段）</b>：它**不是**自己呼叫
+    /// <see cref="SwapWheelLayer"/> 來「驗」那個方法——那只是把方法本身再跑一次，什麼都沒證明。
+    /// 這裡沒有任何一行直接呼叫切層。合成鍵走的是 keybd_event → **系統輸入佇列** →
+    /// WH_KEYBOARD_LL → <see cref="WireHooks"/> 接的那份回呼 → <see cref="SwapWheelLayer"/>，
+    /// 與真人按鍵走的是同一條路。三項可量到的事實把這件事釘住：
+    /// </para>
+    /// <list type="number">
+    /// <item>原始碼裡沒有任何一行呼叫 SwapWheelLayer（唯一呼叫者在 WireHooks 的回呼裡）；
+    ///       探針只讀 <c>presenter.Mode</c>。</item>
+    /// <item>切層發生時 <see cref="Hooks.KeyCallbacks"/> 已經增加——鉤子回呼真的被呼叫過。
+    ///       少了這個計數，「模式換了」單獨看是說不出來源的。</item>
+    /// <item>切層發生時系統的 Shift 狀態是「按著」（<c>GetAsyncKeyState</c>）——
+    ///       那個鍵真的進了系統，不是行程內部某個旗標被翻了一下。</item>
+    /// </list>
+    /// <para>
+    /// <b>⚠ 為什麼注入一定要在另一個執行緒</b>：低階鉤子的回呼是在**安裝鉤子的執行緒**上被呼叫的，
+    /// 而 keybd_event／SendInput 會擋到那個事件被處理完為止。同一個執行緒送＝那個回呼永遠等不到
+    /// 執行緒去跑它；系統會等 LowLevelHooksTimeout（預設 300 ms）之後直接放行（Win7 之後甚至
+    /// 把鉤子移除）。那會做出一個**假陰性**——看起來像「鉤子收不到合成鍵」，而真正壞掉的是
+    /// 這個探針。所以：注入執行緒送出 → 主執行緒幫浦訊息（<see cref="PumpUntil"/>）→
+    /// 回呼在主執行緒上執行 → 切層。
+    /// </para>
+    /// </summary>
+    private static int WheelLayerProbe(string png, Hooks hooks, DragDetector detector, WheelPresenter presenter,
+                                       IFormatCatalog catalog, ReleaseGuard guard, Evidence evidence,
+                                       ConversionRunner runner)
+    {
+        int failures = 0;
+        void Report(string text, bool ok)
+        {
+            if (!ok) failures++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  wheel-layer-probe: {text}");
+        }
+
+        string modeText() => presenter.Mode == WheelPresenter.WheelMode.Tool ? "tool" : "format";
+
+        evidence.Line($"=== wheel-layer-probe: payload={png} ===");
+        if (!File.Exists(png))
+        {
+            evidence.Line($"wheel-layer-probe: no such file -> exit 1 (nothing was proven)");
+            return 1;
+        }
+
+        // 接線與常駐路徑**同一份**，裝鉤子也走同一個 Install。少了這一步，整個探針就只是自言自語。
+        WireHooks(hooks, detector, presenter, guard, evidence, runner);
+        // 只讀的第二個訂閱者：把鉤子**實際送來**的 vkCode 記下來。這一條讓失敗自己解釋自己——
+        // 產品比對的是 VK_SHIFT(0x10)，而低階鉤子對 Shift 送的是左右分明的 VK_LSHIFT(0xA0)／
+        // VK_RSHIFT(0xA1)（量測見 2026-10-05 的 %TEMP%\llkbd-vkcode-measure.ps1：
+        // 連硬體掃描碼 0x2A 都得到 0xA0）。沒有這一行的話，失敗只會說「沒切層」，
+        // 而真正的原因在日誌裡看不到。
+        var hookKeysSeen = new List<string>();
+        hooks.KeyEvent += (vk, isDown) => hookKeysSeen.Add($"0x{vk:X2}{(isDown ? "-down" : "-up")}");
+        hooks.Install(evidence);
+        Report("keyboard hook really installed (WH_KEYBOARD_LL handle != 0)", hooks.KeyboardInstalled);
+        if (!hooks.KeyboardInstalled)
+        {
+            evidence.Line("wheel-layer-probe: without the keyboard hook there is nothing to prove -> exit 1");
+            return 1;
+        }
+
+        guard.OnCaptured();
+        int callbacksBefore = hooks.KeyCallbacks;
+        ShowWheelFromPayload(presenter, catalog, evidence, new[] { png });
+
+        bool startOk = presenter.IsVisible && presenter.Mode == WheelPresenter.WheelMode.Format;
+        Report($"wheel visible in the FORMAT layer before any key is sent (visible={presenter.IsVisible} " +
+               $"mode={modeText()})", startOk);
+        if (!startOk)
+        {
+            evidence.Line("wheel-layer-probe: the probe has no valid starting point -> exit 1");
+            guard.OnUserResolved("wheel-layer-probe aborted");
+            PumpUntil(() => !presenter.IsVisible, 1000);
+            return 1;
+        }
+
+        // (1) Shift DOWN：從另一個執行緒注入；主執行緒在這裡幫浦，鉤子才有機會跑。
+        bool toTool = InjectKeyFromAnotherThread((byte)Native.VK_SHIFT, down: true,
+                                                 () => presenter.Mode == WheelPresenter.WheelMode.Tool);
+        int callbacksAfterDown = hooks.KeyCallbacks;
+        evidence.Line($"wheel-layer-probe: after injected Shift DOWN -> mode={modeText()} " +
+                      $"hookKeyCallbacks={callbacksBefore}->{callbacksAfterDown} " +
+                      $"hookKeysSeen=[{string.Join(",", hookKeysSeen)}] " +
+                      $"systemShiftStateDown={IsShiftDown()}");
+        Report("Shift down switched the wheel to the TOOL layer (log line 'wheel layer switch: format -> tool')",
+               toTool);
+        Report("the keyboard hook callback really ran for the injected key (not a direct in-process call)",
+               callbacksAfterDown > callbacksBefore);
+        Report("the switch was observed while the system reports Shift held down",
+               toTool && IsShiftDown());
+
+        if (!toTool)
+        {
+            // 失敗也要把 Shift 放掉：留著一個被按住的修飾鍵在使用者的系統上，比測試變紅嚴重得多。
+            InjectKeyFromAnotherThread((byte)Native.VK_SHIFT, down: false, () => false, pumpMs: 700);
+            evidence.Line($"wheel-layer-probe: FAILED at the Shift-down step -> exit 1 " +
+                          $"(mode={modeText()}, hookKeyCallbacks={hooks.KeyCallbacks}, " +
+                          $"hookKeysSeen=[{string.Join(",", hookKeysSeen)}])");
+            // 到這裡為止的三件事都已經量到了：鉤子裝著、合成鍵真的走過鉤子回呼、系統狀態是按下。
+            // 所以「沒切層」不可能再被讀成「合成鍵送不進鉤子」——剩下的唯一嫌疑是**比對條件**，
+            // 那就必須說清楚是哪一個值對不上，否則下一個人只會再撞一次同一面牆。
+            if (hooks.KeyCallbacks > callbacksBefore && hookKeysSeen.Count > 0 &&
+                !hookKeysSeen[hookKeysSeen.Count - 1].StartsWith("0x10", StringComparison.Ordinal))
+                evidence.Line("wheel-layer-probe: DIAGNOSIS — the key DID arrive through WH_KEYBOARD_LL " +
+                              $"(hookKeysSeen=[{string.Join(",", hookKeysSeen)}]) but the switch condition " +
+                              "in WireHooks accepts only VK_SHIFT (0x10). A low-level keyboard hook does not " +
+                              "report the generic code for Shift: it reports the left/right-specific " +
+                              "VK_LSHIFT (0xA0) / VK_RSHIFT (0xA1), which is also what a real hardware " +
+                              "scan code (0x2A) produces. So this line is not a probe artefact: a human " +
+                              "pressing Shift during a drag hits the same condition and gets the same " +
+                              "nothing. The probe cannot fix that from here -- it would be testing a " +
+                              "condition the product does not have.");
+            guard.OnUserResolved("wheel-layer-probe failed");
+            PumpUntil(() => !presenter.IsVisible, 1000);
+            return 1;
+        }
+
+        // (2) Shift UP：同一條路徑回來。只有在 (1) 成立時才跑——否則這一格會因為「本來就是格式層」
+        //     而假通過，那是這一種探針最容易被誤讀的地方。
+        bool toFormat = InjectKeyFromAnotherThread((byte)Native.VK_SHIFT, down: false,
+                                                   () => presenter.Mode == WheelPresenter.WheelMode.Format);
+        int callbacksAfterUp = hooks.KeyCallbacks;
+        evidence.Line($"wheel-layer-probe: after injected Shift UP -> mode={modeText()} " +
+                      $"hookKeyCallbacks={callbacksAfterDown}->{callbacksAfterUp} " +
+                      $"hookKeysSeen=[{string.Join(",", hookKeysSeen)}] " +
+                      $"systemShiftStateDown={IsShiftDown()}");
+        Report("Shift up switched the wheel back to the FORMAT layer (log line 'wheel layer switch: tool -> format')",
+               toFormat);
+        Report("the keyboard hook callback really ran for the injected key-up too",
+               callbacksAfterUp > callbacksAfterDown);
+        Report("no modifier is left held down after the probe", !IsShiftDown());
+
+        guard.OnUserResolved("wheel-layer-probe done");
+        PumpUntil(() => !presenter.IsVisible, 1000);
+        evidence.Line($"wheel-layer-probe: {(failures == 0 ? "PASS (exit 0)" : $"FAIL ({failures} check(s)) -> exit 1")} " +
+                      $"hookKeyCallbacks={hooks.KeyCallbacks} (the two 'wheel layer switch:' lines above were " +
+                      "produced by the WH_KEYBOARD_LL callback, not by a direct call)");
+        return failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// 從**另一個執行緒**送一次合成的按鍵，並在呼叫端幫浦訊息直到 <paramref name="observed"/> 成立。
+    ///
+    /// 為什麼不能直接 <c>Native.keybd_event(...)</c> 了事：見 <see cref="WheelLayerProbe"/> 的說明——
+    /// 同一個執行緒送會讓鉤子回呼永遠等不到執行緒去跑它，逾時後系統直接放行，於是「送成功、
+    /// 切層沒發生」，而那會被讀成「鉤子收不到合成鍵」這個錯的結論。
+    ///
+    /// <paramref name="pumpMs"/> &gt; 0 時改成「固定幫浦這麼久」而不是等條件（給清理路徑用：
+    /// 失敗時要確保 keyup 真的送完，但已經沒有條件可等）。回傳真正等到條件成立與否。
+    /// </summary>
+    private static bool InjectKeyFromAnotherThread(byte vk, bool down, Func<bool> observed, int pumpMs = 0)
+    {
+        var injector = new Thread(() => Native.keybd_event(vk, 0, down ? 0u : Native.KEYEVENTF_KEYUP,
+                                                           UIntPtr.Zero))
+        {
+            IsBackground = true,
+            Name = down ? "wheel-probe-key-down" : "wheel-probe-key-up"
+        };
+        injector.Start();
+        // 呼叫端（＝安裝鉤子的執行緒）在這裡幫浦：鉤子回呼就是靠這些 PeekMessage/DispatchMessage 跑起來的。
+        bool ok = pumpMs > 0 ? PumpFor(pumpMs, observed) : PumpUntil(observed, 5000);
+        injector.Join(2000);      // 注入執行緒只有在回呼跑完之後才出得來，正常情況這裡是 0 ms
+        return ok;
     }
 
     /// <summary>保險 #5 的組合鍵判定：Ctrl／Alt／Shift 三個都必須按著才算。</summary>
@@ -3274,6 +3513,27 @@ internal static class App
             Thread.Sleep(5);
         }
         return done();
+    }
+
+    /// <summary>
+    /// 固定幫浦 <paramref name="ms"/> 毫秒，並在期間持續回報 <paramref name="observed"/>（給清理路徑用：
+    /// 那時候已經沒有條件可等，但鉤子回呼仍然需要有人幫浦訊息才跑得起來）。
+    /// </summary>
+    private static bool PumpFor(int ms, Func<bool> observed)
+    {
+        var sw = Stopwatch.StartNew();
+        bool seen = false;
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            while (Native.PeekMessageW(out Native.MSG msg, IntPtr.Zero, 0, 0, Native.PM_REMOVE))
+            {
+                Native.TranslateMessage(ref msg);
+                Native.DispatchMessageW(ref msg);
+            }
+            if (observed()) seen = true;
+            Thread.Sleep(5);
+        }
+        return seen;
     }
 
     /// <summary>

@@ -376,6 +376,18 @@ internal static class Native
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 
+    // ================= 合成輸入（**只給診斷探針**） =================
+    // 產品路徑一個位元組都不碰這些：沒有任何一條使用者會走到的路徑會合成按鍵。
+    //
+    // ⚠ 呼叫端的唯一硬規則：**不可以從安裝低階鉤子的那個執行緒呼叫**。
+    // WH_KEYBOARD_LL 的回呼是在安裝鉤子的執行緒上被呼叫的，而 keybd_event／SendInput 會擋到
+    // 那個事件被處理完為止 —— 同一個執行緒送就等於「回呼永遠等不到那個執行緒去跑它」，
+    // 系統會等 LowLevelHooksTimeout（預設 300 ms）之後直接放行（Win7 之後甚至把鉤子移除），
+    // 結果是一個**假陰性**：看起來像「鉤子收不到合成鍵」。見 Program.WheelLayerProbe。
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+
     // ---- 虛擬鍵 ----
     public const uint VK_CONTROL = 0x11;
     public const uint VK_SHIFT = 0x10;
