@@ -231,7 +231,8 @@ internal sealed class Options
           --wheel-dump-raw <path>   with --wheel-demo: same frame but with alpha preserved
           --wheel-tools             with --wheel-demo: paint the SECOND layer (tool wheel) instead
           --rotate90 <path>         run tool rotate90 (90 deg clockwise) on <path> and report;
-                                    output goes next to the source, the source is never touched
+                                    the output folder follows Settings.OutputFolder (spec 9.5),
+                                    the source file is never touched
                                     (the only way to check the alpha contract: the glass body
                                     must be alpha 255, everything outside must be a pure layer)
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
@@ -1183,7 +1184,11 @@ internal static class App
 
         var registry = new CodecRegistry();
         var engine = new ConversionEngine(registry, evidence.Line);
-        ConversionResult result = engine.Rotate90(source);
+        // 輸出資料夾由設定決定（規格 §9.5；null＝來源旁邊）。`--settings-file` 可以指向別的檔案，
+        // 所以這一條同時就是「設定 → NamingPolicy → 寫檔」整條鏈的可無頭驗證路徑。
+        string? outputDir = (_settings ?? new Settings()).ResolveOutputDirectory();
+        evidence.Line($"tool rotate90: outputDir={outputDir ?? "(source folder)"}");
+        ConversionResult result = engine.Rotate90(source, journal: null, targetDirectory: outputDir);
 
         string afterHash = Sha256Of(source);
         bool untouched = beforeHash == afterHash

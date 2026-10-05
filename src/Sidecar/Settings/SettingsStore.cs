@@ -18,6 +18,17 @@ internal sealed record Settings
     public string EmergencyHotkey { get; init; } = "Ctrl+Alt+Shift+Q";
     public bool Diagnostics { get; init; } = false;
 
+    /// <summary>
+    /// 輸出資料夾（規格 §9.5，2026-10-05 使用者裁定）。三種寫法：
+    /// 空字串或 <c>source</c>＝**來源檔旁邊**（預設）；<c>desktop</c>＝桌面；其他＝資料夾路徑。
+    ///
+    /// 為什麼用字串而不是列舉＋路徑兩個欄位：檔案是給人看的（文件也教使用者直接改它），
+    /// 一個欄位比兩個欄位好懂。打錯的寫法（例如 `Destkop`）會被當成路徑 → 不存在 →
+    /// <see cref="NamingPolicy"/> 回退到來源旁邊，**而且引擎會把「回退了」寫進日誌**——
+    /// 打錯不會靜默地什麼都沒發生。
+    /// </summary>
+    public string OutputFolder { get; init; } = "";
+
     /// <summary>把超出範圍的值夾回規格允許的區間，並回報改了什麼（不靜默）。</summary>
     public Settings Normalized(out List<string> notes)
     {
@@ -38,6 +49,22 @@ internal sealed record Settings
         "WEBP" => WebpQuality,
         _ => 100
     };
+
+    /// <summary>
+    /// 解析 <see cref="OutputFolder"/> 成為實際路徑。**回傳 null ＝來源檔旁邊**——
+    /// 這個 null 正是 <see cref="ConversionEngine"/> 的 <c>targetDirectory</c> 參數要的預設值，
+    /// 所以「設定」到「引擎」的對應只發生在這一處（不散落在 UI 裡）。
+    /// </summary>
+    public string? ResolveOutputDirectory()
+    {
+        string value = OutputFolder.Trim();
+        if (value.Length == 0) return null;
+        if (value.Equals("source", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("sibling", StringComparison.OrdinalIgnoreCase)) return null;
+        if (value.Equals("desktop", StringComparison.OrdinalIgnoreCase))
+            return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        return value;
+    }
 }
 
 /// <summary>
