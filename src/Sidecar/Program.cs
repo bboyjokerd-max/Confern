@@ -1071,6 +1071,15 @@ internal static class App
                     detector.Disable();
                     return;
                 }
+                // 第二層的**即時**切換（規格 §9.4，2026-10-05 使用者裁定）：Shift 按下換成工具層、
+                // 放開切回格式層。這一條必須在下面那行**之前**，而且**不能在 isDown 判斷裡面**——
+                // 放開（isDown=false）也要送進來，否則切不回格式層。
+                // 輪盤沒顯示時 Shift 完全不受影響（照樣傳給 detector）。
+                if (presenter.IsVisible && vk == Native.VK_SHIFT)
+                {
+                    SwapWheelLayer(isDown, presenter, evidence);
+                    return;
+                }
                 // 輪盤可見時，方向鍵／Enter／Esc 屬於輪盤（規格 §4.3 鍵盤表）
                 if (isDown && presenter.IsVisible && HandleWheelKey(vk, presenter, guard, evidence, runner))
                     return;
@@ -1266,42 +1275,75 @@ internal static class App
             : Array.Empty<string>();
         if (notice == null && targets.Count == 0) notice = "沒有可轉換的目標格式";
 
-        // M3（規格 §9.4:390）：**觸發鍵 ＋ Ctrl ＝ 第二層（工具輪盤）**。
-        // Ctrl 的狀態在輪盤顯示的**這一刻**決定——那就是「和弦」的字面意思（不是拖曳途中可切換的開關）。
-        // ⚠ 不按 Ctrl 的路徑一個字都沒變：下面 else 分支就是原本那兩行（驗收 T8 比對的就是它）。
-        // 保險 #5 是 Ctrl＋Alt＋Shift：兩者不衝突，而且真的三個都按著時停用會先生效（輪盤根本不會出現）。
-        IReadOnlyList<ToolDescriptor> tools = notice == null && (IsControlDown() || _forceToolLayer)
+        // 工具清單**永遠算**（很便宜）。顯示哪一層由 Shift 決定——不能只在 Shift 按著時才算，
+        // 否則「先顯示格式層、之後才按 Shift」會找不到工具可切（PendingTools 會是空的）。
+        PendingTools = notice == null
             ? new ToolCatalog().ToolsFor(verdict)
             : Array.Empty<ToolDescriptor>();
-        PendingTools = tools;
 
-        if (tools.Count > 0)
-        {
-            presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", tools.Select(t => t.Label).ToArray(), 0,
-                           preview: null, notice: null,
-                           mode: WheelPresenter.WheelMode.Tool,
-                           caption: i => i < tools.Count ? tools[i].Description : null,
-                           icons: tools.Select(t => t.Icon).ToArray());
-        }
-        else
-        {
-            presenter.Show(p.X, p.Y, verdict.SourceFormat ?? "?", targets, 0,
-                           PreviewFactory(targets, catalog, paths, 1), notice);
-        }
+        // 把「重畫另一層需要的輸入」存起來：Shift 切層時要憑它把原本那一層畫回來。
+        _wheelSourceFormat = verdict.SourceFormat ?? "?";
+        _wheelFormatTargets = targets;
+        _wheelPreview = PreviewFactory(targets, catalog, paths, 1);
+        _wheelNotice = notice;
+
+        bool showTools = (IsShiftDown() || _forceToolLayer) && PendingTools.Count > 0;
+        RenderWheelLayer(presenter, showTools, p.X, p.Y);
         sw.Stop();
         // tools= 附加在行尾（既有套件比對的是這行的前綴）。
         evidence.Line($"wheel from OLE payload: files={paths.Length} status={verdict.Status} " +
                       $"source={verdict.SourceFormat ?? "UNKNOWN"} targets={targets.Count} " +
                       $"notice={(notice ?? "-")} latency={sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms) " +
-                      $"layer={(tools.Count > 0 ? "tool" : "format")} tools={tools.Count}");
+                      $"layer={(showTools ? "tool" : "format")} tools={PendingTools.Count}");
     }
 
-    /// <summary>Ctrl 是否按著（工具輪盤的觸發和弦）。與保險 #5 的 Ctrl＋Alt＋Shift 不衝突。</summary>
-    private static bool IsControlDown() =>
-        (Native.GetAsyncKeyState((int)Native.VK_CONTROL) & 0x8000) != 0;
+    /// <summary>
+    /// 真的把輪盤畫出來（**唯一一處**）。初始顯示與 Shift 切層都走這裡——兩條路各畫一次的話，
+    /// 兩邊遲早會畫得不一樣，而「同一層在兩個時刻長得不一樣」是使用者一眼就會發現的事。
+    /// ⚠ <c>Show</c> 會把選取**重設到第一格**：切層等於換一組選項，這是刻意的（見計畫 §10.1）。
+    /// </summary>
+    private static void RenderWheelLayer(WheelPresenter presenter, bool tools, int x, int y)
+    {
+        if (tools)
+        {
+            IReadOnlyList<ToolDescriptor> list = PendingTools;
+            presenter.Show(x, y, _wheelSourceFormat, list.Select(t => t.Label).ToArray(), 0,
+                           preview: null, notice: null,
+                           mode: WheelPresenter.WheelMode.Tool,
+                           caption: i => i < list.Count ? list[i].Description : null,
+                           icons: list.Select(t => t.Icon).ToArray());
+            return;
+        }
+
+        presenter.Show(x, y, _wheelSourceFormat, _wheelFormatTargets, 0, _wheelPreview, _wheelNotice);
+    }
 
     /// <summary>
-    /// 診斷用：假裝 Ctrl 按著（給自動驗收用）。產品路徑**不讀這個旗標**——
+    /// Shift 的**即時**層切換（規格 §9.4，2026-10-05 使用者裁定）。輪盤顯示期間按 Shift 換成
+    /// 工具層、放開切回格式層。舊設計把「按著 Ctrl」綁在顯示那一刻，那個時間窗口很容易漏掉，
+    /// 而且漏掉時畫面上沒有任何跡象——使用者只會以為功能壞了。
+    ///
+    /// 只在**真的換層**時才重畫：Shift 按住期間系統會重複送 keydown，不這樣擋會一直重建圖層。
+    /// </summary>
+    private static void SwapWheelLayer(bool shiftDown, WheelPresenter presenter, Evidence evidence)
+    {
+        bool showTools = (shiftDown || _forceToolLayer) && PendingTools.Count > 0;
+        bool currentlyTools = presenter.Mode == WheelPresenter.WheelMode.Tool;
+        if (showTools == currentlyTools) return;
+
+        Native.GetCursorPos(out Native.POINT p);
+        RenderWheelLayer(presenter, showTools, p.X, p.Y);
+        evidence.Line($"wheel layer switch: {(currentlyTools ? "tool" : "format")} -> " +
+                      $"{(showTools ? "tool" : "format")} (shift {(shiftDown ? "down" : "up")}, " +
+                      $"selection reset to first)");
+    }
+
+    /// <summary>Shift 是否按著（第二層的即時切換鍵）。與保險 #5 的 Ctrl＋Alt＋Shift 不衝突。</summary>
+    private static bool IsShiftDown() =>
+        (Native.GetAsyncKeyState((int)Native.VK_SHIFT) & 0x8000) != 0;
+
+    /// <summary>
+    /// 診斷用：假裝 Shift 按著（給自動驗收用）。產品路徑**不讀這個旗標**——
     /// 它只在 <c>--wheel-tools</c> 時才為 true，讓無頭測試能走到第二層而不必合成鍵盤輸入。
     /// </summary>
     private static bool _forceToolLayer;
@@ -1383,6 +1425,17 @@ internal static class App
     /// 而且重新推導等於假設兩次分類結果一致（那就是第二個擁有者）。
     /// </summary>
     private static IReadOnlyList<ToolDescriptor> PendingTools = Array.Empty<ToolDescriptor>();
+
+    /// <summary>
+    /// 顯示輪盤當下的情境。第二層不是「顯示時算一次」就固定了——Shift 是**即時切層**
+    /// （規格 §9.4，2026-10-05 裁定），所以切回來的時候要能重新畫出原本那一層，
+    /// 而重畫需要當初的輸入：來源格式、格式目標、檔名預覽、拒絕訊息。
+    /// 與 <see cref="PendingPaths"/> 同一種作法（顯示時寫、收起後不再用）。
+    /// </summary>
+    private static string _wheelSourceFormat = "?";
+    private static IReadOnlyList<string> _wheelFormatTargets = Array.Empty<string>();
+    private static Func<int, string?>? _wheelPreview;
+    private static string? _wheelNotice;
 
     /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
     private static Settings? _settings;
