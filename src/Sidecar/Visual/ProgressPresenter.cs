@@ -18,7 +18,9 @@ namespace Sidecar;
 internal sealed class ProgressPresenter : IDisposable
 {
     private const int FadeMs = 2000;         // 規格 §4.4：完成後 2 秒淡出
-    private const int FailureHoldMs = 5000;  // 有失敗時留久一點（使用者要看得見 ✗ 幾個）
+    // 這裡原本還有一個 FailureHoldMs = 5000（失敗留比較久，讓使用者看得見 ✗ 幾個）。
+    // 2026-10-05 使用者真人實測後決定一律 2 秒，於是兩個值合一。刻意不留一個永遠等於
+    // FadeMs 的常數：那會變成沒有人讀、也永遠不會被選到的死設定（稽核抓的就是這種）。
     private const int FadeOutMs = 350;
     private const int BitmapWidth = 168;
     private const int HorizontalPadding = 14;
@@ -150,6 +152,12 @@ internal sealed class ProgressPresenter : IDisposable
     /// 淡出前的停留時間（毫秒）。<c>0</c>＝還沒完成。<c>-1</c>＝**現在不淡出**
     /// （游標停在上面）：D2 定案的行為，成功與失敗兩條路徑都適用。
     ///
+    /// 2026-10-05：使用者真人實測後把失敗的 5 秒改成與成功相同的 2 秒，所以這裡只剩
+    /// 「游標在不在」這一條規則（見 <see cref="FadeMs"/> 上方的說明）。
+    /// 展開的清單也是同一條規則——游標停著就不淡出，離開之後同樣 2 秒。這是刻意的：
+    /// 讀清單的保護由 D2 的 hover 規則提供，不是靠拉長秒數；拉長只會讓沒有在看的人
+    /// 多被擋 5 秒，而真正在讀的人早就把游標放上去了。
+    ///
     /// 刻意寫成單一函式：淡出時鐘、log 與驗收讀的是同一份規則。
     /// 分成兩處（例如 Tick 裡各寫一次）就會出現「log 說 5 秒、行為是 2 秒」這種分歧。
     /// </summary>
@@ -157,7 +165,7 @@ internal sealed class ProgressPresenter : IDisposable
     {
         if (!_last.Finished || _finishedAt == null) return 0;
         if (_hovered) return -1;
-        return _expanded || _last.Failed > 0 ? FailureHoldMs : FadeMs;
+        return FadeMs;
     }
 
     /// <summary>已經更新過幾次（用來斷言「原地更新」而不是「一直開新視窗」）。</summary>
@@ -304,7 +312,7 @@ internal sealed class ProgressPresenter : IDisposable
                 }
                 return;
             }
-            int hold = HoldFor();      // >0：有失敗 5 s、展開 5 s、成功 2 s（0/-1 在上面已排除）
+            int hold = HoldFor();      // >0：一律 2 s（成功／失敗／展開後都一樣；0/-1 在上面已排除）
             long elapsed = _finishedAt.ElapsedMilliseconds;
             if (elapsed >= hold + FadeOutMs)
             {

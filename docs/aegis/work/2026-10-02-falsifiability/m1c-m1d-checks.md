@@ -94,7 +94,7 @@ m1c：8 REAL／7 WEAK／5 DEAD（20 條）。m1d：34 REAL／18 WEAK／2 DEAD（
 | S12.15a | m1d:264 | REAL | 讀 `progress: {_last.Line}`＝真正交給 render 的字串 |
 | S12.15b | m1d:265 | WEAK | 同一份 `ConversionSnapshot.Line` 的第二個出口，與 15a 同源不獨立 |
 | S12.15c | m1d:266 | WEAK | 數到的「1」就是輸入 fixture 自己（見 §3.2） |
-| S12.15d | m1d:267 | WEAK | 只斷言自報的 `hold=5000 ms` 常數，`elapsed=\d+` 抓了卻從不比 5000 |
+| S12.15d | m1d:267 | WEAK → **REAL**（2026-10-05 補強） | 原本只斷言自報的 `hold=5000 ms` 常數，`elapsed=\d+` 抓了卻從不比。2026-10-05 改成同時比對 `elapsed`（2000..3200 ms）並把量到的值印在證據欄；同日兩次假故障（常數改回 5000 → 紅、上界改成 1999 → 紅）都當場量到。 |
 | S12.11a | m1d:275 | REAL | 移除 clamp 就會印 `jpgQuality=40` |
 | S12.11b | m1d:276 | REAL | 同上（webp 200→100） |
 | S12.11c | m1d:277 | REAL | 同上（9999→120） |

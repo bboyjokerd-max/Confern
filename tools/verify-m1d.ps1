@@ -361,7 +361,17 @@ Check 'S12.15c a failed conversion leaves the source byte-identical and writes n
    (@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count -eq 1) -and
    (@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count -eq 0)) `
   "sourceShaSame=$sourceSame sourceStampSame=$sourceStampSame sourceLenSame=$sourceLenSame reason=$failReasonOk corruptFiles=$(@(Get-ChildItem -LiteralPath $Work -Filter 'corrupt.*' -File).Count) tmpFiles=$(@(Get-ChildItem -LiteralPath $Work -Filter '*.tmp-*' -Recurse -File).Count)"
-Check 'S12.15d a failure holds 5 s, not the 2 s success hold (spec 4.4)' ($failText -match 'hiding after \d+ ms \(updates=\d+, ticks=\d+, hold=5000 ms\)') ''
+# 2026-10-05: after the user's real-hand test the failure hold is the same 2 s as a success.
+# 5 s was never in the spec -- spec 4.4 only says "2 s after finishing" -- so this is a return
+# to the spec, not a spec change. The old expectation was measured red BEFORE being updated
+# (FAIL S12.15d, checks=54 pass=53 fail=1, exit=1), so this check pins a real number.
+# ASCII-only comment on purpose: see the note above the hideLines block. A CJK comment here
+# silently ate the newline and the Check below never ran (the registration count caught it).
+$failHide = [regex]::Match($failText, 'progress: hiding after (\d+) ms \(updates=\d+, ticks=\d+, hold=2000 ms\)')
+$failElapsed = if ($failHide.Success) { [int]$failHide.Groups[1].Value } else { -1 }
+Check 'S12.15d a failure fades on the same 2 s budget as a success, and really took that long' `
+  ($failHide.Success -and ($failElapsed -ge 2000) -and ($failElapsed -le 3200)) `
+  "elapsed=$failElapsed ms expected 2000..3200 (hold=2000 + fade); the audit called the old form WEAK because it never compared this number"
 
 "=== S12.11-S12.12 settings (spec 8) ==="
 $badSettings = Join-Path $Work 'settings-out-of-range.json'
