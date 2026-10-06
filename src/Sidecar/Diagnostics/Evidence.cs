@@ -19,6 +19,20 @@ internal sealed class Evidence : IDisposable
 
     public string Path { get; }
 
+    /// <summary>
+    /// 每一行寫下去之後的**通知**（不是第二個寫入者）。
+    ///
+    /// <para>為什麼要有它：worker 是「一個工作一個行程」，而多個 worker 必須能同時存在且
+    /// <b>各自</b>寫自己的證據。做法是把證據寫進每個 worker 專屬的檔案，再把增量鏡射到
+    /// 讀取者看的那個穩定檔名（見 <see cref="WorkerLog.Mirror"/>）。鏡射要「跟著每一行走」，
+    /// 所以由這裡發出通知，而不是由 worker 的每個 <c>_log</c> 呼叫點各自記得去鏡射——
+    /// 漏掉任何一個呼叫點就是靜默漏掉一段證據。UI 行程不訂閱它，行為逐位元不變。</para>
+    ///
+    /// <para>⚠ 訂閱者的例外**不可以**影響寫日誌本身：日誌是事後追查的唯一證據，
+    /// 不能因為「鏡射失敗」而少一行。</para>
+    /// </summary>
+    public event Action? Mirrored;
+
     public static string DefaultPath()
     {
         string dir = System.IO.Path.Combine(
@@ -43,6 +57,18 @@ internal sealed class Evidence : IDisposable
     {
         _writer.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {text}");
         if (!_quiet) Console.Error.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {text}");
+        NotifyMirrored();
+    }
+
+    /// <summary>
+    /// 通知鏡射者。**吞掉它的例外**：鏡射是共用名的副本，而這裡的檔案才是證據本體——
+    /// 讓鏡射的失敗往上冒會變成「日誌寫不下去」，那是拿副本去擋本體（順序反了）。
+    /// 鏡射者自己會把失敗記進本體（見 <see cref="WorkerLog.Mirror"/>）。
+    /// </summary>
+    private void NotifyMirrored()
+    {
+        try { Mirrored?.Invoke(); }
+        catch { /* 鏡射失敗不得影響本體 */ }
     }
 
     /// <summary>
@@ -83,5 +109,8 @@ internal sealed class Evidence : IDisposable
     {
         Line("=== session end ===");
         _writer.Dispose();
+        // 收尾再鏡射一次：最後那一行（`=== session end ===`）一定要進共用檔，
+        // 否則讀取者看到的是一份少了結尾的證據。
+        NotifyMirrored();
     }
 }

@@ -28,8 +28,15 @@ Get-ChildItem -LiteralPath $Folder -File -Recurse -ErrorAction SilentlyContinue 
 
 "=== 4. conversion log (last 25 conversion lines) ==="
 $uiLog = Join-Path $LogDir 'logs\confern.log'
+# 2026-10-06: each worker now writes its OWN worker-<pipe>.log (one file per job, so two
+# concurrent workers cannot lock each other out), and the shared worker.log carries the
+# same bytes by mirroring. Read both: the shared name for the newest session, the
+# per-worker files for anything an earlier concurrent worker wrote.
 $workerLog = Join-Path $LogDir 'worker.log'
-foreach ($log in @($uiLog, $workerLog)) {
+$perWorker = @(Get-ChildItem -LiteralPath $LogDir -Filter 'worker-*.log' -File -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 5 | ForEach-Object { $_.FullName })
+$logs = @($uiLog, $workerLog) + $perWorker
+foreach ($log in $logs) {
   if (-not (Test-Path -LiteralPath $log)) { "  (no $log yet)"; continue }
   "  --- $log ---"
   Get-Content -LiteralPath $log -Encoding UTF8 |

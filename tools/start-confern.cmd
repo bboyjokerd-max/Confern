@@ -45,7 +45,8 @@ echo     - press ESC to cancel, or release SPACE to dismiss the wheel
 echo.
 echo   Logs:
 echo     %LOCALAPPDATA%\Confern\logs\confern.log   ^(UI process^)
-echo     %LOCALAPPDATA%\Confern\worker.log         ^(conversion worker^)
+echo     %LOCALAPPDATA%\Confern\worker.log         ^(conversion worker; newest session^)
+echo     %LOCALAPPDATA%\Confern\worker-*.log       ^(one file per worker^)
 echo.
 echo   After testing, run this to check for leftovers / changed originals:
 echo     powershell -ExecutionPolicy Bypass -File tools\check-test-artifacts.ps1 -Folder ^<folder you converted in^>

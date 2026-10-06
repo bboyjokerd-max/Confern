@@ -209,9 +209,15 @@ internal sealed class ConversionClient : IDisposable
         return true;
     }
 
-    private static string WorkerLogPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        ProductInfo.Name, "worker.log");
+    /// <summary>
+    /// 這個 job 的 worker 要寫的證據檔路徑——**每一個 job 一個**。
+    ///
+    /// ⚠ 舊版回傳的是**所有 worker 共用**的 `%LOCALAPPDATA%\Confern\worker.log`，而
+    /// <see cref="Evidence"/> 以獨占模式開啟它 ⇒ 同時存在的第二個 worker 直接開檔失敗
+    /// （2026-10-06 量到：`Unhandled exception System.IO.IOException ... Evidence.cs:34`，
+    /// worker 從未連上管道，UI 端整批逾時）。共用名由 worker 端以鏡射維護，見 <see cref="WorkerLog"/>。
+    /// </summary>
+    private string WorkerLogPath() => WorkerLog.ForJob(_pipeName);
 
     /// <summary>
     /// 每收到一則 worker 訊息就更新快照。跑在 PipeLink 的讀取任務上，所以

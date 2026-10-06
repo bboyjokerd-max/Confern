@@ -25,7 +25,13 @@
 | 檔案 | 內容 |
 |------|------|
 | `%LOCALAPPDATA%\Confern\logs\confern.log` | UI 行程：輪盤顯示、放手、轉檔進度 |
-| `%LOCALAPPDATA%\Confern\worker.log` | 轉檔行程：每個檔案的解碼／編碼／耗時 |
+| `%LOCALAPPDATA%\Confern\worker.log` | 轉檔行程：每個檔案的解碼／編碼／耗時（**最近那一個** worker 的內容） |
+| `%LOCALAPPDATA%\Confern\worker-<pipe>.log` | 每一個 worker **自己的**那一份證據 |
+
+> 為什麼有第三列（2026-10-06）：worker 是「一個工作一個行程」，而同時存在的兩個 worker
+> 會互相搶同一個 `worker.log`（`Evidence` 以獨占模式開啟它）——第二個會在開檔時就崩潰，
+> 而且兩者會互相截斷對方的內容。現在每個 worker 寫自己的檔案，`worker.log` 由它鏡射維護，
+> 所以**既有那個穩定檔名照舊讀得到、而且是最新的**。兩份內容是同一份位元組。
 
 **怎麼用**：
 > 在檔案總管**拖著檔案**的時候**按住空白鍵** → 輪盤在游標處出現 →

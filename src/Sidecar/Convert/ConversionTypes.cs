@@ -46,7 +46,19 @@ internal enum ConversionError
     /// （⚠ 對照組：`strip-metadata` 對「沒有 metadata 的圖」是照樣輸出並在日誌說明，
     /// 因為那一條路是**逐位元組相同**的，代價是 0。差別在這裡。）
     /// </summary>
-    CropNothingToDo
+    CropNothingToDo,
+
+    /// <summary>
+    /// 寫入時「這個名字剛剛被**另一個行程**拿走」，而且重試用完。
+    ///
+    /// 為什麼不沿用 <see cref="Unreadable"/>（`Unreadable` 是它今天的歸類）：那句話是
+    /// 「無法讀取**來源**檔案」，但來源好好的——真正發生的事是兩個行程（兩支 `--convert`、
+    /// 或使用者自己開著的 Confern 與同時跑的命令列）選到了**同一個輸出檔名**，
+    /// 而 <c>File.Move(overwrite: false)</c> 讓後到的那一方失敗（`ERROR_ALREADY_EXISTS`）。
+    /// 分類錯的訊息會把使用者送去檢查一個沒有問題的檔案（2026-10-06 量到：40/40 全失敗、
+    /// 每一行都寫「無法讀取來源檔案」，而來源一個位元都沒變）。
+    /// </summary>
+    WriteConflict
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
@@ -79,6 +91,9 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 工具 crop 專用（規格 §9.4）。同樣是「你的要求本身沒有東西可以做」，不是「轉檔壞了」。
         ConversionError.CropRectEmpty => "選取範圍是空的",
         ConversionError.CropNothingToDo => "選取範圍等於整張圖",
+        // 另一個行程搶走了每一個候選檔名（含 `name (1)`…`name (7)`）。罕見到幾乎不會出現，
+        // 但出現時必須說得出真正的原因，不能叫使用者去檢查一個完好的來源檔。
+        ConversionError.WriteConflict => "輸出檔名被其他行程占用",
         _ => "轉檔失敗"
     };
 

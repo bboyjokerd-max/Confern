@@ -48,7 +48,11 @@ function Inconclusive($name, $why) {
 #  count this file promises for an unconditional run; the Expect calls inside the
 #  few branching blocks account for the paths that register a different number.
 # =============================================================================
-$script:ExpectedChecks = 48
+# NOTE (2026-10-06): 56 is an unconditional-run figure. The three conditional
+# blocks below register 18 more between them (measured, not guessed: 3 + 3 + 12),
+# so a normal run totals 74. Change this number ONLY together with the checks
+# themselves -- a mismatch is reported as a red run on purpose.
+$script:ExpectedChecks = 56
 function Expect([int]$n) { $script:ExpectedChecks += $n }
 
 # CJK expected strings, built from code points so this file stays pure ASCII.
@@ -849,6 +853,134 @@ $dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $laye
 Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=4 tools) and dumps that frame' `
   (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 4) -and ($dumpLen -gt 8000)) `
   "exit=$($layerRun.Exit) tools=$layerTools (expected 4: rotate90+strip-metadata+compress+crop; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+
+# =============================================================================
+#  S12.21 CONCURRENCY (2026-10-06): two conversions running AT THE SAME TIME must
+#  BOTH succeed. This is a regression guard for two real, measured defects.
+#
+#  Defect 1 -- two `--convert` runs converting the SAME source folder both picked
+#  the same output name, because NamingPolicy.ResolveOutputPath only did
+#  File.Exists ("check") and the real non-overwrite guarantee is File.Move(...,
+#  overwrite:false) ("act"). The loser got ERROR_ALREADY_EXISTS (0x800700B7),
+#  which was ALSO classified as Unreadable ("cannot read the SOURCE file") -- so
+#  the operator was sent to inspect a source that had not changed by one byte.
+#  Measured before the fix: job A exit=9 ok=0 failed=40, every line naming
+#  0x800700B7; job B ok=40.
+#
+#  Defect 2 -- every worker was handed the SAME %LOCALAPPDATA%\Confern\worker.log
+#  while Evidence opens it with append:false (= FileMode.Create, FileShare.Read,
+#  i.e. exclusive). The second worker died in its Evidence constructor and never
+#  connected to the pipe, so the UI side waited out the 8000 ms connect timeout.
+#
+#  Both checks below are AND-ed on purpose. "One of the two succeeded" is NOT a
+#  pass: the whole point is that they do not destroy each other.
+# =============================================================================
+"=== S12.21 two conversions at the same time must BOTH succeed (2026-10-06) ==="
+$concDir = Join-Path $Work 'concurrent-src'
+$concOut = Join-Path $Work 'concurrent-logs'
+New-Item -ItemType Directory -Force -Path $concDir, $concOut | Out-Null
+$concCount = 40
+for ($i = 0; $i -lt $concCount; $i++) {
+  $cb = [System.Drawing.Bitmap]::new(64, 48)
+  for ($y = 0; $y -lt 48; $y += 6) {
+    for ($x = 0; $x -lt 64; $x += 6) {
+      $cb.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, (($x + $i) % 256), ($y % 256), 90))
+    }
+  }
+  $cb.Save((Join-Path $concDir ("c{0:D3}.jpg" -f $i)), $jpgCodec, $ep)
+  $cb.Dispose()
+}
+$concList = (Get-ChildItem -LiteralPath $concDir -Filter '*.jpg' | ForEach-Object { $_.FullName }) -join ';'
+
+# Both processes get their OWN --log (evidence is per run), and they write their
+# outputs into the SAME source folder -- that is what makes the name race real.
+$concLA = Join-Path $concOut 'a.log'
+$concLB = Join-Path $concOut 'b.log'
+$cA = Start-Process -FilePath $Exe -ArgumentList @('--convert', $concList, '--target', 'PNG',
+        '--quiet', '--log', $concLA) -PassThru -WindowStyle Hidden
+$cB = Start-Process -FilePath $Exe -ArgumentList @('--convert', $concList, '--target', 'PNG',
+        '--quiet', '--log', $concLB) -PassThru -WindowStyle Hidden
+$cA.WaitForExit()
+$cB.WaitForExit()
+$concTextA = if (Test-Path -LiteralPath $concLA) { (Get-Content -LiteralPath $concLA -Encoding UTF8) -join "`n" } else { '' }
+$concTextB = if (Test-Path -LiteralPath $concLB) { (Get-Content -LiteralPath $concLB -Encoding UTF8) -join "`n" } else { '' }
+
+# How many files each source produced. Two runs must leave TWO outputs per source:
+# if they collided on one name, one of them was silently lost (or never written).
+$concPerSource = @{}
+foreach ($f in (Get-ChildItem -LiteralPath $concDir -Filter '*.png' -File)) {
+  $stem = $f.Name -replace '\s*\(\d+\)\.png$', ''
+  $stem = $stem -replace '\.png$', ''
+  if ($concPerSource.ContainsKey($stem)) { $concPerSource[$stem] = $concPerSource[$stem] + 1 }
+  else { $concPerSource[$stem] = 1 }
+}
+$concShort = @($concPerSource.Keys | Where-Object { $concPerSource[$_] -lt 2 }).Count
+$concTotal = @(Get-ChildItem -LiteralPath $concDir -Filter '*.png' -File).Count
+$concLeftover = @(Get-ChildItem -LiteralPath $concDir -Filter '*.tmp-*' -File -Recurse).Count
+
+# Self-test: the counting really rejects a set with a lost output. Synthetic
+# counts only, so this cannot silently agree with a broken product.
+$syntheticGood = @{ 'c000' = 2; 'c001' = 2; 'c002' = 2 }
+$syntheticLost = @{ 'c000' = 2; 'c001' = 1; 'c002' = 2 }
+$rejectsLost = @($syntheticLost.Keys | Where-Object { $syntheticLost[$_] -lt 2 }).Count -gt 0
+$acceptsGood = @($syntheticGood.Keys | Where-Object { $syntheticGood[$_] -lt 2 }).Count -eq 0
+Check 'S12.21a self-test: the per-source count REJECTS a lost output' $rejectsLost 'synthetic 1 of 3 sources short'
+Check 'S12.21b self-test: the per-source count ACCEPTS a complete set' $acceptsGood 'synthetic'
+
+Check 'S12.21c both concurrent --convert runs exit 0 (neither is collateral damage)' `
+  (($cA.ExitCode -eq 0) -and ($cB.ExitCode -eq 0)) `
+  "exitA=$($cA.ExitCode) exitB=$($cB.ExitCode) (before the fix one of these was 9 with ok=0 failed=$concCount, IOException 0x800700B7)"
+Check 'S12.21d each concurrent run reported a full success (no name-race failure)' `
+  (($concTextA -match 'convert summary: ') -and ($concTextB -match 'convert summary: ') -and `
+   ($concTextA -match [regex]::Escape("$CHECKMARK $concCount  (ok=$concCount failed=0)")) -and `
+   ($concTextB -match [regex]::Escape("$CHECKMARK $concCount  (ok=$concCount failed=0)"))) `
+  "A='$(Get-SummaryLine $concTextA)' B='$(Get-SummaryLine $concTextB)'"
+Check 'S12.21e no source lost an output (2 files each, no overwrite, no .tmp-* left)' `
+  (($concTotal -eq ($concCount * 2)) -and ($concShort -eq 0) -and ($concLeftover -eq 0)) `
+  "png=$concTotal expected=$($concCount * 2) sourcesShort=$concShort tmpLeftovers=$concLeftover"
+
+# ---- two WORKERS alive at the same time (spec 9.1: one worker per job) --------
+# Spawned directly, one named pipe each, exactly as ConversionClient does it.
+# The OLD code handed both the same worker.log; Evidence opened it exclusively,
+# so the second one died before connecting (measured: exit with
+# "Unhandled exception System.IO.IOException ... Evidence.cs:34").
+$wkPipeA = 'm1d-conc-a-' + [Guid]::NewGuid().ToString('N')
+$wkPipeB = 'm1d-conc-b-' + [Guid]::NewGuid().ToString('N')
+$wkSrvA = New-Object System.IO.Pipes.NamedPipeServerStream($wkPipeA, [System.IO.Pipes.PipeDirection]::InOut, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
+$wkSrvB = New-Object System.IO.Pipes.NamedPipeServerStream($wkPipeB, [System.IO.Pipes.PipeDirection]::InOut, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
+$wkTaskA = $wkSrvA.WaitForConnectionAsync()
+$wkTaskB = $wkSrvB.WaitForConnectionAsync()
+$wkErrA = Join-Path $concOut 'worker-a.err'
+$wkErrB = Join-Path $concOut 'worker-b.err'
+$wkShared = Join-Path $env:LOCALAPPDATA 'Confern\worker.log'
+$wkStarted = Get-Date
+# No --log: the worker owns its evidence path (this is what the client relies on).
+$wkA = Start-Process -FilePath $Exe -ArgumentList @('--worker', $wkPipeA, '--quiet') -PassThru -RedirectStandardError $wkErrA -WindowStyle Hidden
+$wkB = Start-Process -FilePath $Exe -ArgumentList @('--worker', $wkPipeB, '--quiet') -PassThru -RedirectStandardError $wkErrB -WindowStyle Hidden
+$wkOkA = $wkTaskA.Wait(8000)
+$wkOkB = $wkTaskB.Wait(8000)
+$wkErrTextA = if ((Test-Path $wkErrA) -and (Get-Item $wkErrA).Length -gt 0) { (Get-Content -LiteralPath $wkErrA -Encoding UTF8) -join "`n" } else { '' }
+$wkErrTextB = if ((Test-Path $wkErrB) -and (Get-Item $wkErrB).Length -gt 0) { (Get-Content -LiteralPath $wkErrB -Encoding UTF8) -join "`n" } else { '' }
+try { $wkSrvA.Dispose() } catch { }
+try { $wkSrvB.Dispose() } catch { }
+foreach ($wp in @($wkA, $wkB)) {
+  try { $wp.WaitForExit(3000) | Out-Null } catch { }
+  if (-not $wp.HasExited) { try { $wp.Kill() } catch { } }
+}
+$wkSharedText = if (Test-Path -LiteralPath $wkShared) { (Get-Content -LiteralPath $wkShared -Encoding UTF8) -join "`n" } else { '' }
+$wkSharedFresh = $false
+if (Test-Path -LiteralPath $wkShared) { $wkSharedFresh = (Get-Item -LiteralPath $wkShared).LastWriteTime -ge $wkStarted }
+$wkPerJob = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Confern') -Filter 'worker-*.log' -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.LastWriteTime -ge $wkStarted })
+
+Check 'S12.21f two workers at the same time BOTH connect (one evidence file each)' `
+  ($wkOkA -and $wkOkB -and ($wkErrTextA -notmatch 'Unhandled exception') -and ($wkErrTextB -notmatch 'Unhandled exception')) `
+  "connectedA=$wkOkA connectedB=$wkOkB perJobLogsThisRun=$($wkPerJob.Count) (before the fix the second worker died in its Evidence constructor)"
+Check 'S12.21g both workers wrote their OWN evidence file (no shared exclusive path)' `
+  ($wkPerJob.Count -ge 2) "worker-*.log written during this check = $($wkPerJob.Count)"
+Check 'S12.21h the shared worker.log is THIS run and readable (the existing readers keep working)' `
+  (($wkSharedText -match 'worker: ready protocolVersion=') -and $wkSharedFresh) `
+  "freshLog=$wkSharedFresh hasReadyLine=$([bool]($wkSharedText -match 'worker: ready protocolVersion='))"
 
 "=== result ==="
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"

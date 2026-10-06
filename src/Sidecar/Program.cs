@@ -65,8 +65,30 @@ internal static class Program
         // M1e：worker 行程（規格 §9.1）。它不建視窗、不裝勾子、不碰 UI，只轉檔。
         if (!string.IsNullOrEmpty(opt.WorkerPipe))
         {
-            using var workerEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
-            return WorkerServer.Run(opt.WorkerPipe, workerEvidence);
+            // 證據檔：**一個 worker 一個檔**。以前是全部共用 `worker.log`，而 Evidence 以
+            // 獨占模式開啟它 ⇒ 第二個同時存在的 worker 一開檔就炸（見 WorkerLog 的說明）。
+            // `--log` 有指定時照舊不覆蓋（那是呼叫端明確要的路徑，而鏡射仍然會維護共用名——
+            // 讀取者要的是那個穩定檔名，而不是「誰寫的」）。
+            string workerLog = opt.LogPath ?? WorkerLog.ForJob(opt.WorkerPipe);
+            // 一個工作一個檔，所以要有上限：清掉 7 天前的舊檔。用年齡而不是「保留最新 N 個」，
+            // 因為後者會刪到**正在跑**的 worker 的檔案（見 WorkerLog.PruneStale）。
+            WorkerLog.PruneStale(TimeSpan.FromDays(7));
+            var workerEvidence = new Evidence(workerLog, opt.Quiet);
+            var workerMirror = new WorkerLog.Mirror(workerLog, WorkerLog.SharedPath(),
+                                                    opt.WorkerPipe, workerEvidence.Line);
+            workerEvidence.Mirrored += workerMirror.Flush;
+            try
+            {
+                // ⚠ 處置順序：`Evidence` 最後那一行（`=== session end ===`）在 Dispose 裡寫，
+                // 而它會觸發鏡射。鏡射因此必須**比證據晚**被停用，否則共用檔會少一個結尾。
+                // 這一層 try/finally 就是那個順序的唯一保證。
+                return WorkerServer.Run(opt.WorkerPipe, workerEvidence);
+            }
+            finally
+            {
+                workerEvidence.Dispose();
+                workerMirror.Dispose();
+            }
         }
 
         if (!string.IsNullOrEmpty(opt.ProgressDump))

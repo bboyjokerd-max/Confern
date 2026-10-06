@@ -56,9 +56,10 @@ internal sealed class ConversionEngine
         if (extension == null) return Fail(sourcePath, ConversionError.TargetUnavailable, "no extension for target");
 
         string targetPath;
+        var triedNames = new List<string>();
         try
         {
-            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, triedNames);
             // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**：
             // 靜默的回退會讓使用者以為設定生效了，然後找不到檔案（規格 §9.5）。
             if (!string.IsNullOrWhiteSpace(targetDirectory)
@@ -74,7 +75,7 @@ internal sealed class ConversionEngine
             return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
         }
 
-        // 5) 解碼一次，然後寫入（最多 3 次：防毒／同步軟體會短暫鎖檔，規格 §7.1）
+        // 5) 解碼一次，然後寫入（重試規則見 WriteWithCollisionRetry）
         BitmapSource frame;
         int frameCount;
         try
@@ -108,41 +109,24 @@ internal sealed class ConversionEngine
             _log($"orientation: EXIF={orientation} kept as metadata for {targetFormat} (its viewers honour the tag)");
         }
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        long written = 0;
+        var convertTimer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
         {
-            try
-            {
-                long written = 0;
-                var convertTimer = System.Diagnostics.Stopwatch.StartNew();
-                AtomicWriter.Write(targetPath, stream =>
-                {
-                    EncodeWithMetadataFallback(frame, sourcePath, targetFormat, quality, stream, bakedOrientation);
-                    written = stream.Length;
-                }, journal);
-                convertTimer.Stop();
+            EncodeWithMetadataFallback(frame, sourcePath, targetFormat, quality, stream, bakedOrientation);
+            written = stream.Length;
+        }, tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList()),
+           out targetPath);
+        convertTimer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
 
-                // 逐檔耗時要看得見：規格 §9.3 有「5 MB JPG→PNG < 800 ms」的預算，
-                // 沒有這個數字就只能靠感覺，而感覺沒辦法發現退化。
-                _log($"converted {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
-                     $"({sourceFormat}->{targetFormat}, {written}B, quality={quality}, " +
-                     $"{convertTimer.Elapsed.TotalMilliseconds:F0} ms)");
-                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-                    $"{written}B in {convertTimer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
-            }
-            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
-            {
-                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
-                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
-                Thread.Sleep(150 * attempt);
-            }
-            catch (Exception ex)
-            {
-                return Fail(sourcePath, ClassifyWriteFailure(ex),
-                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
-            }
-        }
-
-        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+        // 逐檔耗時要看得見：規格 §9.3 有「5 MB JPG→PNG < 800 ms」的預算，
+        // 沒有這個數字就只能靠感覺，而感覺沒辦法發現退化。
+        _log($"converted {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+             $"({sourceFormat}->{targetFormat}, {written}B, quality={quality}, " +
+             $"{convertTimer.Elapsed.TotalMilliseconds:F0} ms)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{written}B in {convertTimer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
     }
 
     /// <summary>
@@ -228,40 +212,23 @@ internal sealed class ConversionEngine
         _log($"rotate90: {Path.GetFileName(sourcePath)} {w0}x{h0} -> {frame.PixelWidth}x{frame.PixelHeight} " +
              $"({sourceFormat}, quality=100, re-encode)");
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        long written = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
         {
-            try
-            {
-                long written = 0;
-                var timer = System.Diagnostics.Stopwatch.StartNew();
-                AtomicWriter.Write(targetPath, stream =>
-                {
-                    // bakedOrientation: true → 方向已烤進像素，所以 EXIF tag 要被中和成 1，
-                    // 否則會遵循 tag 的檢視器會再轉一次（旋轉工具尤其致命）。
-                    EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, 100, stream, bakedOrientation: true);
-                    written = stream.Length;
-                }, journal);
-                timer.Stop();
+            // bakedOrientation: true → 方向已烤進像素，所以 EXIF tag 要被中和成 1，
+            // 否則會遵循 tag 的檢視器會再轉一次（旋轉工具尤其致命）。
+            EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, 100, stream, bakedOrientation: true);
+            written = stream.Length;
+        }, tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList()),
+           out targetPath);
+        timer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
 
-                _log($"rotated {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
-                     $"({written}B, {timer.Elapsed.TotalMilliseconds:F0} ms)");
-                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-                    $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
-            }
-            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
-            {
-                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
-                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
-                Thread.Sleep(150 * attempt);
-            }
-            catch (Exception ex)
-            {
-                return Fail(sourcePath, ClassifyWriteFailure(ex),
-                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
-            }
-        }
-
-        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+        _log($"rotated {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+             $"({written}B, {timer.Elapsed.TotalMilliseconds:F0} ms)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
     }
 
     /// <summary>
@@ -332,72 +299,59 @@ internal sealed class ConversionEngine
                  $"before dropping the tag (the container path would leave the image sideways)");
         }
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        long written = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
         {
-            try
+            if (lossless)
             {
-                long written = 0;
-                var timer = System.Diagnostics.Stopwatch.StartNew();
-                AtomicWriter.Write(targetPath, stream =>
+                JpegMetadataStrip.Result stripped = JpegMetadataStrip.Strip(sourcePath, stream);
+                if (stripped.Parsed)
                 {
-                    if (lossless)
-                    {
-                        JpegMetadataStrip.Result stripped = JpegMetadataStrip.Strip(sourcePath, stream);
-                        if (stripped.Parsed)
-                        {
-                            _log($"strip-metadata: {Path.GetFileName(sourcePath)} container path " +
-                                 $"(jpeg) removed {stripped.RemovedSummary} ({stripped.RemovedBytes}B), " +
-                                 $"scan data copied verbatim");
-                            if (stripped.RemovedSegments == 0)
-                                _log($"strip-metadata: note: {Path.GetFileName(sourcePath)} carried no " +
-                                     "metadata segment at all; the output is the source, byte for byte");
-                        }
-                        else
-                        {
-                            // 走不下去就退回重編碼——**但先說出來**。半成品留在輸出流裡的話，
-                            // 使用者會拿到一個截斷的檔案，那比慢一點嚴重得多。
-                            _log($"strip-metadata: container path failed ({stripped.Detail}) -> " +
-                                 "falling back to decode + re-encode");
-                            stream.SetLength(0);
-                            stream.Position = 0;
-                            StripByReencode(sourcePath, sourceFormat, stream);
-                        }
-                    }
-                    else
-                    {
-                        StripByReencode(sourcePath, sourceFormat, stream);
-                    }
-                    written = stream.Length;
-                }, journal);
-                timer.Stop();
-
-                _log($"stripped {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
-                     $"({written}B, {(lossless ? "container" : "re-encode")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
-                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-                    $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
-            }
-            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
-            {
-                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
-                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
-                Thread.Sleep(150 * attempt);
-            }
-            catch (Exception ex)
-            {
-                // 備援路徑上的**解碼**失敗要沿用解碼的分類（規格 §7.1 的訊息不可以因為
-                // 「這一條是備援」就降級成 Unknown）。
-                if (ex is StripDecodeFailure decodeFailure && decodeFailure.InnerException is { } inner)
-                {
-                    return Fail(sourcePath,
-                        MapDecodeStatus(CodecRegistry.ClassifyDecodeException(inner, sourceFormat, sourcePath)),
-                        $"{inner.GetType().Name}: {inner.Message}");
+                    _log($"strip-metadata: {Path.GetFileName(sourcePath)} container path " +
+                         $"(jpeg) removed {stripped.RemovedSummary} ({stripped.RemovedBytes}B), " +
+                         $"scan data copied verbatim");
+                    if (stripped.RemovedSegments == 0)
+                        _log($"strip-metadata: note: {Path.GetFileName(sourcePath)} carried no " +
+                             "metadata segment at all; the output is the source, byte for byte");
                 }
-                return Fail(sourcePath, ClassifyWriteFailure(ex),
-                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
+                else
+                {
+                    // 走不下去就退回重編碼——**但先說出來**。半成品留在輸出流裡的話，
+                    // 使用者會拿到一個截斷的檔案，那比慢一點嚴重得多。
+                    _log($"strip-metadata: container path failed ({stripped.Detail}) -> " +
+                         "falling back to decode + re-encode");
+                    stream.SetLength(0);
+                    stream.Position = 0;
+                    StripByReencode(sourcePath, sourceFormat, stream);
+                }
             }
-        }
+            else
+            {
+                StripByReencode(sourcePath, sourceFormat, stream);
+            }
+            written = stream.Length;
+        }, tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList()),
+           out targetPath, StripFailure);
+        timer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
 
-        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+        _log($"stripped {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+             $"({written}B, {(lossless ? "container" : "re-encode")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
+
+        // 備援路徑上的**解碼**失敗要沿用解碼的分類（規格 §7.1 的訊息不可以因為
+        // 「這一條是備援」就降級成 Unknown）；其餘照寫入失敗分類。
+        (ConversionError, string) StripFailure(Exception ex)
+        {
+            if (ex is StripDecodeFailure decodeFailure && decodeFailure.InnerException is { } inner)
+            {
+                return (MapDecodeStatus(CodecRegistry.ClassifyDecodeException(inner, sourceFormat, sourcePath)),
+                        $"{inner.GetType().Name}: {inner.Message}");
+            }
+            return (ClassifyWriteFailure(ex), $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -558,49 +512,32 @@ internal sealed class ConversionEngine
             }
         }
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        long written = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
         {
-            try
+            if (precomputed == null)
             {
-                long written = 0;
-                var timer = System.Diagnostics.Stopwatch.StartNew();
-                AtomicWriter.Write(targetPath, stream =>
-                {
-                    if (precomputed == null)
-                    {
-                        EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, quality, stream, bakedOrientation);
-                    }
-                    else
-                    {
-                        // 搜尋／量測階段編出來的位元組**原封不動**寫出：重新編一次會得到同樣的位元組
-                        // （編碼器是決定性的），但「量到的」與「寫出的」就不再是同一個東西了。
-                        stream.Write(precomputed, 0, precomputed.Length);
-                    }
-                    written = stream.Length;
-                }, journal);
-                timer.Stop();
+                EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, quality, stream, bakedOrientation);
+            }
+            else
+            {
+                // 搜尋／量測階段編出來的位元組**原封不動**寫出：重新編一次會得到同樣的位元組
+                // （編碼器是決定性的），但「量到的」與「寫出的」就不再是同一個東西了。
+                stream.Write(precomputed, 0, precomputed.Length);
+            }
+            written = stream.Length;
+        }, tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList()),
+           out targetPath);
+        timer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
 
-                _log($"compressed {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
-                     $"({sourceFormat}, mode={policy.Mode}, quality={quality}, " +
-                     $"{beforeBytes}B -> {written}B" +
-                     $"{(target > 0 ? $", target={target}B" : "")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
-                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-                    $"{beforeBytes}B -> {written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
-            }
-            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
-            {
-                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
-                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
-                Thread.Sleep(150 * attempt);
-            }
-            catch (Exception ex)
-            {
-                return Fail(sourcePath, ClassifyWriteFailure(ex),
-                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
-            }
-        }
-
-        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+        _log($"compressed {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+             $"({sourceFormat}, mode={policy.Mode}, quality={quality}, " +
+             $"{beforeBytes}B -> {written}B" +
+             $"{(target > 0 ? $", target={target}B" : "")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{beforeBytes}B -> {written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
     }
 
     /// <summary>
@@ -738,41 +675,23 @@ internal sealed class ConversionEngine
                 $"{ex.GetType().Name}: {ex.Message}");
         }
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        long written = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
         {
-            try
-            {
-                long written = 0;
-                var timer = System.Diagnostics.Stopwatch.StartNew();
-                AtomicWriter.Write(targetPath, stream =>
-                {
-                    EncodeWithMetadataFallback(cropped, sourcePath, sourceFormat, 100, stream, bakedOrientation);
-                    written = stream.Length;
-                }, journal);
-                timer.Stop();
+            EncodeWithMetadataFallback(cropped, sourcePath, sourceFormat, 100, stream, bakedOrientation);
+            written = stream.Length;
+        }, CollisionCrop(sourcePath, extension, targetDirectory), out targetPath);
+        timer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
 
-                // ⚠ 這一行的格式是**驗收斷言的一部分**（輸入尺寸 → 輸出尺寸）。改它要先改計畫。
-                _log($"crop: {Path.GetFileName(sourcePath)} {inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
-                     $"(rect={rect.X},{rect.Y},{rect.Width},{rect.Height}, {spec.Describe()}, " +
-                     $"{sourceFormat}, quality=100, re-encode)");
-                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-                    $"{inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
-                    $"({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
-            }
-            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
-            {
-                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
-                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
-                Thread.Sleep(150 * attempt);
-            }
-            catch (Exception ex)
-            {
-                return Fail(sourcePath, ClassifyWriteFailure(ex),
-                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
-            }
-        }
-
-        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+        // ⚠ 這一行的格式是**驗收斷言的一部分**（輸入尺寸 → 輸出尺寸）。改它要先改計畫。
+        _log($"crop: {Path.GetFileName(sourcePath)} {inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
+             $"(rect={rect.X},{rect.Y},{rect.Width},{rect.Height}, {spec.Describe()}, " +
+             $"{sourceFormat}, quality=100, re-encode)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
+            $"({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
     }
 
     /// <summary>「壓縮到」的搜尋結果。</summary>
@@ -1121,6 +1040,126 @@ internal sealed class ConversionEngine
         IOException => ConversionError.Unreadable,
         _ => ConversionError.Unknown
     };
+
+    /// <summary>
+    /// 寫入迴圈——**五條轉檔路徑唯一的重試擁有者**。
+    ///
+    /// 兩種失敗必須分開處理，混在一起就是 2026-10-06 量到的那個缺陷：
+    /// <list type="number">
+    /// <item><b>名字被搶走</b>（`ERROR_ALREADY_EXISTS`，0x800700B7）：另一個行程在
+    /// <see cref="NamingPolicy"/> 選名與 <c>File.Move</c> 之間的那個窗口裡拿走了同一個檔名。
+    /// 這是**可修復**的——把那個名字記進 <paramref name="exclude"/>，換下一個候選名再試一次。
+    /// 修不好也不可以說成「無法讀取來源檔案」：來源好好的，說錯原因會把使用者送去
+    /// 檢查一個沒有問題的檔案。</item>
+    /// <item><b>暫時被鎖住</b>（`SHARING_VIOLATION`／`LOCK_VIOLATION`，0x20／0x21）：
+    /// 防毒與同步軟體會短暫鎖檔，等一下就過了（規格 §7.1）。</item>
+    /// </list>
+    ///
+    /// ⚠ 沒有 <paramref name="exclude"/> 就沒有重試可言：下一次
+    /// <paramref name="resolve"/> 會**再選回同一個名字**，然後永遠失敗。
+    /// </summary>
+    /// <param name="resolve">
+    /// 由「已經試過的名字」算出下一個候選完整路徑。每一個 op 有自己的命名規則
+    /// （`crop` 保持來源格式、其餘走 <see cref="NamingPolicy"/>），所以由呼叫端帶進來；
+    /// **重試的規則本身則留在這裡一份**。
+    /// </param>
+    /// <param name="classify">
+    /// 失敗分類。預設是 <see cref="ClassifyWriteFailure"/>；`strip-metadata` 例外，它的備援
+    /// 路徑（容器層失敗 → 解碼＋重編碼）會拋 <c>StripDecodeFailure</c>，那一種要沿用**解碼**
+    /// 的分類（規格 §7.1 的訊息不可以因為「這一條是備援」就降級）。預設值讓這條規則只有
+    /// 一個地方要維護，而不是每個 op 各抄一份。
+    /// </param>
+    private ConversionResult WriteWithCollisionRetry(
+        string sourcePath, string firstTargetPath, TempJournal? journal,
+        Action<Stream> writeContent, Func<IReadOnlyCollection<string>, string> resolve,
+        out string finalPath, Func<Exception, (ConversionError Error, string Detail)>? classify = null)
+    {
+        Func<Exception, (ConversionError Error, string Detail)> failure =
+            classify ?? (ex => (ClassifyWriteFailure(ex),
+                                $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}"));
+        var tried = new List<string>();
+        string targetPath = firstTargetPath;
+        int transient = 0;
+
+        for (int attempt = 1; attempt <= MaxWriteAttempts; attempt++)
+        {
+            try
+            {
+                AtomicWriter.Write(targetPath, writeContent, journal);
+                finalPath = targetPath;
+                return new ConversionResult(sourcePath, targetPath, ConversionError.None, targetPath);
+            }
+            catch (Exception ex) when (IsNameTaken(ex) && attempt < MaxWriteAttempts)
+            {
+                tried.Add(targetPath);
+                _log($"write retry {attempt}/{MaxWriteAttempts} for {Path.GetFileName(sourcePath)}: " +
+                     $"the output name '{Path.GetFileName(targetPath)}' was taken by another process " +
+                     $"({ex.GetType().Name} 0x{ex.HResult:X8}) -> picking another name " +
+                     "(a second --convert, or the resident Confern, is writing the same folder)");
+                string next = resolve(tried);
+                if (string.Equals(next, targetPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    // 算不出別的名字就別裝作還在重試——重試同一個名字一百次也不會過。
+                    finalPath = targetPath;
+                    return Fail(sourcePath, ConversionError.WriteConflict,
+                        $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message} " +
+                        "(the name resolver returned the same name again)");
+                }
+                targetPath = next;
+            }
+            catch (Exception ex) when (IsTransient(ex) && transient < MaxTransientRetries)
+            {
+                transient++;
+                _log($"write retry {transient}/{MaxTransientRetries} for {Path.GetFileName(targetPath)}: " +
+                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                Thread.Sleep(150 * transient);
+            }
+            catch (Exception ex)
+            {
+                finalPath = targetPath;
+                (ConversionError error, string detail) = failure(ex);
+                return Fail(sourcePath, error, detail);
+            }
+        }
+
+        finalPath = targetPath;
+        // name conflicts and lock waits share one budget, so say which one ran out.
+        return transient >= MaxTransientRetries
+            ? Fail(sourcePath, ConversionError.Locked, "still locked after " + MaxTransientRetries + " attempts")
+            : Fail(sourcePath, ConversionError.WriteConflict,
+                   ConversionErrorNameConflictDetail(targetPath));
+    }
+
+    private static string ConversionErrorNameConflictDetail(string lastTried) =>
+        $"every candidate name up to '{Path.GetFileName(lastTried)}' was taken by another process";
+
+    /// <summary>
+    /// 「這個檔名剛剛被別人拿走了」——**用 Win32 錯誤碼判斷，不看訊息文字**。
+    ///
+    /// <c>File.Move(overwrite: false)</c> 在目標已存在時給的是 0x800700B7
+    /// （`ERROR_ALREADY_EXISTS`）；0x80070050 是 `ERROR_FILE_EXISTS`，是同一件事的另一個入口。
+    /// 這兩個都**必須**走「換名字重試」，而不是走 <see cref="IsTransient"/> 的「等一下再試同一個名字」。
+    /// </summary>
+    private static bool IsNameTaken(Exception ex) =>
+        ex is IOException io && (io.HResult == unchecked((int)0x800700B7)
+                              || io.HResult == unchecked((int)0x80070050));
+
+    /// <summary>重試預算。名字衝突會把每一個候選都試過一輪，所以它比暫時性重試寬。</summary>
+    private const int MaxWriteAttempts = 8;
+    private const int MaxTransientRetries = 3;
+
+    /// <summary>
+    /// `crop` 的命名規則與 <see cref="Convert"/> 不同：輸出**保持來源格式**
+    /// （副檔名與來源相同），所以不能用目標格式的副檔名再算一次。
+    /// 這裡仍然只呼叫 <see cref="NamingPolicy"/>——命名規則不得有第二份實作。
+    ///
+    /// <paramref name="extension"/> 由呼叫端把它**已經算好的那一個**傳進來：
+    /// 這裡自己再從格式推一次就是第二份「來源格式 → 副檔名」的規則，而兩份一旦不同步，
+    /// 重試時算出來的名字就會與第一次不同（例如 `.jpg` vs `.JPG`），使用者會看到兩個不同的檔。
+    /// </summary>
+    private static Func<IReadOnlyCollection<string>, string> CollisionCrop(
+        string sourcePath, string extension, string? targetDirectory) =>
+        tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList());
 
     private static ConversionResult Fail(string sourcePath, ConversionError error, string detail) =>
         new(sourcePath, null, error, detail);
