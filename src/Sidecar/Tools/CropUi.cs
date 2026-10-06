@@ -399,6 +399,25 @@ internal static class CropUi
         return (scale, left, top);
     }
 
+    /// <summary>
+    /// 一個**畫面座標**在影像座標裡是多少（走視窗自己真正的換算 <see cref="CropWindow.SelfTestStageToImage"/>）。
+    /// 全部是 0＝沒有視窗。自測要斷言「新框的錨點＝起點」時，起點的影像座標只有這一個來源。
+    /// </summary>
+    public static (double X, double Y) SelfTestStageToImage(double stageX, double stageY)
+    {
+        double x = 0, y = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest stage->image", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            System.Windows.Point p = window.SelfTestStageToImage(new System.Windows.Point(stageX, stageY));
+            x = p.X;
+            y = p.Y;
+            return null;
+        });
+        return (x, y);
+    }
+
     /// <summary>一句話的狀態（含 hwnd 與矩形的像素值／正規化值）。</summary>
     public static string SelfTestState()
     {

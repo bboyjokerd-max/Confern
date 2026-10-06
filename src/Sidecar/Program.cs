@@ -2852,6 +2852,62 @@ internal static class App
         evidence.Line($"crop ui selftest: a second open while the window is up was " +
                       $"{(singleInstance ? "ignored (single instance)" : "ACCEPTED (two windows!)")}");
 
+        // ③-0 在**剛開好的視窗**上拖曳（矩形＝整張圖）。這是使用者開窗後第一個會做的動作，
+        // 而它原本是**壞的**：矩形＝整張圖時 BeginDrag 命中 Move，而 Move 是可證明的 no-op
+        // （ContinueDrag 的分支與收尾的 Constrain 都把位置夾在 [0, 影像寬 − 矩形寬]，上界＝0），
+        // 所以「在照片上拖曳」什麼都不會發生。實測原始輸出（修正前，512x384／3000x2250／3000x4000
+        // 三張圖一致）：
+        //   begin from=(429.7,260) mode=Move note='' rect=0,0,512,384 | move to=(603,390) rect=0,0,512,384
+        //   | end rect=0,0,512,384
+        // 修正後在矩形**內**起手會改成 New（見 CropWindow.BeginDrag 的論證），而這些斷言釘住它。
+        //
+        // ⚠ 期望值一律由**視窗自己**推導，這一格裡沒有一個夾具數字：
+        //   · 起點／終點的影像座標＝CropUi.SelfTestStageToImage（走真正的 ToImage）；
+        //   · 畫面座標＝SelfTestStageMapping 的 scale／imageLeft／imageTop；
+        //   · 「錨點」與「對角」是由**產品回報的模式與矩形**（DragRun）反推的，
+        //     自測不自己算一次 min/max 那一套（那是第二份規則）。
+        // 只斷言「接縫跑過了」正是這個專案最怕的假綠燈：那一格在修正前也是綠的。
+        bool NewDragProducesExpectedBox(int fromImageX, int fromImageY, int toImageX, int toImageY,
+                                        out CropWindow.DragRun nRun, out string nDetail)
+        {
+            nRun = default;
+            nDetail = "(not run)";
+            (double sc, double lf, double tp) = CropUi.SelfTestStageMapping();
+            double fx = lf + fromImageX * sc, fy = tp + fromImageY * sc;
+            double tx2 = lf + toImageX * sc, ty2 = tp + toImageY * sc;
+            if (!CropUi.SelfTestDrag(fx, fy, tx2, ty2, 5000, out nRun, out string trace, lines.Enqueue))
+                return false;
+            (double axD, double ayD) = CropUi.SelfTestStageToImage(fx, fy);
+            (double bxD, double byD) = CropUi.SelfTestStageToImage(tx2, ty2);
+            int ax = (int)Math.Round(axD, MidpointRounding.AwayFromZero);
+            int ay = (int)Math.Round(ayD, MidpointRounding.AwayFromZero);
+            int bx = (int)Math.Round(bxD, MidpointRounding.AwayFromZero);
+            int by = (int)Math.Round(byD, MidpointRounding.AwayFromZero);
+            // 「錨點」與「對角」只能從**產品回報的矩形**反推：兩端點各自是矩形的一個角，
+            // 起點是錨點，另一個角是終點。四個角都試，命中哪一個就代表產品選了哪一種展開方式。
+            System.Windows.Int32Rect r = nRun.AfterEnd;
+            (int cx, int cy) = r.X == ax && r.Y == ay ? (r.X + r.Width, r.Y + r.Height)
+                            : r.X + r.Width == ax && r.Y == ay ? (r.X, r.Y + r.Height)
+                            : r.X == ax && r.Y + r.Height == ay ? (r.X + r.Width, r.Y)
+                            : (r.X, r.Y);
+            bool anchorIsStart = r.X == ax || r.X + r.Width == ax;
+            bool anchorIsStartY = r.Y == ay || r.Y + r.Height == ay;
+            bool oppositeIsEnd = cx == bx && cy == by;
+            bool differs = r.X != nRun.Before.X || r.Y != nRun.Before.Y ||
+                           r.Width != nRun.Before.Width || r.Height != nRun.Before.Height;
+            (int iw, int ih) = CropUi.SelfTestImageSizePx();
+            bool notFullFrame = !(r.Width >= iw && r.Height >= ih);
+            bool ok = nRun.Mode == "New" && differs && notFullFrame && r.Width > 0 && r.Height > 0 &&
+                      anchorIsStart && anchorIsStartY && oppositeIsEnd;
+            nDetail = $"pixels ({fromImageX},{fromImageY})->({toImageX},{toImageY}) " +
+                      $"stage ({fx:0.##},{fy:0.##})->({tx2:0.##},{ty2:0.##}) via scale={sc:0.######} " +
+                      $"imageLeft={lf} imageTop={tp} startPixel={ax},{ay} endPixel={bx},{by} " +
+                      $"before={Px(nRun.Before)} mid={Px(nRun.AfterMove)} end={Px(r)} " +
+                      $"anchorIsStart={anchorIsStart && anchorIsStartY} oppositeIsEnd={oppositeIsEnd} " +
+                      $"differs={differs} notFullFrame={notFullFrame} ok={ok} [{trace}]";
+            return ok;
+        }
+
         // ②b 設定頁與裁切視窗共用同一條 WPF 執行緒：兩個視窗同時開著互不干擾。
         string settingsPath = string.IsNullOrEmpty(opt.SettingsFile)
             ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-crop-selftest.json")
@@ -2890,6 +2946,76 @@ internal static class App
         // （那裡的最後一步是邊界取整），不是隨便挑的數字。
         CropUi.SelfTestSelectRatio(CropRatios.DefaultId, 5000, out _, lines.Enqueue);   // 前置條件：自由框
         (int imageWpx, int imageHpx) = CropUi.SelfTestImageSizePx();
+
+        // ③-0 執行那三格（宣告放在 ②b 之前：它用不到後面才宣告的 SetBaseline／DragPixels／Px，
+        // 而且它必須在「開窗之後、任何東西動過矩形之前」——見上面那一段的理由）。
+        bool seedBase = CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue);
+        bool seedFull = CropUi.SelfTestRectPx() is var seedRect &&
+                        seedRect.Width >= imageWpx && seedRect.Height >= imageHpx;
+        evidence.Line($"crop ui selftest: fresh-window seed rect={CropUi.SelfTestRectPx()} " +
+                      $"image={imageWpx}x{imageHpx} fullFrame={seedFull} set={seedBase}");
+
+        // ③-0a 從影像中心附近往**右下**拖：必須是新框，錨點在起點，往右下撐開。
+        int nbFromX = Math.Max(1, imageWpx / 6), nbFromY = Math.Max(1, imageHpx / 6);
+        int nbToX = Math.Min(imageWpx - 1, imageWpx / 2), nbToY = Math.Min(imageHpx - 1, imageHpx / 2);
+        bool newDownOk = seedFull && seedBase;
+        CropWindow.DragRun newDown = default;
+        string newDownDetail = "(not run)";
+        if (newDownOk)
+            newDownOk = NewDragProducesExpectedBox(nbFromX, nbFromY, nbToX, nbToY,
+                                                   out newDown, out newDownDetail);
+        evidence.Line($"crop ui selftest: NEW box drag from inside the photo towards the bottom-right: " +
+                      $"mode={newDown.Mode} before={newDown.Before.X},{newDown.Before.Y}," +
+                      $"{newDown.Before.Width},{newDown.Before.Height} afterBegin={newDown.AfterBegin.X}," +
+                      $"{newDown.AfterBegin.Y},{newDown.AfterBegin.Width},{newDown.AfterBegin.Height} " +
+                      $"afterEnd={newDown.AfterEnd.X},{newDown.AfterEnd.Y},{newDown.AfterEnd.Width}," +
+                      $"{newDown.AfterEnd.Height} ok={newDownOk} ({newDownDetail})");
+
+        // ③-0b 反方向（終點在起點的**左上方**）：方向不敏感——錨點仍然在起點，往反方向撐開。
+        bool seedBase2 = CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue);
+        CropWindow.DragRun newUp = default;
+        string newUpDetail = "(not run)";
+        bool newUpOk = seedBase2 &&
+                       NewDragProducesExpectedBox(nbToX, nbToY, nbFromX, nbFromY,
+                                                  out newUp, out newUpDetail);
+        evidence.Line($"crop ui selftest: NEW box drag from inside the photo towards the top-left (reverse " +
+                      $"direction): mode={newUp.Mode} before={newUp.Before.X},{newUp.Before.Y}," +
+                      $"{newUp.Before.Width},{newUp.Before.Height} afterBegin={newUp.AfterBegin.X}," +
+                      $"{newUp.AfterBegin.Y},{newUp.AfterBegin.Width},{newUp.AfterBegin.Height} " +
+                      $"afterEnd={newUp.AfterEnd.X},{newUp.AfterEnd.Y},{newUp.AfterEnd.Width}," +
+                      $"{newUp.AfterEnd.Height} ok={newUpOk} ({newUpDetail})");
+
+        // ③-0c 從照片**旁邊的空白區**拖：仍然碰得到新框（這是修正前唯一碰得到 New 的地方，
+        // 也是「不拿走既有行為」的那一格）。期望的**大小**同樣由視窗自己推導：起點在影像外面
+        // （ToImage 會夾成 0），終點是一個真正的影像像素。
+        bool newMarginOk = false;
+        string newMarginDetail = "(no blank margin; the photo fills the stage)";
+        (double mScale, double mLeft, double mTop) = CropUi.SelfTestStageMapping();
+        if (mLeft >= 3 && CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue))
+        {
+            double mFromX = mLeft / 2.0, mFromY = mTop + imageHpx / 2.0 * mScale;
+            double mToX = mLeft + Math.Max(2, imageWpx / 20) * mScale;
+            double mToY = mTop + (imageHpx / 2 + Math.Max(2, imageHpx / 20)) * mScale;
+            (double mAxD, double mAyD) = CropUi.SelfTestStageToImage(mFromX, mFromY);
+            (double mBxD, double mByD) = CropUi.SelfTestStageToImage(mToX, mToY);
+            int mAx = (int)Math.Round(mAxD, MidpointRounding.AwayFromZero);
+            int mAy = (int)Math.Round(mAyD, MidpointRounding.AwayFromZero);
+            int mBx = (int)Math.Round(mBxD, MidpointRounding.AwayFromZero);
+            int mBy = (int)Math.Round(mByD, MidpointRounding.AwayFromZero);
+            bool mRan = CropUi.SelfTestDrag(mFromX, mFromY, mToX, mToY, 5000,
+                                            out CropWindow.DragRun mRun, out string mTrace, lines.Enqueue);
+            System.Windows.Int32Rect mr = mRun.AfterEnd;
+            bool mExpected = mr.X == mAx && mr.Y == mAy && mr.Width == mBx - mAx && mr.Height == mBy - mAy;
+            newMarginOk = mRan && mRun.Mode == "New" && mExpected && mBx > mAx && mBy > mAy;
+            newMarginDetail = $"stage ({mFromX:0.##},{mFromY:0.##})->({mToX:0.##},{mToY:0.##}) " +
+                              $"startPixel={mAx},{mAy} endPixel={mBx},{mBy} before={mRun.Before.X}," +
+                              $"{mRun.Before.Y},{mRun.Before.Width},{mRun.Before.Height} end={mr.X},{mr.Y}," +
+                              $"{mr.Width},{mr.Height} mode={mRun.Mode} expected={mAx},{mAy},{mBx - mAx}," +
+                              $"{mBy - mAy} ok={newMarginOk} [{mTrace}]";
+        }
+        evidence.Line($"crop ui selftest: NEW box drag starting in the blank margin beside the photo: " +
+                      $"ok={newMarginOk} ({newMarginDetail})");
+        bool newDragOk = newDownOk && newUpOk && newMarginOk;
 
         // 自測拖曳用的三個小工具。座標全部是**影像像素**。
         //   ① SetBaseline：給視窗一個已知、置中、**不貼齊夾邊界**的矩形，並讀回視窗自己報的像素值。
@@ -3103,13 +3229,14 @@ internal static class App
         while (lines.TryDequeue(out string? buffered)) evidence.Line(buffered);
 
         bool ok = opened && windowPresent && singleInstance && settingsOpen && cropStillThere
-                  && dragged && clampOk && resizeOk && ratiosOk && fullSet && fullRefused && tinyClamped
+                  && dragged && clampOk && resizeOk && newDragOk && ratiosOk && fullSet && fullRefused && tinyClamped
                   && finalSet && closed && handedOverMatches
                   && closedByCancel && cancelGaveNothing
                   && reopened && reopenedPresent;
         evidence.Line($"crop ui selftest done: ok={ok} (opened={opened} windowPresent={windowPresent} " +
                       $"singleInstance={singleInstance} settingsPageCoexists={settingsOpen && cropStillThere} " +
                       $"programmaticDrag={dragged} clampedDrag={clampOk} handleDrag={resizeOk} " +
+                      $"newBoxDrag={newDragOk} (down={newDownOk} reverse={newUpOk} margin={newMarginOk}) " +
                       $"ratioPresetsOk={ratiosOk} " +
                       $"fullFrameRefused={fullRefused} subPixelClamped={tinyClamped} " +
                       $"confirmedClosed={closed} confirmedMatches={handedOverMatches} " +

@@ -506,6 +506,26 @@ internal sealed class CropWindow : Window
         bool insideX = x >= left - HandleHitPx && x <= right + HandleHitPx;
         bool insideY = y >= top - HandleHitPx && y <= bottom + HandleHitPx;
 
+        // 命中的是「搬移」還是「重畫」，只在矩形**還有地方可以搬**的時候才由「在矩形內」決定。
+        //
+        // ⚠ 實測（2026-10-06）：開窗時矩形＝整張圖（見建構子），此時 Move 是**可證明的 no-op**
+        // ——ContinueDrag 的 Move 分支與收尾的 Constrain 都把位置夾在
+        // [0, 影像寬 − 矩形寬]，矩形＝整張圖時這個上界＝0，所以每個方向的位移都被夾成 0。
+        // 於是「在照片上拖曳」＝什麼都不會發生。副標卻寫著「在圖上拖一個矩形（可移動、可拉四邊與四角）」，
+        // 而這是使用者開窗後第一個會做的動作：
+        //   begin from=(429.7,260) mode=Move rect=0,0,512,384 | move to=(603,390) rect=0,0,512,384
+        //   （3000x2250／3000x4000 的圖同樣一動也不動；只有左右黑邊的空白區碰得到 New）
+        //
+        // 兩個軸向都貼滿 ⇒ Move 注定是 no-op，所以在矩形**內**起手就改用 New（在該點開一個新框）。
+        // 這不是「改掉使用者要的設計」：被換掉的是一個可證明不會改變任何東西的模式，
+        // 沒有任何現有可用行為被拿走——「搬移會改變矩形」「拖到邊界會夾住」「拉把手會縮放」
+        // 全部只在矩形搬得動的時候才可能發生，而那些情形的判定結果與改動前完全相同。
+        //
+        // ⚠ 判斷必須涵蓋「只貼滿**一個**軸向」的情形，不能只看單一軸：滿寬的橫帶在垂直方向
+        // 仍然搬得動（上界 > 0），必須繼續是 Move；把它誤判成 New 就會把一個**真的有用**的
+        // 搬移換掉，那才是拿走了使用者的行為。
+        bool moveCanChange = _imageWidth - _rect.Width > 0 && _imageHeight - _rect.Height > 0;
+
         _dragMode =
             nearLeft && nearTop ? DragMode.TopLeft :
             nearRight && nearTop ? DragMode.TopRight :
@@ -515,7 +535,7 @@ internal sealed class CropWindow : Window
             nearRight && insideY ? DragMode.Right :
             nearTop && insideX ? DragMode.Top :
             nearBottom && insideX ? DragMode.Bottom :
-            (insideX && insideY && _rect.Width > 2 && _rect.Height > 2) ? DragMode.Move :
+            (insideX && insideY && _rect.Width > 2 && _rect.Height > 2 && moveCanChange) ? DragMode.Move :
             DragMode.New;
 
         _dragStartImage = image;
@@ -560,11 +580,20 @@ internal sealed class CropWindow : Window
                 int left = r.X, top = r.Y, right = r.X + r.Width, bottom = r.Y + r.Height;
                 if (_dragMode is DragMode.New)
                 {
-                    // 新畫：起點固定，另一個角跟著滑鼠走（方向由 dx／dy 的正負決定）
-                    left = Math.Min(_dragStartRect.X, _dragStartRect.X + dx);
-                    top = Math.Min(_dragStartRect.Y, _dragStartRect.Y + dy);
-                    right = Math.Max(_dragStartRect.X, _dragStartRect.X + dx);
-                    bottom = Math.Max(_dragStartRect.Y, _dragStartRect.Y + dy);
+                    // 新畫：起點固定，另一個角跟著滑鼠走（方向由 dx／dy 的正負決定）。
+                    // ⚠ 錨點是**拖曳起點那一個 1x1 矩形**（BeginDrag 在 New 這條路上把 _rect 設成它），
+                    // 不是 _dragStartRect——後者刻意是**拖曳之前**的矩形（Move 分支要用它當基準），
+                    // 在 New 這條路上它是「上一個矩形」。
+                    // 實測（2026-10-06，修正前）：錨點誤用 _dragStartRect，於是新框的四個角變成
+                    // 「舊矩形的角 ＋ 位移」，而不是「起點 ＋ 位移」。矩形＝整張圖時舊矩形的角是 0,0，
+                    // 所以從影像中心 (85,64) 往右下拖到 (256,192) 得到的不是 85,64,171,128 而是
+                    // 0,0,171,128：**位置永遠是 0,0**，等於新框的上緣／左緣被釘在影像左上角。
+                    // 這正是「在圖上拖一個矩形」在畫面上看起來像「框從左上角長出來」的原因。
+                    Int32Rect anchor = _rect;
+                    left = Math.Min(anchor.X, anchor.X + dx);
+                    top = Math.Min(anchor.Y, anchor.Y + dy);
+                    right = Math.Max(anchor.X, anchor.X + dx);
+                    bottom = Math.Max(anchor.Y, anchor.Y + dy);
                 }
                 else
                 {
@@ -843,6 +872,17 @@ internal sealed class CropWindow : Window
     /// </summary>
     public (double Scale, double ImageLeft, double ImageTop, double DisplayWidth, double DisplayHeight)
         SelfTestStageMapping() => (_scale, _imageLeft, _imageTop, _displayWidth, _displayHeight);
+
+    /// <summary>
+    /// 自測用：一個**畫面座標**在影像座標裡是多少（走的是真正的 <see cref="ToImage"/>，
+    /// 也就是拖曳用的那一條換算，不是第二份實作）。
+    ///
+    /// 為什麼需要它：「新框的錨點必須是起點、對角必須是終點」這句話要成立，自測就得知道
+    /// 「起點在影像座標裡是哪一個像素」。自測若自己算 <c>(stageX − left)/scale</c>，
+    /// 那個算式就成了第二份規則——一旦它與產品不一致，那一格會紅在測試的算式上，
+    /// 而不是紅在產品上（這正是本專案對 <see cref="SelfTestStageMapping"/> 立的同一條紀律）。
+    /// </summary>
+    public Point SelfTestStageToImage(Point stagePoint) => ToImage(stagePoint);
 
     /// <summary>
     /// 一句話的狀態快照（自測的斷言對象）。刻意把**判準**也放進來而不是只放數字：

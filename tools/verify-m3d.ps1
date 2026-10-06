@@ -596,6 +596,26 @@ function Invoke-S18 {
     ($uiOk -and ($missing.Count -eq 0)) `
     "exit=$($ui.Exit) missing='" + ($missing -join ' | ') + "' summary='" + (Get-LogLine $ui.Lines 'selftest done:') + "'"
 
+  # The NEW-box drag on a FRESHLY OPENED window (the rectangle is the whole image then).
+  # This is the first thing a user does, and it used to do NOTHING: BeginDrag picked Move, while
+  # Move is a provable no-op at that moment (the position clamp is [0, imageW - rectW], and rectW
+  # equals imageW). The window's subtitle promises "drag a rectangle on the picture", so this key
+  # pins the promise. 'mode=New' alone would be a weak assertion, so the three lines below are
+  # checked together with the summary flag: the box must really differ from the whole image, and
+  # 'anchorIsStart=True oppositeIsEnd=True' is the window's OWN verdict on the pixel values it
+  # reported (no fixture number is written into this script).
+  $newBoxKeys = @('NEW box drag from inside the photo towards the bottom-right: mode=New',
+                  'ok=True (pixels', 'anchorIsStart=True oppositeIsEnd=True differs=True notFullFrame=True',
+                  'NEW box drag from inside the photo towards the top-left (reverse direction): mode=New',
+                  'NEW box drag starting in the blank margin beside the photo: ok=True',
+                  'newBoxDrag=True (down=True reverse=True margin=True)')
+  $newBoxMissing = @()
+  foreach ($k in $newBoxKeys) { if (-not (Test-Log $ui.Lines ([regex]::Escape($k)))) { $newBoxMissing += $k } }
+  Check 'S18.15c dragging inside the freshly opened window (rectangle = whole image) really creates a NEW box, in both directions, anchored at the press point' `
+    (($newBoxMissing.Count -eq 0) -and
+     (Test-Log $ui.Lines 'newBoxDrag=True \(down=True reverse=True margin=True\)')) `
+    "missing='" + ($newBoxMissing -join ' | ') + "' line='" + (Get-LogLine $ui.Lines 'NEW box drag from inside the photo towards the bottom-right') + "'"
+
   # The ratio buttons: each one must be reachable AND must actually change the rectangle.
   $ratioStates = @($ui.Lines | Select-String -Pattern "ratio '(free|1:1|16:9|4:3|original)' ->")
   $ratioStatesOk = ($ratioStates.Count -eq 5)
@@ -690,6 +710,7 @@ function Invoke-S18 {
   $fBigUiKeys = @('opened=True', 'windowPresent=True', 'image=3000x2250',
                   'refused=True stillOpen=True', 'rect=0,0,3000,2250',
                   'movedToExpected=True clampHeldInsideImage=True handlesResize=True',
+                  'newBoxDrag=True (down=True reverse=True margin=True)',
                   'clampedTo1px=True', 'matchesWhatWasDrawn=True',
                   'reopened=True windowPresent=True')
   $fBigUiMissing = @()
@@ -766,7 +787,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S18' { Expect 24; Invoke-S18 }
+    'S18' { Expect 25; Invoke-S18 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
