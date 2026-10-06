@@ -513,3 +513,52 @@ PowerShell **不會等待**，`$LASTEXITCODE` 拿到的是前一個指令（建�
 （這一條先前已經記過一次，還是再犯——所以它不是「知道」的問題，是每次都要真的照做。）
 
 待辦：0xA0／0xA1 應該搬進 `Native` 與 `VK_SHIFT` 放在一起（金鑰常數只有一個家）。
+
+---
+
+## 第八段（2026-10-06 上午）：修掉「設定頁關掉後再也開不回來」＋補上一直缺的可觀測性與覆蓋
+
+使用者實測回報：「我測試隨便點了一下整個設定頁就消失了，再去左下角（托盤）按也叫不出來。」
+這一條**真的有病**，而且舊的驗收完全照不到它。
+
+### 根因（量到的，不是推論）
+
+`Drain()` 跑在 `DispatcherTimer` 的回呼堆疊上，而佇列裡的工作可能是**阻塞的** `SettingsWindow.ShowDialog()`（巢狀 dispatcher 迴圈）。WPF 的 `DispatcherTimer` 是「回呼返回之後」才排下一次 tick（dotnet/wpf `DispatcherTimer.FireTick`：`if (Tick != null) Tick(...); if (_isEnabled) Restart();`），所以回呼一旦不返回，計時器就永遠不再 tick ⇒ `Pending` 再也沒人抽 ⇒ 之後每一次 `Open()` 的工作項都躺在佇列裡，`IsOpen` 停在 true、視窗永遠不出現。
+
+為什麼「第一次開沒事、第二次必死」：第一次的 `Drain()` 是在 `Dispatcher.Run()` **之前**直接呼叫的，不在回呼堆疊上，所以 modal 迴圈裡的 tick 照常觸發；第二次是在 tick 回呼裡抽到那個阻塞工作，於是 tick 從那一行之後全部消失。
+
+量到的證據（探針逐行記 tid／drainDepth／dialogDepth，收工前全部移除）：
+- 阻塞後 25 ms 的 tick 應有約 200 行，實際 **0 行**；但 dispatcher 仍在抽訊息（`BeginInvoke` 在 `dialogDepth=1` 之下照樣跑完）⇒ **不是** UI 執行緒死掉。
+- modal 迴圈一退出，tick 立刻大量恢復（正證）。
+- 期間視窗其實是好的（`IsLoaded=True IsVisible=True 540x820`）⇒ 問題在「再也沒人把工作抽出來」，不在畫視窗。
+
+⚠ 走過的彎路（四個被推翻的假設，值得記下來）：UI 執行緒死掉 ✗、兩個實例互相干擾 ✗（使用者單一實例下照樣重現）、擷取開始時產品主動關頁 ✗（常駐路徑沒有任何 `SettingsUi.Close()`）、托盤守衛擋住重開 ✗。⇒ 教訓：**當症狀完全量不到時，先假設是「功能真的壞了」，並且先問「有沒有任何測試真的走過這條路」。**
+
+### 修法（最小一刀）
+
+`src/Sidecar/Settings/SettingsUi.cs` 的 pump：回呼**只排**一次 `Drain` 後立刻返回
+`(_, _) => dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(Drain))`。
+擁有者是 pump 那一行（計時器回呼與阻塞工作耦合），`Drain()` 仍是唯一的抽乾實作。
+
+### 同時補上兩件一直缺的東西
+
+- **可觀測性**：設定頁執行緒的日誌佇列原本只在特定主迴圈抽乾，純托盤操作時**永遠不會**寫進日誌——使用者那一輪 `settings ui:` 的行數是 **0**，等於診斷全瞎。現在常駐路徑也會抽。
+- **覆蓋**：`--settings-ui-selftest` 與 `--tray-selftest` 都**沒有**「關掉之後再開一次」這條，而且關窗走的是產品自己的 `SettingsUi.Close()`，不是使用者的方式（視窗自己的取消鈕）。現在兩者都補上，並新增「視窗真的存在」的檢查，用來區分「`IsOpen` 說開著」與「畫面真的在」。
+
+### 驗收（提交 `f7a5051`，工作樹乾淨）
+
+- 反向驗證：把那一行改回去，兩支自測都**紅**——`reopened=True windowPresent=False ... the settings UI thread did not pick it up`；托盤 `FAIL the open-settings command opens the page AGAIN after it was closed`。改回後綠。
+- `--settings-ui-selftest`：exit 0，`ok=True (… reopened=True windowPresent=True)`。
+- `--tray-selftest`：exit 0，`checks=14 failed=0`（新增的那條是「關掉後托盤能再開」）。
+- 既有套件：m1f 34/34、m1g 25/25、m1d 66/66、m1a 48/48。殘留行程 0。
+
+### 使用者現在可以做的事
+
+1. **重測那條壞掉的路**：啟動 Confern → 托盤「開啟設定」→ 隨便點幾下 → 用視窗自己的取消鈕關掉 → **再從托盤開一次**（這就是原本叫不出來的那條）。
+2. **補測①輸出位置功能**（上一輪因為設定頁消失而沒測到）：設定頁裡把「輸出資料夾」切成 來源旁邊／桌面／指定資料夾，各轉一張圖，確認成品真的落在你指定的地方（輪盤上的檔名預覽行也會顯示目的地）。
+3. **補測③去中繼資料**：用**手機拍的**照片（真的帶 EXIF）轉一次，然後在檔案總管 → 右鍵 → 內容 → 詳細資料，確認拍攝資訊真的不見了；上一輪你那個測試檔本身沒有 EXIF，所以只證明「像素沒變」。
+
+### 尚未處理（誠實記錄）
+
+- 子代理量到但**刻意沒修**（維持最小一刀）：`EnsureUiThread` 的 `if (_thread != null) return;` 只會啟動一次——UI 執行緒若真的結束，之後的 `Open()` 會排進沒有抽乾者的佇列，外觀與本症狀一模一樣。所有實測中該執行緒都活著（`alive=True`），所以沒有把本次 bug 歸給它，列入後續追蹤。
+- 子代理未能逐位元重現使用者那一輪的點擊序列（四次托盤日誌是二手資訊）；機制能完整解釋症狀。
