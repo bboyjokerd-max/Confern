@@ -796,17 +796,53 @@ internal sealed class CropWindow : Window
         return true;
     }
 
+    /// <summary>
+    /// 一次程式化拖曳的**型別化**結果（自測要比對的是數字，不是 <c>trace</c> 那個給人看的字串——
+    /// 用字串比對會讓「提示文字換了一行」之類的無關變動也算成「矩形變了」）。
+    /// </summary>
+    /// <param name="Mode">BeginDrag 當場命中的模式（<c>Move</c>／<c>Right</c>／<c>BottomRight</c>…）。
+    ///   「拖曳有沒有作用」與「命中的是哪一條路徑」是兩件事，所以它必須是可斷言的值。</param>
+    /// <param name="Before">BeginDrag **之前**的矩形。</param>
+    /// <param name="AfterBegin">BeginDrag **之後**的矩形（重新畫的那條路徑在這裡就變了）。</param>
+    /// <param name="AfterMove">ContinueDrag **之後**的矩形＝<strong>拖曳中</strong>的值。
+    ///   ⚠ 實測（2026-10-06，不是推論）：ContinueDrag 收尾會呼叫 <see cref="Constrain"/>，而它的位置
+    ///   夾制與 Move 分支自己那兩條 <c>Math.Clamp</c> 的**範圍完全相同**（都是
+    ///   <c>[0, 影像寬 − 矩形寬]</c>），所以「單獨把其中一條的上界改壞」在**任何**時點都看不出來
+    ///   ——把 ContinueDrag 的上界改成 <c>W</c> 之後，整個自測仍然全綠（連拖曳中的值都一樣）。
+    ///   要讓矩形跑出影像必須兩層一起放寬，而自測的「拖到邊界」那一格抓的就是它。
+    ///   所以這裡的價值是「<strong>拖曳中的值也必須已經貼齊邊緣</strong>」，不是「抓得到某一行的錯」。</param>
+    /// <param name="AfterEnd">EndDrag **之後**的矩形。</param>
+    internal readonly record struct DragRun(string Mode, string Note,
+                                            Int32Rect Before, Int32Rect AfterBegin,
+                                            Int32Rect AfterMove, Int32Rect AfterEnd);
+
     /// <summary>程式化拖曳：把畫面座標的起點與終點餵進**真正的那三個方法**。</summary>
-    public void SelfTestDrag(Point from, Point to, List<string> trace)
+    public DragRun SelfTestDrag(Point from, Point to, List<string> trace)
     {
+        Int32Rect before = _rect;
         BeginDrag(from, out string note);
-        trace.Add($"begin from=({from.X:0.#},{from.Y:0.#}) mode={_dragMode} note='{note}' " +
+        string mode = _dragMode.ToString();
+        Int32Rect afterBegin = _rect;
+        trace.Add($"begin from=({from.X:0.#},{from.Y:0.#}) mode={mode} note='{note}' " +
                   $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height}");
         ContinueDrag(to);
+        Int32Rect afterMove = _rect;
         trace.Add($"move to=({to.X:0.#},{to.Y:0.#}) rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height}");
         EndDrag();
         trace.Add($"end rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height}");
+        return new DragRun(mode, note, before, afterBegin, afterMove, _rect);
     }
+
+    /// <summary>
+    /// ①②兩個座標系之間的橋（自測用）：影像現在是怎麼被縮進這張畫布的。
+    ///
+    /// 拖曳的每一個換算都靠這一組數字（<see cref="ToImage"/>、<see cref="BeginDrag"/> 的命中判定、
+    /// <see cref="UpdateVisuals"/> 的繪製），所以自測要從「影像像素」算出「畫面座標」時，
+    /// 唯一的正確來源就是這裡。自己再算一次 <c>min(860/W, 520/H)</c> 會變成第二份規則，
+    /// 而它與視窗不一致時，那一格會紅在錯誤的地方（紅在測試的算式上，不是紅在產品上）。
+    /// </summary>
+    public (double Scale, double ImageLeft, double ImageTop, double DisplayWidth, double DisplayHeight)
+        SelfTestStageMapping() => (_scale, _imageLeft, _imageTop, _displayWidth, _displayHeight);
 
     /// <summary>
     /// 一句話的狀態快照（自測的斷言對象）。刻意把**判準**也放進來而不是只放數字：

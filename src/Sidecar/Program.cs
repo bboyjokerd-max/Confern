@@ -2867,10 +2867,147 @@ internal static class App
         SettingsUi.Close();
         WaitFor(() => !SettingsUi.IsOpen, 3000);
 
-        // ③ 程式化拖曳（滑鼠事件呼叫的就是這三個方法）
-        bool dragged = CropUi.SelfTestDrag(200, 150, 520, 380, 5000, out string dragDetail, lines.Enqueue);
+        // ③ 程式化拖曳（滑鼠事件呼叫的就是這三個方法）。
+        //
+        // ⚠ 這一格原本是**假的綠燈**，而拖曳正是裁切的核心互動。自測跑到這裡時矩形還是**整張圖**
+        // （例如 3000x2250），BeginDrag 因此命中 mode=Move，而 ContinueDrag 的位移被
+        // Math.Clamp(r.X + dx, 0, max(0, W - r.Width)) 夾成 0——矩形根本沒有移動：
+        //   begin from=(200,150) mode=Move note='' rect=0,0,3000,2250 |
+        //   move to=(520,380) rect=0,0,3000,2250 | end rect=0,0,3000,2250
+        // 而舊的 dragged 只斷言「這條接縫跑過了」。512x384 的小圖同樣不動（0,0,512,384 一直是
+        // 0,0,512,384），所以那一格在大小圖上都是綠的，卻什麼都沒證明。
+        //
+        // 修法照 ④ 比例鈕那一格的紀律（見下面那一段的說明）：**先給它一個已知、而且不貼齊夾邊界
+        // 的矩形**，再拖。否則會出現「矩形本來就是整張圖，所以拖不拖都對」那種假綠燈。
+        //
+        // 座標一律用**影像像素**表達（拖曳的數學就寫在像素上，見 CropWindow 的說明），換算成
+        // 畫面座標用的是**視窗自己報的**縮放與偏移（CropUi.SelfTestStageMapping），不是自測
+        // 自己再算一次 min(860/W, 520/H)——那是第二份規則，會紅在測試的算式上。
+        //
+        // 期望值可以**精確**比對（容差 0 px）：位移 dx = round(image_to.x − image_from.x)，
+        // 而兩端都是由同一組 (_scale, _imageLeft) 從整數像素反算出來的（浮點誤差 ~1e-13），
+        // 所以取整不會有半個像素的不確定性。這與比例那一格用 1 % 容差是不同的理由
+        // （那裡的最後一步是邊界取整），不是隨便挑的數字。
+        CropUi.SelfTestSelectRatio(CropRatios.DefaultId, 5000, out _, lines.Enqueue);   // 前置條件：自由框
+        (int imageWpx, int imageHpx) = CropUi.SelfTestImageSizePx();
+
+        // 自測拖曳用的三個小工具。座標全部是**影像像素**。
+        //   ① SetBaseline：給視窗一個已知、置中、**不貼齊夾邊界**的矩形，並讀回視窗自己報的像素值。
+        //   ② DragPixels：把影像像素換成畫面座標（用視窗自己的縮放），餵進真正的那三個方法。
+        //   ③ Px：只為了讓每一行證據讀得出來。
+        bool SetBaseline(out int bx, out int by, out int bw, out int bh)
+        {
+            bx = by = bw = bh = 0;
+            if (!CropUi.SelfTestSetRect(0.25, 0.25, 0.5, 0.5, 5000, out _, lines.Enqueue)) return false;
+            (bx, by, bw, bh) = CropUi.SelfTestRectPx();
+            return bw > 0 && bh > 0;
+        }
+        bool DragPixels(int fromImageX, int fromImageY, int toImageX, int toImageY,
+                        out CropWindow.DragRun run, out string detail)
+        {
+            (double scale, double left, double top) = CropUi.SelfTestStageMapping();
+            double fromStageX = left + fromImageX * scale, fromStageY = top + fromImageY * scale;
+            double toStageX = left + toImageX * scale, toStageY = top + toImageY * scale;
+            bool ran = CropUi.SelfTestDrag(fromStageX, fromStageY, toStageX, toStageY, 5000,
+                                           out run, out string trace, lines.Enqueue);
+            detail = $"pixels ({fromImageX},{fromImageY})->({toImageX},{toImageY}) = " +
+                     $"stage ({fromStageX:0.##},{fromStageY:0.##})->({toStageX:0.##},{toStageY:0.##}) " +
+                     $"via scale={scale:0.######} imageLeft={left} imageTop={top} [{trace}]";
+            return ran;
+        }
+        string Px(System.Windows.Int32Rect r) => $"{r.X},{r.Y},{r.Width},{r.Height}";
+
+        // ③a 移動：從矩形**內部**一點拖到另一點。斷言它真的變了，而且變成預期的像素值。
+        bool moveBase = SetBaseline(out int mvX, out int mvY, out int mvW, out int mvH);
+        int mvDx = Math.Max(1, mvW / 4), mvDy = Math.Max(1, mvH / 4);
+        bool moveRan = DragPixels(mvX + mvW / 3, mvY + mvH / 3, mvX + mvW / 3 + mvDx, mvY + mvH / 3 + mvDy,
+                                   out CropWindow.DragRun moveRun, out string moveDetail);
+        bool moveMoved = moveRan && (moveRun.AfterEnd.X != moveRun.Before.X ||
+                                     moveRun.AfterEnd.Y != moveRun.Before.Y);
+        bool moveExpected = moveRan && moveRun.AfterEnd.X == mvX + mvDx &&
+                            moveRun.AfterEnd.Y == mvY + mvDy &&
+                            moveRun.AfterEnd.Width == mvW && moveRun.AfterEnd.Height == mvH;
+        bool moveMode = moveRan && moveRun.Mode == "Move";
+        bool moveOk = moveBase && moveRan && moveMode && moveMoved && moveExpected;
+        evidence.Line($"crop ui selftest: move drag from inside the rectangle: base={mvX},{mvY},{mvW},{mvH} " +
+                      $"expected={mvX + mvDx},{mvY + mvDy},{mvW},{mvH} mid={Px(moveRun.AfterMove)} " +
+                      $"end={Px(moveRun.AfterEnd)} mode={moveRun.Mode} moved={moveMoved} " +
+                      $"ok={moveOk} ({moveDetail})");
+
+        // 舊旗標的名字與那一行都留著（套件比對的就是那一行），但**意思變強了**：
+        // 它現在斷言的是「拖曳真的把矩形搬到預期的位置」，不再只是「接縫跑過了」。
+        bool dragged = moveOk;
         evidence.Line($"crop ui selftest: programmatic drag (the three mouse handlers) ok={dragged} " +
-                      $"{dragDetail}");
+                      $"{moveDetail}");
+
+        // ③b 拖到**邊界**上：矩形不可以被推出影像——**拖曳中**與拖曳之後都一樣。
+        // ⚠ 這一格同時看 mid 與 end。實測（2026-10-06）：ContinueDrag 收尾呼叫的 Constrain 與 Move
+        // 分支自己那兩條 Math.Clamp 是**互相冗餘**的（範圍都是 [0, 影像寬 − 矩形寬]），所以把
+        // 「其中一條」的上界改成 W 是**看不出來的**（整個自測仍然全綠，已實測）；兩層一起放寬
+        // 才會讓矩形跑出影像，而那是這一格抓到的東西（反向驗證會紅在 clampHeldInsideImage）。
+        // 右下角與左上角各拖一次：兩個方向的上／下界都要有牙齒。
+        bool clampBase = SetBaseline(out int clX, out int clY, out int clW, out int clH);
+        bool toFarRan = DragPixels(clX + clW / 2, clY + clH / 2, imageWpx, imageHpx,
+                                   out CropWindow.DragRun toFar, out string toFarDetail);
+        bool clampBase2 = SetBaseline(out int clX2, out int clY2, out int clW2, out int clH2);
+        bool toOriginRan = DragPixels(clX2 + clW2 / 2, clY2 + clH2 / 2, 0, 0,
+                                      out CropWindow.DragRun toOrigin, out string toOriginDetail);
+        bool clampOk = clampBase && toFarRan && clampBase2 && toOriginRan &&
+                       toFar.Mode == "Move" && toOrigin.Mode == "Move" &&
+                       toFar.AfterMove.X == imageWpx - clW && toFar.AfterMove.Y == imageHpx - clH &&
+                       toFar.AfterEnd.X == imageWpx - clW && toFar.AfterEnd.Y == imageHpx - clH &&
+                       toFar.AfterEnd.Width == clW && toFar.AfterEnd.Height == clH &&
+                       toOrigin.AfterMove.X == 0 && toOrigin.AfterMove.Y == 0 &&
+                       toOrigin.AfterEnd.X == 0 && toOrigin.AfterEnd.Y == 0 &&
+                       toOrigin.AfterEnd.Width == clW2 && toOrigin.AfterEnd.Height == clH2;
+        evidence.Line($"crop ui selftest: move drag onto the far corner: base={clX},{clY},{clW},{clH} " +
+                      $"expected={imageWpx - clW},{imageHpx - clH},{clW},{clH} mid={Px(toFar.AfterMove)} " +
+                      $"end={Px(toFar.AfterEnd)} ok={clampOk} ({toFarDetail})");
+        evidence.Line($"crop ui selftest: move drag onto the origin: base={clX2},{clY2},{clW2},{clH2} " +
+                      $"expected=0,0,{clW2},{clH2} mid={Px(toOrigin.AfterMove)} end={Px(toOrigin.AfterEnd)} " +
+                      $"ok={clampOk} ({toOriginDetail})");
+
+        // ③c 拉把手：移動只是拖曳的一半，而「拉邊／拉角」是使用者最常做的動作之一。
+        // 每一格都斷言**兩件事**：預期的那一邊真的動了、而且另一邊**沒有動**。
+        bool resizeBase = SetBaseline(out int rsX, out int rsY, out int rsW, out int rsH);
+        int rsDx = Math.Max(1, rsW / 4);
+        bool rightRan = DragPixels(rsX + rsW, rsY + rsH / 2, rsX + rsW + rsDx, rsY + rsH / 2,
+                                    out CropWindow.DragRun rightRun, out string rightDetail);
+        bool rightOk = rightRan && rightRun.Mode == "Right" &&
+                       rightRun.AfterEnd.X == rsX && rightRun.AfterEnd.Y == rsY &&
+                       rightRun.AfterEnd.Width == rsW + rsDx && rightRun.AfterEnd.Height == rsH;
+        evidence.Line($"crop ui selftest: drag the RIGHT edge handle outwards: base={rsX},{rsY},{rsW},{rsH} " +
+                      $"expected={rsX},{rsY},{rsW + rsDx},{rsH} mid={Px(rightRun.AfterMove)} " +
+                      $"end={Px(rightRun.AfterEnd)} mode={rightRun.Mode} ok={rightOk} ({rightDetail})");
+
+        bool shrinkBase = SetBaseline(out int shX, out int shY, out int shW, out int shH);
+        int shDx = Math.Max(1, shW / 4);
+        bool leftRan = DragPixels(shX, shY + shH / 2, shX + shDx, shY + shH / 2,
+                                   out CropWindow.DragRun leftRun, out string leftDetail);
+        bool leftOk = leftRan && leftRun.Mode == "Left" &&
+                      leftRun.AfterEnd.X == shX + shDx && leftRun.AfterEnd.Width == shW - shDx &&
+                      leftRun.AfterEnd.X + leftRun.AfterEnd.Width == shX + shW &&   // 右緣不動
+                      leftRun.AfterEnd.Y == shY && leftRun.AfterEnd.Height == shH;
+        evidence.Line($"crop ui selftest: drag the LEFT edge handle inwards (shrink): base={shX},{shY},{shW},{shH} " +
+                      $"expected={shX + shDx},{shY},{shW - shDx},{shH} rightEdge={shX + shW} " +
+                      $"mid={Px(leftRun.AfterMove)} end={Px(leftRun.AfterEnd)} mode={leftRun.Mode} " +
+                      $"ok={leftOk} ({leftDetail})");
+
+        bool cornerBase = SetBaseline(out int coX, out int coY, out int coW, out int coH);
+        int coDx = Math.Max(1, coW / 4), coDy = Math.Max(1, coH / 4);
+        bool cornerRan = DragPixels(coX + coW, coY + coH, coX + coW + coDx, coY + coH + coDy,
+                                     out CropWindow.DragRun cornerRun, out string cornerDetail);
+        bool cornerOk = cornerRan && cornerRun.Mode == "BottomRight" &&
+                        cornerRun.AfterEnd.X == coX && cornerRun.AfterEnd.Y == coY &&
+                        cornerRun.AfterEnd.Width == coW + coDx && cornerRun.AfterEnd.Height == coH + coDy;
+        evidence.Line($"crop ui selftest: drag the BOTTOM-RIGHT corner handle outwards: base={coX},{coY},{coW},{coH} " +
+                      $"expected={coX},{coY},{coW + coDx},{coH + coDy} mid={Px(cornerRun.AfterMove)} " +
+                      $"end={Px(cornerRun.AfterEnd)} mode={cornerRun.Mode} ok={cornerOk} ({cornerDetail})");
+
+        bool resizeOk = resizeBase && rightOk && shrinkBase && leftOk && cornerBase && cornerOk;
+        evidence.Line($"crop ui selftest: drag kinds: movedToExpected={moveOk} clampHeldInsideImage={clampOk} " +
+                      $"handlesResize={resizeOk} " +
+                      $"(resize: right-grow={rightOk} left-shrink={leftOk} corner-grow={cornerOk})");
 
         // ④ 每一個比例鈕都真的按得到，而且按下去之後矩形真的符合那個比例
         var ratioResults = new List<string>();
@@ -2966,13 +3103,14 @@ internal static class App
         while (lines.TryDequeue(out string? buffered)) evidence.Line(buffered);
 
         bool ok = opened && windowPresent && singleInstance && settingsOpen && cropStillThere
-                  && dragged && ratiosOk && fullSet && fullRefused && tinyClamped
+                  && dragged && clampOk && resizeOk && ratiosOk && fullSet && fullRefused && tinyClamped
                   && finalSet && closed && handedOverMatches
                   && closedByCancel && cancelGaveNothing
                   && reopened && reopenedPresent;
         evidence.Line($"crop ui selftest done: ok={ok} (opened={opened} windowPresent={windowPresent} " +
                       $"singleInstance={singleInstance} settingsPageCoexists={settingsOpen && cropStillThere} " +
-                      $"programmaticDrag={dragged} ratioPresetsOk={ratiosOk} " +
+                      $"programmaticDrag={dragged} clampedDrag={clampOk} handleDrag={resizeOk} " +
+                      $"ratioPresetsOk={ratiosOk} " +
                       $"fullFrameRefused={fullRefused} subPixelClamped={tinyClamped} " +
                       $"confirmedClosed={closed} confirmedMatches={handedOverMatches} " +
                       $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing} " +

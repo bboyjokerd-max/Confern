@@ -253,21 +253,27 @@ internal static class CropUi
     /// <summary>
     /// 程式化拖曳：把**畫面座標**的起點與終點餵進真正的 <c>BeginDrag</c>／<c>ContinueDrag</c>／
     /// <c>EndDrag</c>（滑鼠事件呼叫的就是那三個）。回傳 false＝沒有視窗或拖曳沒被接受。
+    ///
+    /// <paramref name="run"/> 是這一次拖曳的**型別化**結果：命中模式與四個時點的矩形。
+    /// 呼叫端要比對的必須是它（數字），不是 <paramref name="detail"/> 那個給人看的字串
+    /// ——「矩形真的變了」用字串比對會被無關的欄位（提示文字、比例…）騙過去。
     /// </summary>
     public static bool SelfTestDrag(double fromX, double fromY, double toX, double toY, int timeoutMs,
-                                    out string detail, Action<string> log)
+                                    out CropWindow.DragRun run, out string detail, Action<string> log)
     {
+        CropWindow.DragRun captured = default;
         string report = "(no drag happened)";
         bool ran = SettingsUi.RunOnUiThread(timeoutMs, log, "selftest drag", out string failure, () =>
         {
             CropWindow? window = _window;
             if (window == null) return "(no crop window is open)";
             var trace = new List<string>();
-            window.SelfTestDrag(new System.Windows.Point(fromX, fromY),
-                                new System.Windows.Point(toX, toY), trace);
+            captured = window.SelfTestDrag(new System.Windows.Point(fromX, fromY),
+                                           new System.Windows.Point(toX, toY), trace);
             report = string.Join(" | ", trace);
             return null;
         });
+        run = captured;
         detail = ran ? $"selftest: {report}" : $"selftest: {failure}";
         Log(log, detail);
         return ran;
@@ -349,6 +355,48 @@ internal static class CropUi
             return null;
         });
         return (width, height);
+    }
+
+    /// <summary>
+    /// 目前的矩形，**影像像素**。與 <see cref="SelfTestImageSizePx"/> 同一條理由：斷言的基準值
+    /// 必須是**視窗自己報的**數字。從正規化值自己再算一次（或從狀態字串裡刮出來）都是第二份規則，
+    /// 而它與產品不一致時，那一格會紅在測試的算式上，不是紅在產品上。
+    /// </summary>
+    public static (int X, int Y, int Width, int Height) SelfTestRectPx()
+    {
+        int x = 0, y = 0, width = 0, height = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest rect", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            System.Windows.Int32Rect rect = window.RectInPixels;
+            x = rect.X;
+            y = rect.Y;
+            width = rect.Width;
+            height = rect.Height;
+            return null;
+        });
+        return (x, y, width, height);
+    }
+
+    /// <summary>
+    /// ①②兩個座標系之間的橋（見 <see cref="CropWindow.SelfTestStageMapping"/>）：自測要從
+    /// 「影像像素」算出「畫面座標」時，用的必須是**視窗自己的**縮放與偏移。全部是 0＝沒有視窗。
+    /// </summary>
+    public static (double Scale, double ImageLeft, double ImageTop) SelfTestStageMapping()
+    {
+        double scale = 0, left = 0, top = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest stage mapping", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            (double s, double l, double t, _, _) = window.SelfTestStageMapping();
+            scale = s;
+            left = l;
+            top = t;
+            return null;
+        });
+        return (scale, left, top);
     }
 
     /// <summary>一句話的狀態（含 hwnd 與矩形的像素值／正規化值）。</summary>

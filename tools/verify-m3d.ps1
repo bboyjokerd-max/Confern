@@ -580,8 +580,14 @@ function Invoke-S18 {
   # handlers call. No synthetic input is ever injected.
   $ui = Invoke-Confern 'ui-selftest' @('--crop-ui-selftest', '--crop-source', $f512)
   $uiOk = ($ui.Exit -eq 0)
+  # 'movedToExpected=True clampHeldInsideImage=True handlesResize=True' is the drag line the window
+  # reports about the DRAG ITSELF: a moved rectangle at the expected pixel values, a move that stops
+  # at the image edge while it is being dragged, and the three handle drags (right edge grows,
+  # left edge shrinks, bottom-right corner grows). Before this existed the drag key was only
+  # "the three mouse handlers) ok=True", which was green even when the rectangle never moved.
   $uiKeys = @('opened=True', 'windowPresent=True', 'ignored (single instance)',
               'settingsOpen=True cropWindowStillPresent=True', 'the three mouse handlers) ok=True',
+              'movedToExpected=True clampHeldInsideImage=True handlesResize=True',
               'refused=True stillOpen=True', 'clampedTo1px=True', 'matchesWhatWasDrawn=True',
               'closed=True', 'reopened=True windowPresent=True')
   $missing = @()
@@ -683,6 +689,7 @@ function Invoke-S18 {
   $fBigUi = Invoke-Confern 'ui-selftest-big' @('--crop-ui-selftest', '--crop-source', $fBig)
   $fBigUiKeys = @('opened=True', 'windowPresent=True', 'image=3000x2250',
                   'refused=True stillOpen=True', 'rect=0,0,3000,2250',
+                  'movedToExpected=True clampHeldInsideImage=True handlesResize=True',
                   'clampedTo1px=True', 'matchesWhatWasDrawn=True',
                   'reopened=True windowPresent=True')
   $fBigUiMissing = @()
