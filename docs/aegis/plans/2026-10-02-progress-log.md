@@ -562,3 +562,101 @@ PowerShell **不會等待**，`$LASTEXITCODE` 拿到的是前一個指令（建�
 
 - 子代理量到但**刻意沒修**（維持最小一刀）：`EnsureUiThread` 的 `if (_thread != null) return;` 只會啟動一次——UI 執行緒若真的結束，之後的 `Open()` 會排進沒有抽乾者的佇列，外觀與本症狀一模一樣。所有實測中該執行緒都活著（`alive=True`），所以沒有把本次 bug 歸給它，列入後續追蹤。
 - 子代理未能逐位元重現使用者那一輪的點擊序列（四次托盤日誌是二手資訊）；機制能完整解釋症狀。
+
+---
+
+## 第九段（2026-10-06 下午）：修掉「設定頁點輸入框→整窗消失、托盤再也叫不出來」——順便查清 m1d 那盞紅燈的真相
+
+### 根因（量到的，不是推論）
+
+使用者那兩句話是同一條因果鏈的兩端：「選『輸出位置』後，要按輸入框輸入時設定面版消失」與「之後再從托盤按『開啟設定』，還是叫不出來」。
+
+鏈的起點在 `src/Sidecar/Sidecar.csproj`：`<InvariantGlobalization>true</InvariantGlobalization>` 讓行程**沒有真實文化**，而 WPF 的輸入層一定要真實文化。輸入框**第一次**拿到鍵盤焦點要建 caret 時，`InputLanguageSource.get_CurrentInputLanguage()` 去要 `CultureInfo(0x0404)`，在 invariant 模式下丟 `CultureNotFoundException`：
+
+```
+System.Globalization.CultureNotFoundException: Only the invariant culture is supported in
+globalization-invariant mode. ... 1028 (0x0404) is an invalid culture identifier.
+  at System.Windows.Input.InputLanguageSource.get_CurrentInputLanguage()
+  at System.Windows.Documents.TextSelection.EnsureCaret(...)    <- 輸入框第一次取得焦點
+  at System.Windows.Input.InputManager.ProcessStagingArea()
+  at System.Windows.Input.KeyboardDevice.ChangeFocus(...)
+  at System.Windows.UIElement.Focus()
+```
+
+例外穿過 `ShowDialog` 的 modal frame 跑掉，把設定頁那條 UI 執行緒帶走；OS 會拆掉死執行緒的視窗（所以使用者看到「連標題列都不見」），而 `EnsureUiThread` 的 `if (_thread != null) return;` 讓之後每一次 `Open()` 都只把工作排進**沒有抽乾者**的佇列——日誌上只看得到 `open requested`，沒有視窗、沒有錯誤、也沒有 `already open`。使用者自己日誌裡另一個呼叫點是同一個擁有者的另一條路：`FAILED to show the window (InvalidOperationException: Cannot find non-neutral culture related to 'en-us'.)`。
+
+⚠ 與「輸出資料夾」那段的驗證無關：那段有 try/catch，而且例外根本沒走到那裡。
+
+### 修法（各自最小、擁有者明確）
+
+- `Sidecar.csproj`：`InvariantGlobalization` true→false（「這個行程有沒有真實文化」只有這裡決定）。產品自己的程式碼沒有任何一處需要不變文化：全專案的比較都用 `StringComparer.Ordinal`，使用者語言走 Win32 的 `GetUserDefaultUILanguage`。
+- `SettingsUi`：`Dispatcher.Run()` 改成**可重入**迴圈——例外穿出去只記一筆，同一條執行緒繼續跑（擁有者＝這條執行緒的壽命）。**不採「重啟一條新執行緒」**：實測一個 AppDomain 只准一個 `Application`，第二條執行緒開的視窗根本不上螢幕（`IsLoaded=False IsVisible=False hwnd=(none)`），所以「重建一條」救不回來。
+- `SettingsUi.EnsureUiThread`：判準改成「那條執行緒還活著嗎」（`_thread is { IsAlive: true }`），並把上一條**為什麼走了**寫進日誌。
+- `SettingsUi.Open` 的 catch：把開不起來的那張視窗關掉（否則留下關不掉的幽靈窗，下一次再疊一張）。
+- `_generation`：重啟後舊工作靠 generation 自我取消，所以不清理、不重編號。
+
+### 反向驗證（各弄壞一次→紅，還原→綠）
+
+| 弄壞什麼 | 量到什麼 |
+| --- | --- |
+| csproj 改回 `true` | `symptom1StillThere=False userStepsDone=1`（25 步的序列**斷在第 1 步**：`input focused=...`＝使用者點下去的那一步）、`ok=False`、exit 1 |
+| 拿掉 dispatcher 迴圈的重新進入 | `threadUsable=False uiThread=dead`；重開後 `windowPresent=False`（`IsLoaded=False IsVisible=False hwnd=(none)`）、`ok=False`、exit 1 |
+| 還原 | `ok=True`、exit 0 |
+
+### 新斷言（`--settings-ui-selftest`，本段當場重跑）
+
+- **症狀 1**：把使用者那串互動**排進 UI 執行緒的 dispatcher**（不是由呼叫端直接呼叫——例外必須穿過 `ShowDialog` 的 modal frame 才是同一個故障），並逐字記下走到哪一步。
+- **症狀 2**：**故意**在 UI 執行緒丟一個穿出 `Dispatcher.Run()` 的致命例外，然後問「托盤還開不開得起來」。
+
+實測 `ok=True`、exit 0：
+
+```
+settings ui selftest done: ok=True (opened=True singleInstance=True closed=True saved=True
+  invalidSaveAccepted=False relativeOutputFolderSaveAccepted=False reopened=True windowPresent=True
+  symptom1StillThere=True userStepsDone=25 symptom2FatalDelivered=True symptom2ThreadUsable=True
+  symptom2Reopened=True symptom2WindowBack=True)
+```
+
+25 步裡**逐字打到中文路徑**（`C:\Confern-selftest\輸出`），每一步的 `notice` 都被記下來——那正是原本會斷掉的那一步。
+
+### 套件（本段全部當場重跑；每次跑前 Confern 行程數 0，跑完 0）
+
+- m1a `checks=48 pass=48 fail=0 inconclusive=0`、m1f `34/34`、m1g `25/25`，三支都 exit 0。
+- **m1d：`checks=66 pass=65 fail=1 inconclusive=0`，紅的是 `S12.10i`——但這盞紅燈與本次改動無關**，見下一節。
+
+### m1d 的 `S12.10i` 為什麼紅：它不是回歸，是**測試自己用了使用者的設定檔**
+
+`S12.10i` 問的是「放手（mouse up）那條路徑轉出來的檔有沒有落地」，而它找檔的地方是**寫死的** `Split-Path -Parent $srcJpg`（＝`%TEMP%\m1d-verify`）。但同一支套件的 `S12.10a`–`S12.10i` 走的是 `--wheel-payload`，也就是**產品 UI 那條路**：輸出資料夾跟著 `Settings.OutputFolder`（規格 §9.5）走。而這幾條**沒有**傳 `--settings-file`，所以它繼承的是**使用者真的那一份** `%LOCALAPPDATA%\Confern\settings.json`。
+
+量到的事實（原始證據）：
+
+- payload 日誌：`wheel destination: outputDir=C:\Users\User\Desktop sourceFolder=...\m1d-verify wheelLabel=-> Desktop`、`ENTER: outputDir=C:\Users\User\Desktop`。
+- 每跑一次 m1d，桌面就多一組 `art (N).png` / `art (N).bmp`（256054 bytes），時間戳與該次執行完全對上。
+- 那份設定檔裡就是 `"OutputFolder": "desktop"`。
+
+四個方向都量了：
+
+| 程式碼 | `OutputFolder` | m1d 結果 |
+| --- | --- | --- |
+| HEAD（`ddcbe4d`，含 `d3a588c`） | `desktop` | `66/65/1` **紅**（連跑 3 次，逐次完全相同） |
+| `f7a5051`（把 `d3a588c` 的三個檔暫時還原再重建） | `desktop` | `66/65/1` **紅**，同一條 `FAIL S12.10i ... [target=BMP files=0]` |
+| HEAD（**同一顆二進位**） | `""`（來源旁邊） | `66/66/0` **綠** |
+| HEAD（**同一顆二進位**） | `desktop`（還原回去） | `66/65/1` **紅** |
+
+⇒ **不是回歸**。改動前的程式碼也紅，而且紅得一字不差；同一顆新二進位只把設定檔那**一個欄位**從 `desktop` 改成 `""` 就綠、改回來又紅。今晚稍早那次全綠，反推回去就是**當時那份設定檔還是「來源旁邊」**——它是在 `d3a588c` 提交之前（量到的 mtime 13:51:58，早於 14:11:51）被使用者實機驗收改成「桌面」的，紅燈是從那之後才出現的。
+
+⚠ 上一輪子代理說「拿改動前的舊二進位跑也一模一樣失敗」，但給的數字是 `pass=64 fail=1 inconclusive=1`——**與「一模一樣」不符，那個說法不成立**；本段重做後的舊碼是 `66/65/1 inconclusive=0`，與新碼逐字相同。
+
+這一格的**設計脆弱**照實記下來（**這一輪刻意不動它**）：它驗的其實是「成品落在來源旁邊」，而那只有在使用者的設定剛好是預設值時才成立——使用者的設定一改，同一顆好二進位就會紅。最小可行的穩定化有兩條，原則是同一個（**測試用的設定檔不可以是使用者的那一份**）：讓 payload 那幾條也自己帶一份 `--settings-file`（`S12.16a/b/c` 已經是這樣做的），或讓它去**問產品自己報的輸出位置**再找檔，而不是自己猜一個資料夾。
+
+### 使用者實機驗收（本專案最強的證據類型）
+
+- **輸出位置→桌面 ✅（使用者實機驗收）**：成品真的落在桌面——`art.bmp`（256054 bytes，2026-10-06 14:06:58 起，之後每次遞增 `art (N).bmp`），輪盤上的目的地行也顯示 `-> Desktop`。
+- **去中繼資料 ✅（使用者實機驗收）**：用真的帶 EXIF 的照片轉過，拍攝資訊真的不見了。
+
+### 尚未處理（誠實記錄）
+
+- **設定頁再放大**（欄位與字級）——使用者回報版面仍偏小。
+- **單一實例守衛**：兩個 Confern 同時跑＝兩套全域鉤子、兩個托盤，確實會重複處理。**未證實**是任何已知病因，但「會重複處理」本身就要擋。
+- **M2 卡在 ffmpeg 授權**（LGPL/GPL 條款未定）。
+- **M3 壓縮已拍板走設定頁**（預設集三種＋目標大小），原本排在「設定頁輸入框」修好之後——那個前置條件**已經解除**，可以往下做了。
