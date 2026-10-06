@@ -40,6 +40,12 @@ internal static class WorkerProtocol
     /// 使用者看到的是「這個工具在這個 worker 上做不到」而不是「按了 CLEAN 卻轉了格式」。
     /// 換句話說：**未知 op 已經有明確的失敗路徑，版本閘門在這裡是多的**，
     /// 而多升一次版本會讓「舊 exe 配新 exe」的升級情境無謂地多斷一次線。
+    ///
+    /// **2026-10-06 新增 `op=compress`（第三顆扇形）——同樣不升，理由逐條相同。**
+    /// 另外檢查過它帶來的新欄位（<c>compressMode</c>／<c>compressTargetBytes</c>／
+    /// <c>standardJpgQuality</c>／<c>standardWebpQuality</c>）：一個舊 worker **根本走不到**
+    /// 讀它們的那一行，因為 `op=compress` 會在它身上變成 <see cref="WorkerServer.RejectUnknownOp"/>。
+    /// 「欄位被忽略」這種靜默錯誤需要「op 被接受但欄位被丟掉」這個前提，而那個前提不成立。
     /// </summary>
     public const int Version = 3;
 
@@ -61,6 +67,14 @@ internal static class WorkerProtocol
     /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由寫在 <see cref="Version"/> 的註解裡。
     /// </summary>
     public const string OpStripMetadata = "strip-metadata";
+
+    /// <summary>
+    /// 工具 `compress`（壓縮，M3 第三顆扇形）。輸出格式＝來源格式，
+    /// 等級由 <see cref="CompressionPolicy"/> 決定（設定頁是唯一來源），
+    /// 見 <see cref="ConversionEngine.Compress"/> 與規格 §9.4。
+    /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由寫在 <see cref="Version"/> 的註解裡。
+    /// </summary>
+    public const string OpCompress = "compress";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -129,6 +143,39 @@ internal sealed class WorkerMessage
     /// <see cref="WorkerProtocol.Version"/>）。
     /// </summary>
     public string? outputDir { get; set; }
+
+    /// <summary>
+    /// 壓縮等級（2026-10-06 M3 第三顆扇形，<see cref="WorkerProtocol.OpCompress"/> 專用）。
+    /// 正規值見 <see cref="CompressionPolicy.Modes"/>。
+    ///
+    /// **null／空字串的缺席語意 ＝ <see cref="CompressionPolicy.ModeStandard"/>**：那是
+    /// 「這個欄位還不存在的年代」的封包該有的意思，也正是**這個工具出現之前的行為**
+    /// （照既有的品質設定走）。與 <c>outputDir</c> 不同的是，這裡的缺席語意**與新功能的意圖
+    /// 一致**（新功能的預設值就是標準），所以配對錯誤不會變成靜默做錯事——而一個不認識
+    /// `op=compress` 的舊 worker 本來就會走到 <see cref="WorkerServer.RejectUnknownOp"/>。
+    /// </summary>
+    public string? compressMode { get; set; }
+
+    /// <summary>
+    /// 「壓縮到」的上限（**位元組**，2026-10-06）。<c>0</c>＝沒有上限。
+    /// 由 UI 端的 <see cref="Settings.ToCompressionPolicy"/> 換算（設定檔存的是 KB），
+    /// worker 不再自己換算一次——單位換算只有一個擁有者。
+    /// </summary>
+    public long? compressTargetBytes { get; set; }
+
+    /// <summary>
+    /// 標準模式要用的 JPG／WebP 品質（2026-10-06）。**與 <c>quality</c> 刻意分開**：
+    /// <c>quality</c> 是「這一次工作指定的品質」（格式轉換就是用它），而這兩個是
+    /// 「設定檔裡的品質設定」，壓縮工具的標準模式要的是後者，且**逐檔依格式選**
+    /// （一批裡可能同時有 JPG 與 PNG，JPG 用 jpg 品質、其餘品質無意義）。
+    ///
+    /// ⚠ 刻意是 <c>int?</c> 而不是 <c>int</c>：值型別的 0 會被序列化進每一個封包，
+    /// 那會讓**既有 op 的訊息多出兩個欄位**（`quality` 那一組是逐位元比對的）。
+    /// 四個壓縮欄位一起出現、一起不出現——半套的政策比沒有政策危險。
+    /// null／超出 60–100 ＝ 沒有這個值 → 用規格預設 85。
+    /// </summary>
+    public int? standardJpgQuality { get; set; }
+    public int? standardWebpQuality { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -282,6 +329,8 @@ internal static class WorkerServer
                                                            job.outputDir),
                 WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal, job.outputDir),
                 WorkerProtocol.OpStripMetadata => engine.StripMetadata(paths[i], journal, job.outputDir),
+                WorkerProtocol.OpCompress => engine.Compress(paths[i], PolicyOf(job, evidence.Line), journal,
+                                                             job.outputDir),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
@@ -314,6 +363,40 @@ internal static class WorkerServer
     }
 
     /// <summary>
+    /// 封包上的壓縮欄位 → <see cref="CompressionPolicy"/>（<c>op=compress</c> 的唯一輸入）。
+    ///
+    /// ⚠ 這裡**不是第二個政策擁有者**：合法值的清單來自 <see cref="CompressionPolicy.CanonicalMode"/>，
+    /// 而「什麼是合法的上限」由 UI 端（設定頁 ＋ <see cref="SettingsStore.TryApply"/>）把關。
+    /// worker 只做一件防禦性的收斂：缺席／認不得的一律回標準模式並**大聲記 log**——
+    /// 到得了這裡代表同版本的 UI 送出了不該送的東西，那是 bug，不該靜默。
+    /// </summary>
+    private static CompressionPolicy PolicyOf(WorkerMessage job, Action<string> log)
+    {
+        string given = job.compressMode ?? "";
+        string mode = CompressionPolicy.CanonicalModeOrEmpty(given);
+        if (mode.Length == 0 && given.Length > 0)
+        {
+            mode = CompressionPolicy.ModeStandard;
+            log($"compress: unknown compressMode '{given}' -> '{mode}' " +
+                $"(this worker speaks {string.Join("/", CompressionPolicy.Modes)})");
+        }
+        else if (mode.Length == 0)
+        {
+            mode = CompressionPolicy.ModeStandard;   // 缺席＝這個欄位還不存在的年代的意思
+        }
+
+        long target = job.compressTargetBytes ?? 0;
+        if (target < 0)
+            log($"compress: negative compressTargetBytes {target} -> 0 (no limit)");
+
+        return new CompressionPolicy(
+            mode,
+            Math.Max(0, target),
+            job.standardJpgQuality is >= 60 and <= 100 ? job.standardJpgQuality.Value : 85,
+            job.standardWebpQuality is >= 60 and <= 100 ? job.standardWebpQuality.Value : 85);
+    }
+
+    /// <summary>
     /// 未知的 op：回一個**失敗的結果**（不丟例外，讓既有的失敗回報路徑接手），
     /// 使用者訊息走 <see cref="ConversionError.Unknown"/> 的規格字串（UI 不必為它多寫一條路徑），
     /// 真正的細節放在 detail 給日誌——那才是維修的人看得到的地方。
@@ -325,7 +408,8 @@ internal static class WorkerServer
     private static ConversionResult RejectUnknownOp(string sourcePath, string op) =>
         new(sourcePath, null, ConversionError.Unknown,
             $"unknown op '{op}' (this worker speaks " +
-            $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata})");
+            $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata}/" +
+            $"{WorkerProtocol.OpCompress})");
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

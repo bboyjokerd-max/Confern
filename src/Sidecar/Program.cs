@@ -241,6 +241,9 @@ internal sealed class Options
           --wheel-dump <path>       with --wheel-demo: write the painted frame as PNG and exit
           --wheel-dump-raw <path>   with --wheel-demo: same frame but with alpha preserved
           --wheel-tools             with --wheel-demo: paint the SECOND layer (tool wheel) instead
+          --wheel-tool <id>         with --wheel-payload: select that tool sector by id (e.g.
+                                    compress) before Enter commits it, so the commit really goes
+                                    through the worker process (spec 9.1); product code never reads it
           --rotate90 <path>         run tool rotate90 (90 deg clockwise) on <path> and report;
                                     the output folder follows Settings.OutputFolder (spec 9.5),
                                     the source file is never touched
@@ -250,6 +253,9 @@ internal sealed class Options
                                     metadata in the container (pixels stay byte-identical),
                                     everything else is decoded and re-encoded without metadata;
                                     the source file is never touched
+          --compress <path>         run tool compress on <path> and report; the level comes from the
+                                    settings file (compressionMode / compressionTargetKb), never
+                                    from the command line; the source file is never touched
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
           --wheel-targets <a,b,c>   with --wheel-demo: target format list (default PNG,JPG,WEBP,BMP)
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
@@ -365,6 +371,15 @@ internal sealed class Options
     /// </summary>
     public bool WheelTools;
     /// <summary>
+    /// 診斷（2026-10-06）：`--wheel-tool &lt;id&gt;` 搭配 <c>--wheel-payload</c>，把工具輪盤的選取
+    /// **指名**移到某一顆工具上（例如 <c>compress</c>），再讓 Enter 走真正的提交。
+    ///
+    /// 為什麼非有它不可：`--compress` 那條診斷走的是**行程內的引擎**，它驗不到規格 §9.1 的
+    /// <c>op</c> 欄位——也就是「UI 真的把 compress 這個 op 交給 worker 行程」。
+    /// 沒有這個旗標，那一段話就只能靠讀程式碼相信。產品路徑不讀它。
+    /// </summary>
+    public string? WheelTool;
+    /// <summary>
     /// M3 診斷：`--rotate90 &lt;path&gt;` 直接對這個檔案跑工具 `rotate90`（順時針 90 度）。
     /// **走的是 worker 用的同一個引擎**，但同一個行程內直接呼叫——跨管道的 `op` 欄位還沒接。
     /// 存在的理由：工具的「能不能做」必須先是可重複量測的事實，才准出現在介面上。
@@ -376,6 +391,16 @@ internal sealed class Options
     /// 差別只在它驗的是「**像素不變、metadata 消失**」而不是「長寬對調」。
     /// </summary>
     public string? StripMetadata;
+    /// <summary>
+    /// M3 診斷（2026-10-06）：`--compress &lt;path&gt;` 直接對這個檔案跑工具 `compress`（第三顆扇形）。
+    /// 形狀與 <see cref="Rotate90"/>／<see cref="StripMetadata"/> 一字不差（同一個引擎、
+    /// 同一條設定→命名→寫檔鏈）。
+    ///
+    /// ⚠ 等級**不從命令列來**：它從設定檔來（<see cref="Settings.ToCompressionPolicy"/>）。
+    /// 這是刻意的——診斷要驗的正是「設定頁選的那一級真的走到引擎」，多開一個 `--compress-mode`
+    /// 旗標等於讓驗收繞過那條鏈，驗到一個產品裡不存在的組合。
+    /// </summary>
+    public string? Compress;
     /// <summary>
     /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
     /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
@@ -585,8 +610,10 @@ internal sealed class Options
                 case "--wheel-dump": if (i + 1 < args.Length) o.WheelDump = args[++i]; break;
                 case "--wheel-dump-raw": if (i + 1 < args.Length) o.WheelDumpRaw = args[++i]; break;
                 case "--wheel-tools": o.WheelTools = true; break;
+        case "--wheel-tool": if (i + 1 < args.Length) o.WheelTool = args[++i]; break;
                 case "--rotate90": if (i + 1 < args.Length) o.Rotate90 = args[++i]; break;
                 case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
+        case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -851,6 +878,8 @@ internal static class App
             return Rotate90Diagnostic(evidence, opt);
         if (opt.StripMetadata != null)
             return StripMetadataDiagnostic(evidence, opt);
+        if (opt.Compress != null)
+            return CompressDiagnostic(evidence, opt);
 
         // 診斷：--wheel-tools 讓無頭驗收能走到第二層，不必合成鍵盤輸入（產品路徑不讀這個旗標）。
         _forceToolLayer = opt.WheelTools;
@@ -1057,6 +1086,24 @@ internal static class App
             // 依生產順序模擬：先捕捉（升起接收層），酬載才可能到達。
             guard.OnCaptured();
             ShowWheelFromPayload(presenter, catalog, evidence, injected);
+
+            // 診斷（--wheel-tool <id>）：把選取指名移到某一顆工具上，讓下面的 Enter 提交的
+            // **就是那一顆**。這是「compress 真的走 worker 行程」唯一能自動驗到的入口——
+            // 沒有它，那一句話只能靠讀程式碼相信。找不到那個 id 就什麼都不做並說出來：
+            // 悄悄提交別的工具會讓後面每一條斷言都變成在驗錯的東西。
+            if (!string.IsNullOrEmpty(opt.WheelTool))
+            {
+                int want = -1;
+                for (int k = 0; k < PendingTools.Count; k++)
+                    if (string.Equals(PendingTools[k].Id, opt.WheelTool, StringComparison.Ordinal)) { want = k; break; }
+                if (want < 0)
+                    evidence.Line($"--wheel-tool '{opt.WheelTool}': not in the catalog " +
+                                  $"[{string.Join(",", PendingTools.Select(t => t.Id))}] -> the selection is " +
+                                  "left alone, so the commit below is NOT the tool that was asked for");
+                else
+                    evidence.Line($"--wheel-tool '{opt.WheelTool}': selecting index=" +
+                                  $"{presenter.SelectNext(want - presenter.Selected)}");
+            }
 
             // 2026-10-02 可證偽性稽核（P1-11）：這條診斷以前是無條件 `return 0`，
             // 所以驗收端的「exit code 0」只等於「沒有崩潰」——輪盤根本沒做出決定、
@@ -1544,6 +1591,70 @@ internal static class App
         return 0;
     }
 
+    /// <summary>
+    /// M3 診斷：`--compress &lt;path&gt;`（第三顆扇形）。走的是 **worker 用的同一個引擎**
+    /// （<see cref="ConversionEngine.Compress"/>），所以量到的就是產品的能力。
+    ///
+    /// 它刻意把四件事印成可斷言的事實（與 <see cref="StripMetadataDiagnostic"/> 同一個形狀）：
+    ///   ①**這一輪用的政策**（模式、上限、標準模式要用的品質）——它來自設定檔，不是命令列；
+    ///   ②引擎自己回報的 `compressed ... mode=..., quality=..., A B -> B B`（＝輸入大小 →
+    ///     輸出大小 → **實際品質**，那是引擎的事實，在這裡重講一遍就是第二個擁有者）；
+    ///   ③「壓縮到」的搜尋痕跡與**最佳性證明**（`compress search:` 與 `compress: target-size proof`
+    ///     那兩行，同樣由引擎寫出）；
+    ///   ④來源檔**完全沒被動到**——SHA256／長度／mtime 三項前後比對（規格 §5 的第一名）。
+    /// 回傳碼：0 成功、1 來源被動到（§5 紅線）、2 找不到來源、3 引擎失敗（含「上限做不到」）。
+    /// </summary>
+    private static int CompressDiagnostic(Evidence evidence, Options opt)
+    {
+        string source = opt.Compress!;
+        if (!File.Exists(source))
+        {
+            evidence.Line($"--compress: source not found: {source}");
+            return 2;
+        }
+
+        string beforeHash = Sha256Of(source);
+        long beforeLength = new FileInfo(source).Length;
+        DateTime beforeWrite = File.GetLastWriteTimeUtc(source);
+
+        var registry = new CodecRegistry();
+        var engine = new ConversionEngine(registry, evidence.Line);
+        Settings settings = _settings ?? new Settings();
+        CompressionPolicy policy = settings.ToCompressionPolicy();
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"tool compress: outputDir={outputDir ?? "(source folder)"}");
+        evidence.Line($"tool compress: policy {policy.Describe()} " +
+                      $"from settings-file (compressionMode={settings.CompressionMode}, " +
+                      $"compressionTargetKb={settings.CompressionTargetKb})");
+        ConversionResult result = engine.Compress(source, policy, journal: null, targetDirectory: outputDir);
+
+        string afterHash = Sha256Of(source);
+        bool untouched = beforeHash == afterHash
+                         && new FileInfo(source).Length == beforeLength
+                         && File.GetLastWriteTimeUtc(source) == beforeWrite;
+
+        long outBytes = result.Ok && result.OutputPath != null && File.Exists(result.OutputPath)
+            ? new FileInfo(result.OutputPath).Length : -1;
+        evidence.Line($"tool compress: ok={result.Ok} error={result.Error} output={result.OutputPath ?? "-"}");
+        evidence.Line($"tool compress: in={beforeLength}B out={outBytes}B mode={policy.Mode} " +
+                      $"targetBytes={policy.TargetBytes}");
+        evidence.Line($"tool compress: source-untouched={untouched} " +
+                      $"(sha256 {beforeHash.Substring(0, 12)} -> {afterHash.Substring(0, 12)}, " +
+                      $"len {beforeLength}, mtime {(beforeWrite == File.GetLastWriteTimeUtc(source) ? "same" : "CHANGED")})");
+
+        if (!result.Ok)
+        {
+            evidence.Line($"--compress FAILED: {result.UserMessage}");
+            return 3;
+        }
+        if (!untouched)
+        {
+            evidence.Line("--compress FAILED: the source file was modified (spec 5 violation)");
+            return 1;
+        }
+        return 0;
+    }
+
     /// <summary>檔案內容的 SHA256（十六進位大寫）。診斷用，不進產品路徑。</summary>
     private static string Sha256Of(string path)
     {
@@ -1794,11 +1905,19 @@ internal static class App
         // 解析規則留在 Settings 這一處（worker 不是第二個擁有者）。
         string? outputDir = settings.ResolveOutputDirectory();
         evidence.Line($"ENTER: outputDir={outputDir ?? "(source folder)"}");
+        // 壓縮（第三顆扇形）：等級政策由**設定頁**決定，這裡只把設定換成政策往下送
+        // （政策的擁有者是 CompressionPolicy；輪盤上沒有任何等級可選——使用者 2026-10-06 裁定）。
+        // 其餘 op 一律傳 null，封包因此與改動前逐位元相同。
+        CompressionPolicy? compression = toolOp == WorkerProtocol.OpCompress
+            ? settings.ToCompressionPolicy()
+            : null;
+        if (compression != null)
+            evidence.Line($"ENTER: compress {compression.Describe()}");
         runner.Start(paths,
                      toolOp == null ? target : "",
                      toolOp == null ? settings.QualityFor(target) : 100,
                      centerX, centerY,
-                     toolOp: toolOp, outputDir: outputDir);
+                     toolOp: toolOp, outputDir: outputDir, compression: compression);
         PendingPaths = Array.Empty<string>();
         PendingTools = Array.Empty<ToolDescriptor>();
         return true;
@@ -1974,6 +2093,47 @@ internal static class App
         evidence.Line($"settings ui selftest: a relative output folder is refused " +
                       $"(save ok={relativeFolderSaveAccepted}) detail={badFolderDetail}");
 
+        // M3 第三顆扇形（2026-10-06）：壓縮方式。這一格是**兩個值**（模式＋上限），而且它有一條
+        // 「按下去才會發現」的失效模式：選了「壓縮到」卻沒有可用的上限。所以各走一次真的按下儲存。
+        //
+        // ⚠ 這一格還背著一條更貴的規矩：**設定頁不准丟例外**（這個專案才剛為此失去過 UI 執行緒）。
+        //   下面那個被擋下來的例子若丟了例外，SelfTestSave 會回 false 並在 detail 裡留下痕跡，
+        //   但真正把它變成紅燈的是下面 ok 運算式裡的 !unusableSizeAccepted。
+        // ⚠ 這兩個 case 的底必須是 good，不是 settings。SelfTestSave 是按真的「儲存」，而設定頁
+        //   的 BuildFromUi 會把**所有**欄位一起送出去；若拿預設值當底，這個會被接受的儲存就會把
+        //   前面 good 寫進去的那一整組值（71/Tab/45/en）蓋掉，其他套件（m1f S14.30）事後讀到
+        //   的就是 85/Space——這是回歸，不是細節。
+        Settings goodSize = good with
+        {
+            CompressionMode = CompressionPolicy.ModeTargetSize,
+            CompressionTargetKb = 512
+        };
+        bool sizeSaved = SettingsUi.SelfTestSave(goodSize, 5000, out string sizeDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: the compression fields round-trip through the real Save button " +
+                      $"(mode={goodSize.CompressionMode} targetKb={goodSize.CompressionTargetKb}) " +
+                      $"ok={sizeSaved} detail={sizeDetail}");
+
+        // 0 KB 在設定檔裡的意思是「沒有上限」，所以「壓縮到 ＋ 0」是一個自相矛盾的組合：
+        // 載入時會被夾成 0（在畫面上就是一個空的文字框），存檔時必須被擋下來並指名道姓。
+        Settings badSize = good with
+        {
+            CompressionMode = CompressionPolicy.ModeTargetSize,
+            CompressionTargetKb = 0
+        };
+        bool unusableSizeAccepted = SettingsUi.SelfTestSave(badSize, 5000, out string badSizeDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: an unusable compression limit is refused " +
+                      $"(save ok={unusableSizeAccepted}) detail={badSizeDetail}");
+        // 而且畫面上要**看得見**那一行提示（見 SettingsUi.SelfTestNoticeTexts 的理由）。
+        bool noticesRead = SettingsUi.SelfTestNoticeTexts(5000, out string noticeDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: the inline notice under the compression row " +
+                      $"(read={noticesRead}) {noticeDetail}");
+        // 這一顆是「有提示」的斷言：模式＝壓縮到、上限是空的，行內提示不可以是空的，
+        // 而且那一格必須是**可以打字**的（提示說「請填」但格子是停用的，等於沒有出路）。
+        bool noticeShown = noticesRead
+                           && noticeDetail.Contains("compressNotice='", StringComparison.Ordinal)
+                           && !noticeDetail.Contains("compressNotice=''", StringComparison.Ordinal)
+                           && noticeDetail.Contains("limitBoxEnabled=True", StringComparison.Ordinal);
+
         Thread.Sleep(700);      // 讓 WPF 真的完成第一次繪製，而不是只把物件建起來就說「開好了」
 
         // 關窗走**使用者自己的**那條路：按下取消鈕（＝ SettingsWindow 自己的 Close()，
@@ -2062,12 +2222,16 @@ internal static class App
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
 
         bool ok = opened && singleInstance && closed && saved && !invalidSaveAccepted &&
-                  !relativeFolderSaveAccepted && reopened && windowPresent &&
+                  !relativeFolderSaveAccepted && sizeSaved && !unusableSizeAccepted && noticeShown &&
+                  reopened && windowPresent &&
                   stillThere && userTrace.Count >= 3 &&
                   killPosted && fatalDelivered && threadUsable && reopenedAfterFatal && windowBack;
         evidence.Line($"settings ui selftest done: ok={ok} (opened={opened} singleInstance={singleInstance} " +
                       $"closed={closed} saved={saved} invalidSaveAccepted={invalidSaveAccepted} " +
                       $"relativeOutputFolderSaveAccepted={relativeFolderSaveAccepted} " +
+                      $"compressionFieldsSaved={sizeSaved} unusableCompressionLimitAccepted={unusableSizeAccepted} " +
+                      $"compressionNoticeShown={noticeShown} " +
+                      $"reopened={reopened} windowPresent={windowPresent} " +
                       $"reopened={reopened} windowPresent={windowPresent} " +
                       $"symptom1StillThere={stillThere} userStepsDone={userTrace.Count} " +
                       $"symptom2FatalDelivered={fatalDelivered} symptom2ThreadUsable={threadUsable} " +
@@ -2140,7 +2304,12 @@ internal static class App
 
         if (applied > 0) SettingsStore.Save(next, path, evidence.Line);
 
-        evidence.Line($"settings set result: {SettingsStore.Describe(next)}");
+        // 這一行的意思是「**檔案裡現在是什麼**」，不是「我剛剛在記憶體裡組出什麼」。
+        // 兩者從 2026-10-06 起真的會不一樣：`Save` 會再跑一次 `Normalized`，而壓縮政策有一條
+        // **跨欄位**的規則（選了「壓縮到」卻沒有可用的上限就退回「標準」），單一欄位的
+        // `TryApply` 看不到它。只差一行的話，最後一句話會跟檔案互相矛盾——那比不說還糟。
+        Settings written = next.Normalized(out _);
+        evidence.Line($"settings set result: {SettingsStore.Describe(written)}");
         evidence.Line($"settings set done: applied={applied} rejected={rejected.Count} path={path}");
         return rejected.Count == 0 ? 0 : 4;
     }

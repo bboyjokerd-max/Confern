@@ -82,14 +82,14 @@ internal static class SettingsStrings
         {
             // ---- 視窗外框 ----
             ["window.title"] = "Confern 設定",
-            ["window.subtitle"] = "規格 §8 的九個設定，加上規格 §9.5 的輸出資料夾。變更按下「儲存」後才寫入檔案。",
+            ["window.subtitle"] = "規格 §8 的九個設定，加上規格 §9.5 的輸出資料夾與規格 §9.4 的壓縮方式。變更按下「儲存」後才寫入檔案。",
 
             // ---- 頁面 ----
             ["page.behaviour"] = "行為",
             ["page.quality"] = "影像品質與逾時",
             ["page.safety"] = "安全與診斷",
             ["page.behaviourDesc"] = "觸發鍵按住時，接收層才會接住拖放；開機啟動尚未生效。",
-            ["page.qualityDesc"] = "轉檔品質與接收層停留時間。",
+            ["page.qualityDesc"] = "轉檔品質、壓縮方式與接收層停留時間。",
             ["page.safetyDesc"] = "標記「尚未生效」者只儲存設定值。",
 
             // ---- 觸發鍵 ----
@@ -118,6 +118,20 @@ internal static class SettingsStrings
             // ---- 品質 ----
             ["field.jpgQuality"] = "JPG 品質",
             ["field.webpQuality"] = "WebP 品質",
+
+            // ---- 壓縮方式（M3 第三顆扇形，2026-10-06 使用者裁定：等級走設定頁）----
+            // ⚠ 這些是**畫面上的標籤**，不是寫進設定檔的值：寫進檔案的永遠是
+            // `small / standard / high / target-size`，由 SettingsStore.TryApply 決定。
+            // 上限那一格與輸出資料夾同一條規矩：值存 KB，KB／MB 只是畫面的寫法。
+            ["field.compressionMode"] = "壓縮方式",
+            ["field.compressionTargetKb"] = "壓縮上限",
+            ["compress.small"] = "小檔",
+            ["compress.standard"] = "標準",
+            ["compress.high"] = "高畫質",
+            ["compress.targetSize"] = "壓縮到",
+            ["compress.needSize"] = "「壓縮到」請填一個 1–1048576 之間的上限，並選 KB 或 MB。",
+            ["unit.kb"] = "KB",
+            ["unit.mb"] = "MB",
 
             // ---- 命名衝突 ----
             ["field.namingCollision"] = "命名衝突",
@@ -207,6 +221,17 @@ internal static class SettingsStrings
 
             ["field.jpgQuality"] = "JPG quality",
             ["field.webpQuality"] = "WebP quality",
+
+            // Compression (M3 third sector). Labels only: the file stores the canonical spellings.
+            ["field.compressionMode"] = "Compression",
+            ["field.compressionTargetKb"] = "Size limit",
+            ["compress.small"] = "Small file",
+            ["compress.standard"] = "Standard",
+            ["compress.high"] = "High quality",
+            ["compress.targetSize"] = "Compress to",
+            ["compress.needSize"] = "For Compress to, enter a limit between 1 and 1048576 and pick KB or MB.",
+            ["unit.kb"] = "KB",
+            ["unit.mb"] = "MB",
 
             ["field.namingCollision"] = "Name collision",
             ["naming.value"] = "Auto-number (1), (2), ...",

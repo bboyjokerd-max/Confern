@@ -543,6 +543,18 @@ Check 'S12.13d no .tmp-* after batch' (@(Get-ChildItem -LiteralPath $Work -Filte
 #                same path are already asserted by m1b's S7.16b/S7.17 -- deliberately
 #                NOT repeated here.
 #
+#                CHANGED 2026-10-06 (M3 third sector, tool id "compress"): the tool
+#                catalog went 2 -> 3, so the count is now pinned to the real number
+#                instead of the weak lower bound this check used to carry.
+#                  old: ($layerTools -ge 1)  -- passed for ANY non-empty catalog, so it
+#                       could not notice a tool being lost or silently dropped either
+#                  new: ($layerTools -eq 3)  -- ROTATE + CLEAN + COMPRESS. Adding a
+#                       fourth tool must update this number on purpose; the failure
+#                       message prints the value that was actually measured.
+#                The semantics did NOT change: this is still "no key held => the wheel
+#                stays on the format layer, and the tool catalog is not empty". A tool
+#                count of 0 still fails, exactly as before.
+#
 #  Desktop hygiene: the "desktop" case writes ONE file onto the user's real desktop.
 #  It is deleted and its absence is re-checked before the next check runs.
 # =============================================================================
@@ -817,9 +829,9 @@ if ($payloadLine) {
   if ($tm.Success) { $layerTools = [int]$tm.Groups[1].Value }
 }
 $dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $layerDump).Length } else { -1 }
-Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (tools available) and dumps that frame' `
-  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -ge 1) -and ($dumpLen -gt 8000)) `
-  "exit=$($layerRun.Exit) tools=$layerTools dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=3 tools) and dumps that frame' `
+  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 3) -and ($dumpLen -gt 8000)) `
+  "exit=$($layerRun.Exit) tools=$layerTools (expected 3: rotate90+strip-metadata+compress; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
 
 "=== result ==="
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"

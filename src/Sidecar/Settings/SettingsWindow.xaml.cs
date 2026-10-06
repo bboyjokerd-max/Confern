@@ -52,6 +52,28 @@ internal partial class SettingsWindow : Window
         ("", "out.source"), ("desktop", "out.desktop"), ("custom", "out.custom")
     };
 
+    /// <summary>
+    /// 壓縮方式的四個選項（M3 第三顆扇形，2026-10-06 使用者裁定：等級走設定頁）。
+    /// <c>Tag</c> 就是**寫回設定檔的值**——直接取自 <see cref="CompressionPolicy"/>，
+    /// 所以「有哪些等級」仍然只有那一個擁有者；這裡只是把標籤配上去。
+    /// </summary>
+    private static readonly (string Tag, string Key)[] CompressionPresets =
+    {
+        (CompressionPolicy.ModeSmall, "compress.small"),
+        (CompressionPolicy.ModeStandard, "compress.standard"),
+        (CompressionPolicy.ModeHigh, "compress.high"),
+        (CompressionPolicy.ModeTargetSize, "compress.targetSize")
+    };
+
+    /// <summary>
+    /// 上限那兩格的單位。**只有畫面才有單位**：設定檔存的是 KB 一個數字，
+    /// 所以「1024 KB」與「1 MB」是同一個設定值，不會在 diff 裡看起來像兩筆不同的設定。
+    /// </summary>
+    private static readonly (string Tag, string Key)[] CompressionUnits =
+    {
+        ("kb", "unit.kb"), ("mb", "unit.mb")
+    };
+
     private readonly string _path;
     private readonly Action<Settings>? _onSaved;
     private readonly Action<string>? _log;
@@ -68,6 +90,16 @@ internal partial class SettingsWindow : Window
     /// 建構時由 <see cref="LoadFromSettings"/> 指派。寫回檔案的值由 <see cref="OutputValueFromUi"/> 決定。
     /// </summary>
     private string _outputPreset = "";
+
+    /// <summary>
+    /// 目前 UI 上選的壓縮方式：<see cref="CompressionPolicy.ModeSmall"/>／
+    /// <see cref="CompressionPolicy.ModeStandard"/>／<see cref="CompressionPolicy.ModeHigh"/>／
+    /// <see cref="CompressionPolicy.ModeTargetSize"/>。建構時由 <see cref="LoadFromSettings"/> 指派。
+    /// </summary>
+    private string _compressionPreset = CompressionPolicy.ModeStandard;
+
+    /// <summary>上限那一格的顯示單位：<c>kb</c> 或 <c>mb</c>（只有畫面用它）。</summary>
+    private string _compressionUnit = "kb";
 
     /// <summary>真的按下「儲存」且成功時，才記下來給呼叫端。</summary>
     private Settings _saved = new();
@@ -115,6 +147,10 @@ internal partial class SettingsWindow : Window
         OutputPresetBox.SelectionChanged += OnOutputPresetChanged;
         OutputPathBox.TextChanged += OnOutputPathChanged;
 
+        CompressModeBox.SelectionChanged += OnCompressModeChanged;
+        CompressUnitBox.SelectionChanged += OnCompressUnitChanged;
+        CompressTargetBox.TextChanged += OnCompressTargetChanged;
+
         SaveButton.Click += OnSaveClick;
         CancelButton.Click += OnCancelClick;
 
@@ -161,6 +197,10 @@ internal partial class SettingsWindow : Window
         LoadOutputFolder(s.OutputFolder);
         RebuildOutputItems();
         RefreshOutput();
+
+        LoadCompression(s.CompressionMode, s.CompressionTargetKb);
+        RebuildCompressionItems();
+        RefreshCompress();
     }
 
     /// <summary>把設定檔裡的觸發鍵正規化；解析不了就保留原字串並在 warning 行說出來（在 <see cref="RefreshTrigger"/>）。</summary>
@@ -207,6 +247,7 @@ internal partial class SettingsWindow : Window
         NamingReasonText.Text = L("naming.reason");
 
         TimeoutLabel.Text = L("field.timeout");
+        CompressLabel.Text = L("field.compressionMode");
 
         HotkeyLabel.Text = L("field.emergencyHotkey");
         HotkeyStubText.Text = L("stub.emergencyHotkey");
@@ -227,8 +268,10 @@ internal partial class SettingsWindow : Window
         RebuildTriggerItems();
         RebuildLanguageItems();
         RebuildOutputItems();
+        RebuildCompressionItems();
         RefreshTrigger();
         RefreshOutput();
+        RefreshCompress();
         RenderStatus();
     }
 
@@ -556,6 +599,160 @@ internal partial class SettingsWindow : Window
         string.Equals(_outputPreset, "custom", StringComparison.Ordinal) ? (OutputPathBox.Text ?? "") : _outputPreset;
 
     // =====================================================================================
+    // 壓縮方式（M3 第三顆扇形，2026-10-06）
+    //
+    // 使用者裁定：壓縮的等級**由設定頁決定**——輪盤上不會多出「小檔／標準／高畫質」三顆扇形，
+    // 也沒有循環切換。所以這一組控制項就是那個決定的**唯一介面**，而它底下的權威仍然是
+    // CompressionPolicy（有哪些等級）與 SettingsStore.TryApply（鍵→欄位、拒絕理由）。
+    //
+    // ⚠ 這一整段**一個例外都不准丟**：這個專案才剛因為設定頁的例外殺掉 UI 執行緒付過代價
+    //   （2026-10-06）。所以「不合法」一律走既有的兩條路：
+    //     ①行內提示（RefreshCompress）＝使用者還在打字時就看到「還不能存」；
+    //     ②存檔被擋（BuildFromUi）＝按下去時指名道姓地說出哪一格、什麼值。
+    //   兩條路都**先問 SettingsStore.TryApply**，不自己寫第二份「什麼叫合法的大小」。
+    // =====================================================================================
+
+    /// <summary>把兩個下拉的項目重建一次（語言切換時整個重跑）。與 <see cref="RebuildOutputItems"/> 同一個形狀。</summary>
+    private void RebuildCompressionItems()
+    {
+        bool previous = _suppressComboEvents;
+        _suppressComboEvents = true;
+        try
+        {
+            CompressModeBox.Items.Clear();
+            foreach ((string tag, string key) in CompressionPresets)
+                CompressModeBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+            CompressModeBox.SelectedItem = CompressModeBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag as string, _compressionPreset, StringComparison.Ordinal));
+
+            CompressUnitBox.Items.Clear();
+            foreach ((string tag, string key) in CompressionUnits)
+                CompressUnitBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+            CompressUnitBox.SelectedItem = CompressUnitBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag as string, _compressionUnit, StringComparison.Ordinal));
+        }
+        finally
+        {
+            _suppressComboEvents = previous;
+        }
+    }
+
+    /// <summary>
+    /// 設定檔的值 → 畫面（<see cref="LoadFromSettings"/> 與 <see cref="ApplyEdited"/> 共用）。
+    ///
+    /// 模式走 <see cref="CompressionPolicy.CanonicalMode"/>（認不得的收斂成標準——與
+    /// <see cref="Settings.Normalized"/> 同一個權威，所以畫面上顯示的一定是引擎會用的那一個）。
+    /// 上限的顯示單位是**挑回得去的那一個**：能整除 1024 就用 MB（2048 KB 顯示成 2 MB），
+    /// 否則用 KB（1500 KB 就顯示 1500 KB）——存的是 KB，一個數字，不存單位。
+    /// </summary>
+    private void LoadCompression(string? mode, int targetKb)
+    {
+        _compressionPreset = CompressionPolicy.CanonicalMode(mode);
+
+        int kb = Math.Clamp(targetKb, 0, CompressionPolicy.MaxTargetKb);
+        if (kb > 0 && kb % 1024 == 0)
+        {
+            _compressionUnit = "mb";
+            CompressTargetBox.Text = (kb / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            _compressionUnit = "kb";
+            CompressTargetBox.Text = kb > 0
+                ? kb.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "";
+        }
+    }
+
+    private void OnCompressModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressComboEvents) return;
+        if (CompressModeBox.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        _compressionPreset = tag;
+        RefreshCompress();
+        MarkDirty();
+    }
+
+    private void OnCompressUnitChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressComboEvents) return;
+        if (CompressUnitBox.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        _compressionUnit = tag;
+        RefreshCompress();
+        MarkDirty();
+    }
+
+    private void OnCompressTargetChanged(object sender, TextChangedEventArgs e)
+    {
+        RefreshCompress();
+        MarkDirty();
+    }
+
+    /// <summary>
+    /// 更新這一行的可編輯狀態與提示。合法性**只有 <see cref="SettingsStore.TryApply"/> 說了算**
+    /// ——這裡把文字框的內容餵進去問一次（與存檔走同一條路），而不是自己寫一份
+    /// 「什麼叫可用的上限」。那個 <c>_ => { }</c> 的日誌：使用者每打一個字都會被拒絕一次，
+    /// 寫進證據檔只會洗版（與 <see cref="RefreshOutput"/> 同一個理由）。
+    /// </summary>
+    private void RefreshCompress()
+    {
+        bool targetSize = string.Equals(_compressionPreset, CompressionPolicy.ModeTargetSize,
+                                        StringComparison.Ordinal);
+        CompressTargetBox.IsEnabled = targetSize;
+        CompressUnitBox.IsEnabled = targetSize;
+
+        bool usable = SettingsStore.TryApply(_saved, "compressionTargetKb", CompressionTargetValueFromUi(),
+                                             _ => { }, out Settings _);
+        CompressNoticeText.Text = targetSize && !usable
+            ? SettingsStrings.Get("compress.needSize", _language)
+            : "";
+    }
+
+    /// <summary>
+    /// 這一格要送進 <see cref="SettingsStore.TryApply"/> 的值：**一定是 KB**（設定檔的單位）。
+    ///
+    /// 刻意**不**在這裡判斷「合不合法」：非數字原樣送出（讓 SettingsStore 說「不是整數」）、
+    /// 0 與負數原樣送出（讓它說「至少要 1 KB」）、太大則送一個一定超出上限的整數
+    /// （讓它說「上限是 1048576 KB」）。自己判斷的話，畫面上的理由與存檔時的理由會是兩份。
+    ///
+    /// ⚠ 溢位要自己擋：<c>long.TryParse</c> 過得了 10^18，而 ×1024 會無聲地變成負數。
+    /// </summary>
+    private string CompressionTargetValueFromUi()
+    {
+        string text = (CompressTargetBox.Text ?? "").Trim();
+        if (text.Length == 0) return "";
+
+        if (!long.TryParse(text, System.Globalization.NumberStyles.Integer,
+                           System.Globalization.CultureInfo.InvariantCulture, out long value) || value <= 0)
+            return text;
+
+        long kb = value;
+        if (string.Equals(_compressionUnit, "mb", StringComparison.Ordinal))
+        {
+            if (value > CompressionPolicy.MaxTargetKb) return (CompressionPolicy.MaxTargetKb + 1).ToString();
+            kb = value * 1024L;
+        }
+
+        return kb > CompressionPolicy.MaxTargetKb
+            ? (CompressionPolicy.MaxTargetKb + 1).ToString()
+            : kb.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// 這一格要不要進存檔的欄位清單。
+    ///
+    /// **模式不是「壓縮到」時就不送**：那個值對引擎沒有意義，而送它進去只會讓一個
+    /// 被停用的文字框裡殘留的字（例如使用者打了半個數字又改回「標準」）擋住整筆存檔。
+    /// 不送＝保留設定檔裡原本的值，也就是「你沒動它」——這比「悄悄清成 0」誠實。
+    /// </summary>
+    private bool ShouldSendCompressionTarget =>
+        string.Equals(_compressionPreset, CompressionPolicy.ModeTargetSize, StringComparison.Ordinal);
+
+    // =====================================================================================
     // 開關與滑桿
     // =====================================================================================
 
@@ -688,8 +885,13 @@ internal partial class SettingsWindow : Window
             new("captureTimeoutSeconds", ((int)Math.Round(TimeoutSlider.Value)).ToString()),
             new("emergencyHotkey", hotkeyOn ? HotkeyBox.Text.Trim() : ""),
             new("diagnostics", (DiagnosticsToggle.IsChecked == true).ToString()),
-            new("outputFolder", OutputValueFromUi())
+            new("outputFolder", OutputValueFromUi()),
+            // 壓縮方式（M3 第三顆扇形）。模式的四選一由下拉決定，寫回檔案的是正規寫法；
+            // 上限只在「壓縮到」時才送（見 ShouldSendCompressionTarget）。
+            new("compressionMode", _compressionPreset)
         };
+        if (ShouldSendCompressionTarget)
+            fields.Add(new("compressionTargetKb", CompressionTargetValueFromUi()));
 
         foreach (KeyValuePair<string, string> field in fields)
         {

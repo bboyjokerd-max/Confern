@@ -597,6 +597,27 @@ internal sealed class WheelPresenter
                 // 斜線畫在標籤**上面**（同一支筆、同一個墨水色）：這條線就是「去掉」的意思本體。
                 g.DrawLine(pen, cx - s * 0.52f, cy + s * 0.52f, cx + s * 0.52f, cy - s * 0.52f);
                 break;
+
+            case ToolIcon.Compress:
+                // 兩個相向的箭頭：上箭頭往下、下箭頭往上，箭尖在圓心相遇（＝往中間壓）。
+                // 形狀全部由 s 推導（與另外兩顆同一個規矩），所以圖示尺寸一改三顆一起動。
+                //
+                // 實測的兩個關鍵數字（17px 之下）：箭尖相距 0.20s ≈ 3.4px，而筆寬是
+                // max(1.4, s/9) ≈ 1.9px ⇒ 兩個尖端之間還留得住約 1.5px 的空隙，
+                // 不會糊成一條線；再靠近就會看不出「兩支」。
+                float tip = s * 0.10f;       // 兩個箭尖到圓心的距離
+                float wing = s * 0.30f;      // 箭翼的橫向張開（半寬）
+
+                // 上箭頭：柱（上）＋ 翼（往下收成箭尖）
+                g.DrawLine(pen, cx, cy - s * 0.48f, cx, cy - wing);
+                g.DrawLine(pen, cx - wing, cy - wing, cx, cy - tip);
+                g.DrawLine(pen, cx + wing, cy - wing, cx, cy - tip);
+
+                // 下箭頭：翼（往上收成箭尖）＋ 柱（下）
+                g.DrawLine(pen, cx - wing, cy + wing, cx, cy + tip);
+                g.DrawLine(pen, cx + wing, cy + wing, cx, cy + tip);
+                g.DrawLine(pen, cx, cy + wing, cx, cy + s * 0.48f);
+                break;
         }
     }
 

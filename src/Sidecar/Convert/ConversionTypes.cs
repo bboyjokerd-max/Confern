@@ -13,7 +13,17 @@ internal enum ConversionError
     NoSpace,
     Locked,
     Timeout,
-    Unknown
+    Unknown,
+
+    /// <summary>
+    /// 工具 `compress`（規格 §9.4 的第三顆扇形）專用：「壓縮到」指定的上限**做不到**——
+    /// 已達本產品認可的最低品質（<see cref="CompressionPolicy.SmallQuality"/>）仍然超過上限。
+    ///
+    /// 為什麼要有它而不是隨便挑一個既有分類：這個情況**不是**失敗於環境（權限、空間、鎖定），
+    /// 而是失敗於**使用者的要求本身**。使用者訊息若不說出這一件事，他看到的會是「轉檔失敗」，
+    /// 然後一直重試同一個做不到的上限。規格 §7.1 的精神就是「原因要說得出來」。
+    /// </summary>
+    TargetTooSmall
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
@@ -41,6 +51,8 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         ConversionError.NoSpace => "空間不足",
         ConversionError.Locked => "檔案被鎖定",
         ConversionError.Timeout => "雲端檔案下載逾時",
+        // 工具 compress 專用（規格 §9.4）。說的是「你的上限太低」，不是「轉檔壞了」。
+        ConversionError.TargetTooSmall => "已達最低品質仍超過指定大小",
         _ => "轉檔失敗"
     };
 

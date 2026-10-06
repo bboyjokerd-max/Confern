@@ -32,7 +32,8 @@ internal sealed class ConversionRunner : IDisposable
     /// 非 null＝寫進那個資料夾（見 <see cref="Settings.ResolveOutputDirectory"/>）。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y,
-                      string? toolOp = null, string? outputDir = null)
+                      string? toolOp = null, string? outputDir = null,
+                      CompressionPolicy? compression = null)
     {
         _progress.Start(x, y);
 
@@ -50,7 +51,8 @@ internal sealed class ConversionRunner : IDisposable
             // outputDir 與 toolOp 都是 string?，位置互換也能編譯——所以這兩個**一律具名**，
             // 不靠位置（見 ConversionClient.Start 的說明）。
             if (!_client.Start(sourcePaths, targetFormat, quality,
-                               outputDir: outputDir, toolOp: toolOp, out string? error))
+                               outputDir: outputDir, toolOp: toolOp, out string? error,
+                               compression: compression))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
                 ReportStartFailure(sourcePaths.Length);

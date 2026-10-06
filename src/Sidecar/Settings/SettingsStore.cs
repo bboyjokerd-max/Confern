@@ -29,6 +29,26 @@ internal sealed record Settings
     /// </summary>
     public string OutputFolder { get; init; } = "";
 
+    /// <summary>
+    /// 壓縮等級（2026-10-06 M3 的第三顆扇形，工具 id <c>compress</c>）。四個正規值見
+    /// <see cref="CompressionPolicy.Modes"/>。
+    ///
+    /// ⚠ **向後相容的關鍵**：預設值是 <see cref="CompressionPolicy.ModeStandard"/>＝
+    /// 「照既有的 <see cref="JpgQuality"/>／<see cref="WebpQuality"/> 走」。一份沒有這個欄位的
+    /// 舊設定檔載入後就是這個值，而所有**既有**的路徑（格式轉換、旋轉、去中繼資料）根本不讀它，
+    /// 所以舊檔案的行為逐位元不變。等級由設定頁決定（使用者裁定），**不做成輪盤上的多顆扇形**。
+    /// </summary>
+    public string CompressionMode { get; init; } = CompressionPolicy.DefaultMode;
+
+    /// <summary>
+    /// 「壓縮到」的上限，單位 **KB**。<c>0</c>＝沒有上限（＝這個欄位還不存在的年代的意思）。
+    ///
+    /// 為什麼只存一個數字而不連單位一起存：單位是**畫面的寫法**（KB／MB），不是設定值。
+    /// 存兩個欄位就會出現「1024 KB」與「1 MB」兩個不同的檔案內容代表同一件事，
+    /// 而它們在 diff 裡看起來像兩個不同的設定。
+    /// </summary>
+    public int CompressionTargetKb { get; init; } = CompressionPolicy.DefaultTargetKb;
+
     /// <summary>把超出範圍的值夾回規格允許的區間，並回報改了什麼（不靜默）。</summary>
     public Settings Normalized(out List<string> notes)
     {
@@ -39,16 +59,50 @@ internal sealed record Settings
         if (jpg != JpgQuality) notes.Add($"JpgQuality {JpgQuality} -> {jpg} (spec 8: 60-100)");
         if (webp != WebpQuality) notes.Add($"WebpQuality {WebpQuality} -> {webp} (spec 8: 60-100)");
         if (capture != CaptureTimeoutSeconds) notes.Add($"CaptureTimeoutSeconds {CaptureTimeoutSeconds} -> {capture} (spec 8: 5-120)");
-        return this with { JpgQuality = jpg, WebpQuality = webp, CaptureTimeoutSeconds = capture };
+
+        // 壓縮政策（M3）。**這裡一個例外都不准丟**：設定檔是給人直接改的，打錯字必須是
+        // 「夾回／退回預設並大聲記 log」，不是「程式起不來」——本專案才剛為此付過代價
+        // （設定頁的例外殺掉 UI 執行緒，2026-10-06）。
+        string mode = CompressionPolicy.CanonicalModeOrEmpty(CompressionMode);
+        if (mode.Length == 0)
+        {
+            notes.Add($"CompressionMode '{CompressionMode}' -> '{CompressionPolicy.ModeStandard}' " +
+                      $"(not one of {string.Join("/", CompressionPolicy.Modes)})");
+            mode = CompressionPolicy.ModeStandard;
+        }
+
+        int targetKb = Math.Clamp(CompressionTargetKb, 0, CompressionPolicy.MaxTargetKb);
+        if (targetKb != CompressionTargetKb)
+            notes.Add($"CompressionTargetKb {CompressionTargetKb} -> {targetKb} " +
+                      $"(0 = no limit, max {CompressionPolicy.MaxTargetKb})");
+
+        // 「壓縮到」卻沒有上限＝這個模式做不到任何事。**退回標準並說出來**，不要留下一個
+        // 「存得下但沒生效」的組合：使用者選了「壓縮到 0 KB」時，他要的是「照原本的品質走」，
+        // 而不是「每一張都失敗」。
+        if (mode == CompressionPolicy.ModeTargetSize && targetKb < CompressionPolicy.MinTargetKb)
+        {
+            notes.Add($"CompressionMode '{mode}' without a target (CompressionTargetKb={CompressionTargetKb}) " +
+                      $"-> '{CompressionPolicy.ModeStandard}' (a limit of 0 KB is not a limit)");
+            mode = CompressionPolicy.ModeStandard;
+            targetKb = 0;
+        }
+
+        return this with
+        {
+            JpgQuality = jpg,
+            WebpQuality = webp,
+            CaptureTimeoutSeconds = capture,
+            CompressionMode = mode,
+            CompressionTargetKb = targetKb
+        };
     }
 
     /// <summary>目標格式要用的編碼品質（只有 JPG／WebP 有意義）。</summary>
-    public int QualityFor(string targetFormat) => targetFormat switch
-    {
-        "JPG" => JpgQuality,
-        "WEBP" => WebpQuality,
-        _ => 100
-    };
+    public int QualityFor(string targetFormat) =>
+        CompressionPolicy.QualityForFormat(JpgQuality, WebpQuality, targetFormat);
+
+    /// <summary>這份設定所代表的壓縮政策（「壓縮」工具的唯一輸入）。</summary>
+    public CompressionPolicy ToCompressionPolicy() => CompressionPolicy.FromSettings(this);
 
     /// <summary>
     /// 解析 <see cref="OutputFolder"/> 成為實際路徑。**回傳 null ＝來源檔旁邊**——
@@ -89,19 +143,21 @@ internal static class SettingsStore
     };
 
     /// <summary>
-    /// 規格 §8 的九個鍵 ＋ <see cref="Settings.OutputFolder"/>（規格 §9.5，2026-10-05 追加的第十個）。
+    /// 規格 §8 的九個鍵 ＋ <see cref="Settings.OutputFolder"/>（規格 §9.5，2026-10-05 追加的第十個）
+    /// ＋ 壓縮政策的兩個鍵（M3，2026-10-06 追加的第十一與第十二個）。
     /// **唯一擁有者**：未知鍵警告、`--settings-set`、設定頁都走這裡。
     ///
     /// ⚠ <c>OutputFolder</c> 曾經漏列：設定檔裡出現它會被當成打錯字而警告一次
     /// （C1a 加了欄位卻沒加鍵，2026-10-05 的 C1 補上）。這種警告一旦是假警報，
-    /// 真正打錯字的那一則就沒人會看。
+    /// 真正打錯字的那一則就沒人會看。所以加欄位時**這裡一定要一起加**。
     /// </summary>
     public static readonly string[] KnownKeys =
     {
         nameof(Settings.JpgQuality), nameof(Settings.WebpQuality), nameof(Settings.TriggerKey),
         nameof(Settings.StartWithWindows), nameof(Settings.Language), nameof(Settings.NamingCollision),
         nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics),
-        nameof(Settings.OutputFolder)
+        nameof(Settings.OutputFolder),
+        nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb)
     };
 
     public static string DefaultPath() => Path.Combine(
@@ -112,12 +168,15 @@ internal static class SettingsStore
     ///
     /// ⚠ <c>outputFolder=</c> 只**附加在行尾**（2026-10-05 的 C1）：既有驗收腳本比對的是這行的
     /// 前綴與各 <c>key=value</c> 欄位，插在中間會弄紅它們；行尾追加則兩種都保留。
+    /// 2026-10-06 的 <c>compress=</c> 沿用同一條規矩（第二個行尾欄位，仍然只追加）。
     /// </summary>
     public static string Describe(Settings s) =>
         $"jpgQuality={s.JpgQuality} webpQuality={s.WebpQuality} capture={s.CaptureTimeoutSeconds} " +
         $"trigger={s.TriggerKey} collision={s.NamingCollision} hotkey={s.EmergencyHotkey} " +
         $"diagnostics={s.Diagnostics} startWithWindows={s.StartWithWindows} language={s.Language} " +
-        $"outputFolder={DescribeOutputFolder(s)}";
+        $"outputFolder={DescribeOutputFolder(s)} " +
+        $"compress={CompressionPolicy.CanonicalMode(s.CompressionMode)}" +
+        $"{(s.CompressionTargetKb > 0 ? $"/{s.CompressionTargetKb}KB" : "")}";
 
     /// <summary>
     /// <see cref="Settings.OutputFolder"/> 的顯示寫法（日誌與探針共用）。空字串＝**來源檔旁邊**，
@@ -300,6 +359,43 @@ internal static class SettingsStore
                     log($"settings: reject outputFolder='{value}' (not a usable path: {ex.GetType().Name})");
                     return false;
                 }
+            case "compressionmode":
+                // 「有哪些等級」只有 CompressionPolicy 說了算；這裡只負責把認得的收斂成正規寫法、
+                // 把不認得的**拒絕並說出來**（靜默退回標準＝使用者以為改成功了，而它沒有）。
+                string mode = CompressionPolicy.CanonicalModeOrEmpty(v);
+                if (mode.Length == 0)
+                {
+                    log($"settings: reject compressionMode='{value}' " +
+                        $"(expected one of {string.Join(", ", CompressionPolicy.Modes)})");
+                    return false;
+                }
+                next = current with { CompressionMode = mode };
+                return true;
+            case "compressiontargetkb" or "compressiontarget":
+                // ⚠ 這個 case **一個例外都不准丟**（本專案才因為設定頁的例外殺掉 UI 執行緒付過代價）。
+                // 非數字／負數／0／荒謬的大值都是「拒絕 ＋ 大聲說」——設定頁會把它顯示成
+                // 「還不能存」，而不是讓儲存鈕按下去之後炸開。
+                if (!int.TryParse(v, out int targetKb))
+                {
+                    log($"settings: reject compressionTargetKb='{value}' (not an integer number of KB)");
+                    return false;
+                }
+                if (targetKb < CompressionPolicy.MinTargetKb)
+                {
+                    log($"settings: reject compressionTargetKb={targetKb} " +
+                        $"(a limit must be at least {CompressionPolicy.MinTargetKb} KB; 0 means \"no limit\", " +
+                        "which the compress-to mode cannot act on)");
+                    return false;
+                }
+                if (targetKb > CompressionPolicy.MaxTargetKb)
+                {
+                    log($"settings: reject compressionTargetKb={targetKb} " +
+                        $"(max {CompressionPolicy.MaxTargetKb} KB = 1 GiB; anything above that is larger " +
+                        "than any image this product can encode, i.e. not a limit at all)");
+                    return false;
+                }
+                next = current with { CompressionTargetKb = targetKb };
+                return true;
             case "language":
                 string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"
                             : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ? "zh-Hant"

@@ -400,6 +400,300 @@ internal sealed class ConversionEngine
     }
 
     /// <summary>
+    /// 工具：壓縮（工具 id `compress`，M3 的第三顆扇形；規格 §9.4）。
+    /// **輸出格式＝來源格式**（壓縮不換格式），等級由 <see cref="CompressionPolicy"/> 決定，
+    /// 而政策的唯一來源是設定頁（使用者 2026-10-06 裁定：不做成輪盤上的多顆扇形）。
+    ///
+    /// 骨架與 <see cref="Rotate90"/>／<see cref="StripMetadata"/> 逐項對齊
+    /// （格式檢查 → <see cref="AtomicWriter.Exists"/> → <see cref="CodecRegistry.ProbeDecode"/> →
+    /// <see cref="NamingPolicy.ResolveOutputPath"/> → 處理 → <see cref="AtomicWriter.Write"/> ＋
+    /// 同一套 3 次重試）：規格 §5 的寫入契約只有一個擁有者，工具不得自己另開一條。
+    ///
+    /// 四個模式（<see cref="CompressionPolicy.Mode"/>）：
+    ///   • <c>small</c>——固定 <see cref="CompressionPolicy.SmallQuality"/>；
+    ///   • <c>standard</c>——<see cref="CompressionPolicy.StandardQualityFor"/>＝**既有的品質設定**
+    ///     （＝這個工具出現之前的行為）；
+    ///   • <c>high</c>——固定 <see cref="CompressionPolicy.HighQuality"/>；
+    ///   • <c>target-size</c>——**反覆重編碼逼近上限**，見 <see cref="SearchByQuality"/>。
+    ///
+    /// ⚠ **沒有品質旋鈕的格式（PNG／BMP／TIF／GIF）**：它們是無損（或無損式）容器，WIC 的編碼器
+    /// 沒有品質參數（<see cref="CodecRegistry.CreateEncoder"/>），所以小檔／標準／高畫質**在它們
+    /// 身上產生位元組完全相同的檔案**——這件事會寫進日誌，不假裝三個模式有差別；
+    /// 「壓縮到」在它們身上也沒有等價手段可以逼近，所以只做**一次無損重編碼**並誠實回報：
+    /// 進得去上限就成功，進不去就回 <see cref="ConversionError.TargetTooSmall"/>（不留檔案）。
+    /// </summary>
+    public ConversionResult Compress(string sourcePath, CompressionPolicy policy,
+                                     TempJournal? journal = null, string? targetDirectory = null)
+    {
+        string? sourceFormat = _codecs.FormatOfPath(sourcePath);
+        if (sourceFormat == null)
+            return Fail(sourcePath, ConversionError.Unsupported, "extension is not in the format table");
+        if (_codecs.Capability(sourceFormat) is { Decode: DecodeSupport.No })
+            return Fail(sourcePath, ConversionError.Unsupported, $"no decoder for {sourceFormat}");
+
+        // ⚠ 這個工具**輸出＝來源格式**，所以「解碼得動」不等於「做得到」：WebP 在本機解得動、
+        // 編不動（見 CodecRegistry.DeclareWebp）。不明講的話使用者會拿到 Unknown（「轉檔失敗」），
+        // 而不是規格 §7.1 已經有的「此格式目前無法輸出」。
+        if (_codecs.Capability(sourceFormat) is { CanEncode: false })
+            return Fail(sourcePath, ConversionError.TargetUnavailable,
+                $"no encoder for the source format {sourceFormat}; the compress tool writes back in the " +
+                "source format, so it cannot run here (spec 7.1: say it, do not pretend)");
+
+        if (!AtomicWriter.Exists(sourcePath))
+            return Fail(sourcePath, ConversionError.SourceMissing, "source disappeared before compression");
+
+        DecodeOutcome probe = _codecs.ProbeDecode(sourcePath);
+        if (probe.Status != DecodeStatus.Ok)
+            return Fail(sourcePath, MapDecodeStatus(probe.Status), probe.Detail);
+
+        string? extension = _codecs.PrimaryExtension(sourceFormat);
+        if (extension == null)
+            return Fail(sourcePath, ConversionError.TargetUnavailable, "no extension for source format");
+
+        string targetPath;
+        try
+        {
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**：
+            // 靜默的回退會讓使用者以為設定生效了，然後找不到檔案（規格 §9.5）。
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        BitmapSource frame;
+        int frameCount;
+        try
+        {
+            (frame, frameCount) = DecodeFirstFrame(sourcePath);
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, sourceFormat, sourcePath)),
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (frameCount > 1)
+            _log($"note: {Path.GetFileName(sourcePath)} has {frameCount} frames; only the first is compressed (spec 6.1)");
+
+        // EXIF 方向：與 Convert 同一條既有的裁定——JPG／TIFF 的檢視器會遵循 tag 所以原樣保留，
+        // 其餘的檢視器不看 tag，必須把方向烤進像素再中和 tag（否則壓縮完的圖會躺下）。
+        int orientation = ReadOrientation(frame);
+        bool bakedOrientation = false;
+        if (orientation >= 2 && !TargetHonoursExifOrientation(sourceFormat))
+        {
+            frame = ApplyOrientation(frame, orientation);
+            bakedOrientation = true;
+            _log($"orientation: EXIF={orientation} baked into pixels for {sourceFormat} " +
+                 $"({frame.PixelWidth}x{frame.PixelHeight})");
+        }
+
+        long beforeBytes = new FileInfo(LongPath.Prepare(sourcePath)).Length;
+        long target = policy.TargetBytes;
+        bool canControlSize = CompressionPolicy.QualityControlsSize(sourceFormat);
+
+        int quality;
+        byte[]? precomputed = null;
+
+        if (policy.Mode == CompressionPolicy.ModeTargetSize)
+        {
+            if (canControlSize)
+            {
+                SearchOutcome search = SearchByQuality(frame, sourcePath, sourceFormat, bakedOrientation, target);
+                if (!search.Reachable)
+                {
+                    // 回報實話：連最低品質都超過上限時**不留檔案**。留一個「比較小的」檔案會讓
+                    // 使用者以為「壓縮到 100 KB」成功了，而它其實是 210 KB。
+                    _log($"compress: target-size unreachable for {Path.GetFileName(sourcePath)} " +
+                         $"(even quality={CompressionPolicy.SmallQuality} is {search.SizeAtFloor}B > {target}B) " +
+                         "-> refusing; no file is written (say it, do not pretend)");
+                    return Fail(sourcePath, ConversionError.TargetTooSmall,
+                        $"smallest encodable version is {search.SizeAtFloor}B at quality " +
+                        $"{CompressionPolicy.SmallQuality}, above the {target}B limit");
+                }
+                quality = search.Quality;
+                precomputed = search.Bytes;
+            }
+            else
+            {
+                // 沒有等價手段：只做一次無損重編碼，然後**拿實際量到的位元組數**跟上限比。
+                _log($"compress: {sourceFormat} is a lossless container (no quality knob in the encoder) " +
+                     $"=> the limit {target}B cannot be approached by re-encoding; measuring one lossless " +
+                     "re-encode against it instead");
+                quality = policy.StandardQualityFor(sourceFormat);
+                precomputed = EncodeToBytes(frame, sourcePath, sourceFormat, quality, bakedOrientation);
+                if (precomputed.LongLength > target)
+                {
+                    _log($"compress: target-size unreachable for {Path.GetFileName(sourcePath)} " +
+                         $"({sourceFormat} lossless re-encode is {precomputed.LongLength}B > {target}B; " +
+                         "there is no lower-quality setting to try) -> refusing; no file is written");
+                    return Fail(sourcePath, ConversionError.TargetTooSmall,
+                        $"a lossless {sourceFormat} re-encode is {precomputed.LongLength}B and this format " +
+                        $"has no quality setting to lower, so the {target}B limit cannot be met");
+                }
+            }
+        }
+        else
+        {
+            quality = policy.Mode switch
+            {
+                CompressionPolicy.ModeSmall => CompressionPolicy.SmallQuality,
+                CompressionPolicy.ModeHigh => CompressionPolicy.HighQuality,
+                _ => policy.StandardQualityFor(sourceFormat)
+            };
+            if (!canControlSize)
+            {
+                // 誠實：這三個模式在這個格式上**沒有差別**。不講的話，「小檔」看起來像壞了。
+                _log($"compress: note: {sourceFormat} is a lossless container, so its encoder has no " +
+                     $"quality knob; mode={policy.Mode} and standard produce byte-identical output here");
+            }
+        }
+
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                long written = 0;
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                AtomicWriter.Write(targetPath, stream =>
+                {
+                    if (precomputed == null)
+                    {
+                        EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, quality, stream, bakedOrientation);
+                    }
+                    else
+                    {
+                        // 搜尋／量測階段編出來的位元組**原封不動**寫出：重新編一次會得到同樣的位元組
+                        // （編碼器是決定性的），但「量到的」與「寫出的」就不再是同一個東西了。
+                        stream.Write(precomputed, 0, precomputed.Length);
+                    }
+                    written = stream.Length;
+                }, journal);
+                timer.Stop();
+
+                _log($"compressed {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+                     $"({sourceFormat}, mode={policy.Mode}, quality={quality}, " +
+                     $"{beforeBytes}B -> {written}B" +
+                     $"{(target > 0 ? $", target={target}B" : "")}, {timer.Elapsed.TotalMilliseconds:F0} ms)");
+                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+                    $"{beforeBytes}B -> {written}B in {timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}");
+            }
+            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
+            {
+                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
+                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                Thread.Sleep(150 * attempt);
+            }
+            catch (Exception ex)
+            {
+                return Fail(sourcePath, ClassifyWriteFailure(ex),
+                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
+            }
+        }
+
+        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+    }
+
+    /// <summary>「壓縮到」的搜尋結果。</summary>
+    /// <param name="Reachable">最低品質是否就進得了上限。false 時 <see cref="Bytes"/> 是 null。</param>
+    /// <param name="Quality">找到的最佳品質（<see cref="Reachable"/> 為 false 時沒有意義）。</param>
+    /// <param name="Bytes">那個品質編出來的位元組（原封不動寫出，不再重編一次）。</param>
+    /// <param name="SizeAtFloor">最低品質的位元組數（做不到時，這是「實話」的那個數字）。</param>
+    private sealed record SearchOutcome(bool Reachable, int Quality, byte[]? Bytes, long SizeAtFloor);
+
+    /// <summary>
+    /// 「壓縮到」的核心：在**可用的品質區間**上二分搜尋，取**不超過上限裡最好的那一版**。
+    ///
+    /// 為什麼是二分搜尋而不是線性掃描：JPEG 的輸出大小對品質是（實務上）單調不減的，
+    /// 而區間只有 41 個整數值——但每一個值都代表一次完整的編碼（解碼後的畫格 × 熵編碼），
+    /// 在 2816×2816 上是一次幾百毫秒的工作。二分搜尋把最壞情況從 41 次降到 6 次。
+    ///
+    /// **「最好的那一版」怎麼定義、怎麼證明**：
+    ///   • 定義：在 {60…100} 之中，**輸出 ≤ 上限**的最大品質。
+    ///   • 證明：跑完之後**再編一次 q+1**（若 q &lt; 100）並量它的實際位元組數，
+    ///     它必須 &gt; 上限。那不是推論，是同一次執行裡量到的數字，而且會寫進日誌
+    ///     （`compress: target-size proof ...`）。所以「再升一級就會超過上限」是當場驗過的，
+    ///     不是靠單調性的假設。單調性本身也留了痕跡：每一次探測的 (品質, 位元組數) 都逐行寫進日誌。
+    ///
+    /// ⚠ 區間下界是 <see cref="CompressionPolicy.SmallQuality"/>（60），因為那是規格 §8 品質
+    /// 滑桿的下限，也是本產品認可的最低品質；`JpegBitmapEncoder` 自己也會把值夾到 60。
+    /// 連 60 都超過上限時回 <c>Reachable=false</c>——呼叫端必須**不寫檔**並回報實話。
+    /// </summary>
+    private SearchOutcome SearchByQuality(BitmapSource frame, string sourcePath, string sourceFormat,
+                                           bool bakedOrientation, long target)
+    {
+        const int lo0 = CompressionPolicy.SmallQuality;
+        const int hi0 = 100;
+
+        byte[] atFloor = EncodeToBytes(frame, sourcePath, sourceFormat, lo0, bakedOrientation);
+        _log($"compress search: quality={lo0} -> {atFloor.LongLength}B " +
+             $"({(atFloor.LongLength <= target ? "<=" : ">")} target {target}B)");
+        if (atFloor.LongLength > target) return new SearchOutcome(false, 0, null, atFloor.LongLength);
+
+        int lo = lo0, hi = hi0, best = lo0;
+        byte[] bestBytes = atFloor;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) / 2;
+            if (mid == lo0) { lo = mid + 1; continue; }   // 下限已經量過了，不要再編一次
+            byte[] bytes = EncodeToBytes(frame, sourcePath, sourceFormat, mid, bakedOrientation);
+            bool fits = bytes.LongLength <= target;
+            _log($"compress search: quality={mid} -> {bytes.LongLength}B " +
+                 $"({(fits ? "<=" : ">")} target {target}B)");
+            if (fits)
+            {
+                best = mid;
+                bestBytes = bytes;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        // 當場的證據：再升一級就會超過上限（q = 100 時沒有「再升一級」這種東西）。
+        if (best < hi0)
+        {
+            byte[] next = EncodeToBytes(frame, sourcePath, sourceFormat, best + 1, bakedOrientation);
+            _log($"compress: target-size proof quality={best} -> {bestBytes.LongLength}B <= {target}B; " +
+                 $"quality={best + 1} -> {next.LongLength}B " +
+                 $"{(next.LongLength > target ? ">" : "<=")} {target}B " +
+                 (next.LongLength > target
+                     ? "(so this is the best version that fits the limit)"
+                     : "(WARNING: the next step also fits, so the search is not optimal -- the encoder is " +
+                       "not monotone in quality here; the probed sizes above are the evidence)"));
+        }
+        else
+        {
+            _log($"compress: target-size proof quality={hi0} is the maximum the encoder accepts; " +
+                 $"{bestBytes.LongLength}B <= {target}B");
+        }
+
+        return new SearchOutcome(true, best, bestBytes, atFloor.LongLength);
+    }
+
+    /// <summary>
+    /// 用與寫檔**完全相同**的那條編碼路徑編到記憶體裡（<see cref="EncodeWithMetadataFallback"/>），
+    /// 以便在寫檔之前先量大小。metadata 的取捨（保不住就退回不夾帶）因此與真正寫出的那一版一致。
+    /// </summary>
+    private byte[] EncodeToBytes(BitmapSource frame, string sourcePath, string sourceFormat,
+                                 int quality, bool bakedOrientation)
+    {
+        using var buffer = new MemoryStream();
+        EncodeWithMetadataFallback(frame, sourcePath, sourceFormat, quality, buffer, bakedOrientation);
+        return buffer.ToArray();
+    }
+
+    /// <summary>
     /// 去 metadata 的第二條路：解碼 → **不夾帶任何 metadata／ICC** → 以來源格式重編碼。
     ///
     /// <c>keepMetadata: false</c> 同時丟掉 <see cref="BitmapMetadata"/> 與 <c>ColorContexts</c>，

@@ -98,9 +98,14 @@ internal sealed class ConversionClient : IDisposable
     /// ⚠ <paramref name="outputDir"/> 與 <paramref name="toolOp"/> **都是 `string?`**：
     /// 兩者位置互換**編譯照過**，錯的是行為（把 `rotate90` 當成資料夾路徑、把資料夾路徑當成
     /// 工具名稱）。所以呼叫端一律用**具名引數**指名這兩者，不靠位置。
+    ///
+    /// <paramref name="compression"/>（2026-10-06 M3 第三顆扇形）：`op=compress` 的等級政策，
+    /// **其餘 op 一律傳 null**——null 時那四個欄位不會進訊息（<c>WhenWritingNull</c>），
+    /// 所以既有的封包一個位元組都沒變。政策的擁有者是 <see cref="Settings.ToCompressionPolicy"/>，
+    /// 這裡只搬運，不在 UI 端先算品質：真正要知道「每個檔是什麼格式」的是 worker。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
-                      string? toolOp, out string? error)
+                      string? toolOp, out string? error, CompressionPolicy? compression = null)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -172,7 +177,13 @@ internal sealed class ConversionClient : IDisposable
             op = op,
             // 照 op 的作法：null 不進訊息（JsonIgnoreCondition.WhenWritingNull），
             // 而 worker 收到 null 的意思正是「來源檔旁邊」——缺席語意與意圖一致。
-            outputDir = outputDir
+            outputDir = outputDir,
+            // 壓縮政策（只有 op=compress 會填）。四個欄位一起送／一起不送：一個只有一半的
+            // 政策在 worker 端會變成「模式是壓縮到、上限卻缺席」的組合，那正是要防的東西。
+            compressMode = compression?.Mode,
+            compressTargetBytes = compression?.TargetBytes ?? 0,
+            standardJpgQuality = compression?.StandardJpgQuality ?? 0,
+            standardWebpQuality = compression?.StandardWebpQuality ?? 0
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
         _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, " +

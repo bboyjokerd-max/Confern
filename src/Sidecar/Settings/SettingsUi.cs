@@ -503,6 +503,34 @@ internal static class SettingsUi
     }
 
     /// <summary>
+    /// 讀出畫面上那兩行「還不能存」的行內提示（診斷用）。
+    ///
+    /// 存在的理由：<see cref="SelfTestSave"/> 的 <c>detail</c> 是**狀態列**的文字，而使用者
+    /// 真正會先看到的是欄位底下那一行；只驗狀態列的話，「行內提示整行是空的」這個 bug 會全綠。
+    /// 這裡刻意只讀不寫——它是一個觀察窗，不是第二個權威。
+    /// </summary>
+    public static bool SelfTestNoticeTexts(int timeoutMs, out string detail, Action<string> log)
+    {
+        string report = "(the settings page never answered)";
+        bool ran = RunOnUiThread(timeoutMs, log, "selftest notice texts", out string failure, () =>
+        {
+            SettingsWindow? w = _window;
+            if (w == null || !w.IsLoaded)
+                return "(no settings window is open)";
+
+            report = $"compressNotice='{w.CompressNoticeText.Text}' " +
+                     $"outputNotice='{w.OutputNoticeText.Text}' " +
+                     $"limitBoxEnabled={w.CompressTargetBox.IsEnabled} " +
+                     $"limitBoxText='{w.CompressTargetBox.Text}'";
+            return null;
+        });
+
+        detail = ran ? report : $"selftest: {failure}";
+        Log(log, detail);
+        return ran;
+    }
+
+    /// <summary>
     /// 以「和真人按下取消鈕完全相同的那條路徑」關掉設定頁：對 <c>CancelButton</c> 發出真正的
     /// <see cref="Button.ClickEvent"/>，由 <see cref="SettingsWindow"/> 自己的處理常式
     /// （<c>OnCancelClick =&gt; Close()</c>，右上角的 X 也是同一條）關閉視窗。
@@ -963,7 +991,8 @@ internal static class SettingsUi
                 window.OutputLabel,
                 window.JpgLabel, window.WebpLabel, window.NamingLabel, window.TimeoutLabel,
                 window.HotkeyLabel, window.DiagnosticsLabel, window.TriggerValueText, window.JpgValueText,
-                window.WebpValueText, window.TimeoutValueText, window.NamingValueText
+                window.WebpValueText, window.TimeoutValueText, window.NamingValueText,
+                window.CompressLabel
             })
                 t.Foreground = TextMain;
 
@@ -984,6 +1013,8 @@ internal static class SettingsUi
             window.NamingReasonText.Foreground = WarningFg;
             // 輸出資料夾那一行的提示（規格 §9.5）：與觸發鍵的警告同一個顏色、同一種語意
             window.OutputNoticeText.Foreground = WarningFg;
+            // 壓縮方式那一行的提示（M3 第三顆扇形）：同一種語意——「這樣還不能存」
+            window.CompressNoticeText.Foreground = WarningFg;
             window.HotkeyStubText.Foreground = StubFg;
             window.StartupStubBadge.Foreground = StubFg;
 
@@ -991,7 +1022,11 @@ internal static class SettingsUi
             SecondaryButton(window.CancelButton);
             SecondaryButton(window.CaptureButton);
 
-            foreach (ComboBox box in new[] { window.TriggerPresetBox, window.LanguageBox, window.OutputPresetBox })
+            foreach (ComboBox box in new[]
+            {
+                window.TriggerPresetBox, window.LanguageBox, window.OutputPresetBox,
+                window.CompressModeBox, window.CompressUnitBox
+            })
             {
                 box.Background = SurfaceBg;
                 box.Foreground = TextMain;
@@ -1000,7 +1035,8 @@ internal static class SettingsUi
             }
 
             // 輸出資料夾的自訂路徑：與緊急熱鍵的文字框同一種外觀（這一頁只有這一種輸入框樣式）
-            foreach (TextBox input in new[] { window.HotkeyBox, window.OutputPathBox })
+            // 壓縮上限那一格也是同一種輸入框（M3 第三顆扇形）
+            foreach (TextBox input in new[] { window.HotkeyBox, window.OutputPathBox, window.CompressTargetBox })
             {
                 input.Background = SurfaceBg;
                 input.Foreground = TextMain;

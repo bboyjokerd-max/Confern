@@ -5,9 +5,10 @@ namespace Sidecar;
 /// <see cref="ToolDescriptor"/> ＋ 對應的執行實作，輪盤與命中測試不必改一行
 /// （<see cref="WheelGeometry"/> 早就對扇區數泛化：<c>SweepDeg(count)</c>／<c>SectorAt(…, count)</c>）。
 ///
-/// 目前有兩個工具（2026-10-06），兩個都是**已經能執行**才放上來的：`ROTATE`（順時針 90°）
-/// 與 `CLEAN`（去 metadata）。M3 的其餘五項（裁切、壓縮、讀 QR、合併 PDF、去背）各自需要
-/// 新互動或新相依，見 `docs/aegis/plans/2026-10-05-m3-tools-wheel.md` §1 的相依盤點。
+/// 目前有三個工具（2026-10-06），三個都是**已經能執行**才放上來的：`ROTATE`（順時針 90°）、
+/// `CLEAN`（去 metadata）與 `COMPRESS`（壓縮，等級由設定頁決定）。
+/// M3 的其餘四項（裁切、讀 QR、合併 PDF、去背）各自需要新互動或新相依，
+/// 見 `docs/aegis/plans/2026-10-05-m3-tools-wheel.md` §1 的相依盤點。
 /// </summary>
 internal sealed class ToolCatalog : IToolCatalog
 {
@@ -58,10 +59,34 @@ internal sealed class ToolCatalog : IToolCatalog
         Icon: ToolIcon.StripMetadata);
 
     /// <summary>
+    /// M3 的第三個工具：**壓縮**（`compress`）。輸出格式＝來源格式（壓縮不換格式），
+    /// 只把品質換成「能讓檔案變小的那一版」。
+    ///
+    /// ⚠ **等級不在這裡、也不在輪盤上**（使用者 2026-10-06 明確裁定）：由設定頁的
+    /// 「壓縮方式」單選決定（小檔／標準／高畫質／壓縮到），唯一權威是
+    /// <see cref="CompressionPolicy"/>。輪盤只多**一顆**扇形，沒有循環切換、沒有多顆扇形。
+    ///
+    /// 為什麼圓心膠囊寫「依設定壓縮」而不是寫出當前等級：膠囊會**跟著 hover 走**，
+    /// 而等級會在使用者改設定之後才變——把一個會過期的等級寫進 hover 提示，等於在畫面上
+    /// 放第二個（而且會說謊的）設定來源。要問「現在是哪一級」請看設定頁；
+    /// 引擎每次執行都會把實際用的 mode 與 quality 寫進日誌。
+    ///
+    /// 文字長度預算是硬性的（圓心鏤空直徑 94px）：17px 下 `依設定壓縮` 實測與既有的
+    /// `去中繼資料` 同一個量級（5 個漢字 ≈ 97px ⇒ 膠囊 ≈ 129px），落在產品既有範圍內。
+    /// 扇區標籤 `COMPRESS` 是 8 個大寫字母，比 `ROTATE` 長——3 扇區的字級是 12.7px、
+    /// 文字框寬 80px，實測仍放得下（見 `tools/verify-m3c.ps1` 的 S17.40 量測）。
+    /// </summary>
+    private static readonly ToolDescriptor Compress = new(
+        Id: "compress",
+        Label: "COMPRESS",
+        Description: "依設定壓縮",
+        Icon: ToolIcon.Compress);
+
+    /// <summary>
     /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
     /// 輪盤與命中測試不必改一行。
     /// </summary>
-    public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90, StripMetadata };
+    public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90, StripMetadata, Compress };
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {
