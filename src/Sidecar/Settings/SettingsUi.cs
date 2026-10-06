@@ -72,7 +72,22 @@ internal static class SettingsUi
     /// <summary><see cref="IsOpen"/> 的快照。UI 執行緒寫、任何執行緒讀，所以走 <c>Volatile</c>。</summary>
     private static volatile bool _isOpen;
 
+    /// <summary>
+    /// 這條 UI 執行緒是怎麼結束的（空字串＝還沒結束）。<see cref="EnsureUiThread"/> 靠它在日誌裡
+    /// 說出「上一條執行緒為什麼走了」，自測也靠它確認那個致命例外真的發生過。
+    /// </summary>
+    private static volatile string _uiThreadFailure = "";
+
+    /// <summary>最後一次穿出 dispatcher 迴圈的例外（給自測斷言用；沒有就保持 null）。</summary>
+    private static Exception? _uiThreadException;
+
     /// <summary>每次 <see cref="Open"/> 遞增。用來讓「上一輪的關閉要求」不會誤關剛開好的新視窗。</summary>
+    /// <remarks>
+    /// 這也正是「UI 執行緒若真的結束、重開一條之後，舊工作不會被誤執行」的機制：
+    /// 執行緒結束時佇列裡可能還留著上一輪的工作，但它們帶著**舊的** generation，
+    /// 一被抽到就會自己返回；帶新 generation 的則是使用者剛剛真的按下去的要求，本來就該被服務。
+    /// 所以重啟時不需要（也不可以）清空佇列或重編號。
+    /// </remarks>
     private static long _generation;
 
     private static readonly object Gate = new();
@@ -151,6 +166,20 @@ internal static class SettingsUi
                         if (_window != null)
                         {
                             _window.Closed -= OnSettingsWindowClosed;
+                            // 建起來但**顯示不出來**的視窗不可以留下來。
+                            // 2026-10-06 實測：ShowDialog 被例外拆掉之後，那張視窗還在螢幕上（Win32 的
+                            // EnumWindows 看得到它），但已經沒有人擁有它——不會再有人關它，也不會再有人
+                            // 回應它，變成一個永遠關不掉的幽靈；下一次開啟還會多疊一張。
+                            // 擁有權在這裡：這個 catch 是唯一知道「這次開窗失敗」的地方。
+                            try
+                            {
+                                _window.Close();
+                            }
+                            catch (Exception closeFailure)
+                            {
+                                Log(log, $"settings ui: could not close the window that failed to show " +
+                                         $"({closeFailure.GetType().Name}: {closeFailure.Message})");
+                            }
                             _window = null;
                         }
                         _isOpen = false;
@@ -213,7 +242,23 @@ internal static class SettingsUi
     /// <summary>把 UI 執行緒拉起來（只拉一次）。呼叫端必須持有 <see cref="Gate"/>。</summary>
     private static void EnsureUiThread(Action<string>? log)
     {
-        if (_thread != null) return;
+        // 「已經有一條」不等於「那一條還能用」。
+        //
+        // 2026-10-06 量到的（使用者的日誌就是這個形狀）：UI 執行緒有可能結束——dispatcher 的例外、
+        // WPF 內部的失敗、或是它自己的迴圈返回。結束之後它**不會再抽 Pending**，而這裡如果只看
+        // `_thread != null` 就直接返回，之後每一次 Open() 都只是把工作排進一個沒有抽乾者的佇列：
+        // 日誌上只會看到 `open requested`，沒有視窗、沒有錯誤、也沒有 `already open`，
+        // 托盤按幾次都一樣——設定頁就**永久**失效了。
+        // 所以判準必須是「那條執行緒還活著嗎」，而不是「有沒有建過」。
+        if (_thread is { IsAlive: true }) return;
+
+        if (_thread != null)
+        {
+            // 走到這裡代表它已經結束（IsAlive=false ⇒ finally 已經跑完），照實說出來再重開一條。
+            // _dispatcher／_uiThreadId／_isOpen／_window 已由 UiThreadMain 的 finally 歸零。
+            Log(log, $"settings ui: the previous UI thread has ended ({_uiThreadFailure}); starting a new one");
+            _thread = null;
+        }
 
         var thread = new Thread(UiThreadMain)
         {
@@ -235,7 +280,23 @@ internal static class SettingsUi
         Application? app = null;
         try
         {
-            app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            try
+            {
+                app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            }
+            catch (InvalidOperationException ex)
+            {
+                // 一個 AppDomain 只准有一個 Application，而它已經被**第一條** UI 執行緒用掉了
+                // （WPF 把它記在自己的靜態欄位上，那個實例不會因為執行緒結束而消失）。
+                // 重啟時不可能再建第二個；而視窗並不需要 Application 才能顯示——Application 負責的是
+                // 「最後一個視窗關掉就結束行程」那類行程層級政策，本產品是 OnExplicitShutdown
+                // （關窗與否由托盤決定），所以這裡就沒有 Application 地繼續跑。
+                // 不這樣做的話，重啟的執行緒會當場死在這裡，等於「UI 執行緒永遠只能死一次」。
+                app = null;
+                Log(null, $"settings ui: this process has already used its one Application " +
+                          $"({ex.Message}); the restarted UI thread runs without one");
+            }
+
             Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
             _dispatcher = dispatcher;
             _uiThreadId = Environment.CurrentManagedThreadId;
@@ -266,11 +327,39 @@ internal static class SettingsUi
             pump.Start();
 
             Drain();
-            Dispatcher.Run();       // 跑這條執行緒自己的 Dispatcher 迴圈（靜態方法，見 CS0176）
+
+            // ⚠ 「跑一次 Dispatcher.Run() 就結束」是這個 bug 的第二個實體（使用者回報的「之後再從托盤按
+            // 『開啟設定』，還是叫不出來」）。2026-10-06 量到：只要有任何一個例外穿出 Dispatcher.Run()
+            // ——設定頁裡那一條（輸入框第一次取得焦點時 WPF 建 caret 失敗）就是——這條執行緒就結束了；
+            // `_thread` 卻還是非 null，於是 `EnsureUiThread` 永遠提早返回，之後每一次開啟都只把工作
+            // 排進一個沒有抽乾者的佇列：日誌上看得到 open requested，卻永遠不會有視窗。
+            // 而**重建一條執行緒救不回來**：一個 AppDomain 只准有一個 Application，第二條執行緒拿不到
+            // 自己的 Application，沒有 Application 的執行緒開出來的視窗根本不會上螢幕（已量測：
+            // IsLoaded=False、IsVisible=False、hwnd=(none)）。所以正確的擁有者是**這條執行緒本身的壽命**：
+            // 一次失敗的 dispatcher 回呼不可以讓它結束——例外跑掉之後，同一個 dispatcher 還能再跑。
+            while (!dispatcher.HasShutdownStarted && !dispatcher.HasShutdownFinished)
+            {
+                try
+                {
+                    Dispatcher.Run();       // 跑這條執行緒自己的 Dispatcher 迴圈（靜態方法，見 CS0176）
+                }
+                catch (Exception ex)
+                {
+                    // 例外穿出去了，但執行緒、Application、dispatcher 都還在：記下來，繼續跑同一個迴圈。
+                    _uiThreadFailure = $"{ex.GetType().Name}: {ex.Message}";
+                    _uiThreadException = ex;
+                    Log(null, $"settings ui: a fatal exception escaped the dispatcher loop " +
+                              $"({ex.GetType().Name}: {ex.Message}); the UI thread keeps running");
+                    continue;
+                }
+                break;      // Run 自己返回＝dispatcher 被關掉了（有人呼叫 Shutdown，或行程要收了）
+            }
             pump.Stop();
         }
         catch (Exception ex)
         {
+            _uiThreadFailure = $"{ex.GetType().Name}: {ex.Message}";
+            _uiThreadException = ex;
             Log(null, $"settings ui: UI thread failed ({ex.GetType().Name}: {ex.Message})");
         }
         finally
@@ -278,6 +367,7 @@ internal static class SettingsUi
             _dispatcher = null;
             _isOpen = false;
             _window = null;
+            if (_uiThreadFailure.Length == 0) _uiThreadFailure = "(Dispatcher.Run returned normally)";
             try
             {
                 app?.Shutdown();
@@ -449,6 +539,99 @@ internal static class SettingsUi
     }
 
     /// <summary>
+    /// UI 執行緒的狀態快照。**可以在任何執行緒上讀**（不經 <see cref="RunOnUiThread"/>），
+    /// 因為它必須在「UI 執行緒已經死了、排進去的東西再也沒有人抽」的時候還能回答問題——
+    /// 那正是自測要驗的那個狀態。
+    /// </summary>
+    public static string SelfTestUiThreadState()
+    {
+        Thread? t = _thread;
+        string alive = t == null ? "none" : (t.IsAlive ? "alive" : "dead");
+        return $"uiThread={alive} id={_uiThreadId} isOpen={_isOpen} " +
+               $"dispatcher={(_dispatcher != null ? "set" : "null")} " +
+               $"failure={(_uiThreadFailure.Length == 0 ? "(none)" : _uiThreadFailure)}";
+    }
+
+    /// <summary>殺掉 UI 執行緒的例外全文（含堆疊；沒有就回一句話）。自測用它確認例外真的發生過。</summary>
+    public static string SelfTestUiThreadExceptionText() =>
+        _uiThreadException?.ToString() ?? "(no exception escaped Dispatcher.Run)";
+
+    /// <summary>UI 執行緒還活著嗎（可以在任何執行緒上問）。</summary>
+    public static bool SelfTestUiThreadAlive() => _thread is { IsAlive: true };
+
+    /// <summary>
+    /// 自測：**故意把 UI 執行緒弄死**——排一個會丟例外的 dispatcher 操作上去。
+    ///
+    /// 為什麼是「排一個會丟例外的工作」而不是別的：<see cref="Drain"/> 對佇列裡的工作逐項 try/catch，
+    /// 所以「工作失敗」殺不死執行緒（那是我上一輪修掉的另一件事）；會殺死它的是**例外穿出
+    /// <c>Dispatcher.Run()</c>**，也就是直接排給 dispatcher 的操作自己丟出來。
+    /// 這正是「UI 執行緒已經結束、<c>_thread</c> 卻還是非 null」那個狀態的來源。
+    /// </summary>
+    public static bool SelfTestKillUiThread(int timeoutMs, out string detail, Action<string> log)
+    {
+        _ = timeoutMs;
+        Dispatcher? dispatcher = _dispatcher;
+        if (dispatcher == null)
+        {
+            detail = "selftest: the settings UI thread is not running, so it cannot be killed";
+            return false;
+        }
+
+        dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+            throw new InvalidOperationException(
+                "settings ui selftest: a deliberate fatal exception on the settings UI thread")));
+        detail = "selftest: a fatal exception has been posted to the settings UI thread";
+        Log(log, detail);
+        return true;
+    }
+
+    /// <summary>
+    /// 把「使用者那串互動」**排進 UI 執行緒的 dispatcher**（不等它做完）：選「自訂資料夾」那個項目、
+    /// 把鍵盤焦點放進輸入框（＝真人點下去）、再逐字打 <paramref name="text"/>。
+    ///
+    /// 為什麼非得這樣排、而不是由勾子直接呼叫：使用者那條路上，例外是在 WPF 自己的 dispatcher frame
+    /// （<c>ShowDialog</c> 的 modal 迴圈）裡被丟出來的。由呼叫端直接呼叫時，例外會被勾子自己的
+    /// try/catch 接住，**modal frame 根本不會倒**，也就不是同一個故障了。
+    /// 排進 dispatcher 之後，它會在 modal frame 裡被執行；例外於是穿過 <c>PushFrame</c> 往上跑，
+    /// 與真人點下去的那一次是同一個形狀（2026-10-06 用真的滑鼠點過，兩者一致）。
+    ///
+    /// <paramref name="trace"/> 逐字記下走到哪一步——序列被中斷在第幾步，就是壞在哪一步的證據。
+    /// </summary>
+    public static void SelfTestPlayUserStepsInsideTheModalFrame(string text, List<string> trace)
+    {
+        Dispatcher? dispatcher = _dispatcher;
+        if (dispatcher == null)
+        {
+            trace.Add("(the settings UI thread is not running)");
+            return;
+        }
+
+        dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+        {
+            SettingsWindow? w = _window;
+            if (w == null || !w.IsLoaded) { trace.Add("(no settings window is open)"); return; }
+
+            ComboBoxItem? custom = w.OutputPresetBox.Items.OfType<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag as string, "custom", StringComparison.Ordinal));
+            if (custom == null) { trace.Add("(the custom output preset is missing)"); return; }
+
+            w.OutputPresetBox.SelectedItem = custom;
+            trace.Add("preset selected (custom)");
+
+            w.OutputPathBox.Focus();                     // ← 真人「點進輸入框」的那一步
+            trace.Add($"input focused={w.OutputPathBox.IsKeyboardFocused}");
+
+            w.OutputPathBox.Text = "";
+            foreach (char c in text ?? "")
+            {
+                w.OutputPathBox.Text += c;
+                trace.Add($"'{w.OutputPathBox.Text}' notice='{w.OutputNoticeText.Text}'");
+            }
+            trace.Add("(the whole user sequence returned normally)");
+        }));
+    }
+
+    /// <summary>
     /// 自測用：現在**真的**有一張設定視窗開著嗎（物件存在，而且已經載入）。
     ///
     /// 為什麼不能只問 <see cref="IsOpen"/>：那只是「UI 執行緒上一次開啟有沒有成功」的快照。
@@ -469,7 +652,14 @@ internal static class SettingsUi
             if (w == null)
                 return "(no settings window object exists)";
             if (!w.IsLoaded)
-                return $"(a settings window object exists but it is not loaded; generation={w.Generation})";
+            {
+                var source = PresentationSource.FromVisual(w) as System.Windows.Interop.HwndSource;
+                return $"(a settings window object exists but it is not loaded; " +
+                       $"IsLoaded={w.IsLoaded} IsVisible={w.IsVisible} " +
+                       $"size={w.ActualWidth}x{w.ActualHeight} " +
+                       $"hwnd={(source != null ? "0x" + source.Handle.ToInt64().ToString("X") : "(none)")} " +
+                       $"generation={w.Generation})";
+            }
 
             report = $"a settings window is loaded (generation={w.Generation}, path={w.SettingsPath})";
             return null;

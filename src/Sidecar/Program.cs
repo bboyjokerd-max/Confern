@@ -1997,17 +1997,81 @@ internal static class App
         evidence.Line($"settings ui selftest: reopened={reopened} windowPresent={windowPresent} " +
                       $"isOpen={SettingsUi.IsOpen} detail={reopenDetail}");
 
+        // ============ 使用者回報的兩件事，各一顆斷言（2026-10-06 加的）============
+        //
+        // 症狀 1：「選『輸出位置』後，要按輸入框輸入時設定面版消失」。
+        //   量到的機制：輸入框**第一次**拿到鍵盤焦點時 WPF 要建 caret
+        //   （TextSelection.EnsureCaret → InputLanguageSource.CurrentInputLanguage → CultureInfo(0x0404)），
+        //   在 InvariantGlobalization=true 之下那裡丟 CultureNotFoundException；例外穿過 ShowDialog 的
+        //   modal frame，開窗的那個 catch 於是放掉 _window——視窗物件沒了（下一次開啟只會多疊一張）。
+        //   所以這裡問的是「那個視窗物件還在不在」，而不是只問 IsOpen：舊斷言只問 IsOpen，
+        //   這顆 bug 全綠。走 modal frame 而不是由勾子直接呼叫，是因為例外必須**穿過 modal frame**
+        //   才是同一個故障。
+        var userTrace = new List<string>();
+        SettingsUi.SelfTestPlayUserStepsInsideTheModalFrame("C:\\Confern-selftest\\輸出", userTrace);
+        WaitFor(() => userTrace.Count >= 1, 4000);
+        Thread.Sleep(600);
+        string stillThereDetail = "(the window was never asked)";
+        bool stillThere = SettingsUi.SelfTestWindowPresent(5000, out stillThereDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: typing in the output box does not take the page down " +
+                      $"(symptom 1) stillThere={stillThere} steps={userTrace.Count} " +
+                      $"stepsDone=[{string.Join(" | ", userTrace)}] detail={stillThereDetail}");
+
+        SettingsUi.Close();     // 收尾：把視窗關掉（這裡不驗這條路徑，它上面已經被走過了）
+        WaitFor(() => !SettingsUi.IsOpen, 3000);
+
+        // 症狀 2：「之後再從托盤按『開啟設定』，還是叫不出來」。
+        //   使用者的日誌就是這個形狀：第二次只有 `open requested`，沒有 `already open`、沒有
+        //   `STA thread started`，之後全無動靜 ⇒ UI 執行緒已經結束，而 `if (_thread != null) return;`
+        //   讓後來的每一次開啟都只把工作排進一個沒有抽乾者的佇列。
+        //   這裡不必重現「他遇到的那個例外」（那個例外只是把執行緒帶走），要驗的是
+        //   「致命例外之後，托盤還開不開得起來」這一格本身。故意丟一個穿出 Dispatcher.Run() 的例外。
+        bool killPosted = SettingsUi.SelfTestKillUiThread(3000, out string killDetail, lines.Enqueue);
+        bool fatalDelivered = WaitFor(() => SettingsUi.SelfTestUiThreadExceptionText()
+            .Contains("deliberate fatal exception", StringComparison.Ordinal), 8000);
+        // 驗的是「之後還開不開得起來」，不是「執行緒有沒有死」——修好之後它本來就該活著
+        // （例外穿出去、同一條執行緒繼續跑）；所以問的是「有沒有一條能用的 UI 執行緒」。
+        bool threadUsable = fatalDelivered && SettingsUi.SelfTestUiThreadAlive();
+        evidence.Line($"settings ui selftest: a fatal exception was thrown on the UI thread (symptom 2) " +
+                      $"posted={killPosted} delivered={fatalDelivered} threadUsable={threadUsable} " +
+                      $"state={SettingsUi.SelfTestUiThreadState()}");
+        evidence.Line($"settings ui selftest: what happened: {SettingsUi.SelfTestUiThreadExceptionText()}");
+
+        SettingsUi.Open(good, path, _ => lines.Enqueue("settings ui selftest: REOPEN AFTER FATAL onSaved fired"),
+                        lines.Enqueue);
+        bool reopenedAfterFatal = WaitFor(() => SettingsUi.IsOpen, 8000);
+        string afterFatalDetail = "(the window was never asked after the fatal exception)";
+        // 這裡要**等**：WPF 的 Loaded 事件排在 DispatcherPriority.Loaded，比 Normal 低，
+        // 不是問一次就會有答案。
+        bool windowBack = false;
+        if (reopenedAfterFatal)
+        {
+            for (int attempt = 0; attempt < 20 && !windowBack; attempt++)
+            {
+                windowBack = SettingsUi.SelfTestWindowPresent(3000, out afterFatalDetail, lines.Enqueue);
+                if (!windowBack) Thread.Sleep(250);
+            }
+        }
+        evidence.Line($"settings ui selftest: the tray can open the page again after a fatal exception " +
+                      $"(symptom 2) reopened={reopenedAfterFatal} windowPresent={windowBack} " +
+                      $"state={SettingsUi.SelfTestUiThreadState()} detail={afterFatalDetail}");
+
         SettingsUi.Close();     // 收尾：把視窗關掉（這裡不驗這條路徑，它上面已經被走過了）
         WaitFor(() => !SettingsUi.IsOpen, 3000);
 
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
 
         bool ok = opened && singleInstance && closed && saved && !invalidSaveAccepted &&
-                  !relativeFolderSaveAccepted && reopened && windowPresent;
+                  !relativeFolderSaveAccepted && reopened && windowPresent &&
+                  stillThere && userTrace.Count >= 3 &&
+                  killPosted && fatalDelivered && threadUsable && reopenedAfterFatal && windowBack;
         evidence.Line($"settings ui selftest done: ok={ok} (opened={opened} singleInstance={singleInstance} " +
                       $"closed={closed} saved={saved} invalidSaveAccepted={invalidSaveAccepted} " +
                       $"relativeOutputFolderSaveAccepted={relativeFolderSaveAccepted} " +
-                      $"reopened={reopened} windowPresent={windowPresent})");
+                      $"reopened={reopened} windowPresent={windowPresent} " +
+                      $"symptom1StillThere={stillThere} userStepsDone={userTrace.Count} " +
+                      $"symptom2FatalDelivered={fatalDelivered} symptom2ThreadUsable={threadUsable} " +
+                      $"symptom2Reopened={reopenedAfterFatal} symptom2WindowBack={windowBack})");
         return ok ? 0 : 1;
     }
 
