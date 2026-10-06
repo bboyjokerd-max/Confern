@@ -246,7 +246,9 @@ internal static class Program
         {
             Native.AttachParentConsole();
             using var startupEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
-            return App.RunAutostartProbe(opt.AutostartProbe, startupEvidence);
+            return App.RunAutostartProbe(opt.AutostartProbe, opt.AutostartAckPath,
+                                         opt.AutostartAckTimeoutMs > 0 ? opt.AutostartAckTimeoutMs : 5000,
+                                         startupEvidence);
         }
 
         // 單一實例守衛的**診斷接縫**：只問「這個行程拿不拿得到常駐槽位」，回報完就放掉。
@@ -689,6 +691,28 @@ internal sealed class Options
     /// </summary>
     public string AutostartProbe = "";
     /// <summary>
+    /// `--autostart-ack &lt;路徑&gt;`：把「值已經被外部觀察者真的取樣到了」變成一個可等待的訊號。
+    ///
+    /// <para>
+    /// 沒有這一條的時候，驗收只能在外面**碰運氣**取樣：探測把正確值寫進去之後，中間只隔一次
+    /// 讀回、一次反向對照的寫入就改掉了——實測這個窗口只有 1 毫秒左右（日誌時間戳
+    /// <c>ENABLED</c> 到 <c>DISABLED</c> 全在同一個毫秒內）。外部輪詢迴圈只要被作業系統
+    /// 排程踢掉一次就會整個錯過，於是**產品完全正確而檢查變紅**（實測 400 次裡紅 3 次，
+    /// 那 3 次的探測日誌都是 <c>checks=7 failed=0 ok=True</c>）。
+    /// </para>
+    ///
+    /// <para>
+    /// 有了它，探測在第一次 <c>Enable()</c> 之後**按住**那個值不放：觀察者在真的比對到預期值
+    /// 的那一刻建立這個檔案，探測看到它才繼續往下走。於是「外面看得到它」不再取決於排程運氣。
+    /// 這不是把斷言放寬：觀察者仍然只認「值等於預期的加引號絕對路徑」，差一格照樣紅；紅的時候
+    /// 探測會在超時後照常把值改掉，檢查因此**穩定地**紅，而不是偶爾紅。
+    /// 沒給這個參數時行為與以前完全相同（不等待、不多寫任何東西）。
+    /// </para>
+    /// </summary>
+    public string AutostartAckPath = "";
+    /// <summary>`--autostart-ack-timeout-ms &lt;ms&gt;`：等待上面那個訊號的上限（預設 5000）。</summary>
+    public int AutostartAckTimeoutMs;
+    /// <summary>
     /// --single-instance-probe：**只問不佔**——回報本行程拿不拿得到常駐槽位，然後立刻放掉。
     ///
     /// <para>
@@ -889,6 +913,12 @@ internal sealed class Options
                 case "--tray-selftest": o.TraySelfTest = true; break;
                 case "--autostart-probe":
                     if (++i < args.Length) o.AutostartProbe = args[i];
+                    break;
+                case "--autostart-ack":
+                    if (++i < args.Length) o.AutostartAckPath = args[i];
+                    break;
+                case "--autostart-ack-timeout-ms":
+                    if (++i < args.Length && int.TryParse(args[i], out int ackMs) && ackMs > 0) o.AutostartAckTimeoutMs = ackMs;
                     break;
                 case "--single-instance-probe": o.SingleInstanceProbe = true; break;
                 case "--tray-exit-after":
@@ -3674,8 +3704,15 @@ internal static class App
     ///
     /// **只碰被指定的子機碼**。真正的 Run 機碼不會被這個入口動到，理由見 <see cref="Autostart"/>：
     /// 驗收若直接寫真機碼，每一次回歸都會悄悄改掉使用者的開機啟動設定。
+    ///
+    /// <para>
+    /// <paramref name="ackPath"/> 是**選用**的：給了它，第一次 <c>Enable()</c> 之後會按住那個值，
+    /// 直到外部觀察者建立該檔案（＝它真的取樣到了那個值）或 <paramref name="ackTimeoutMs"/> 到期。
+    /// 沒給＝完全不等待，行為與以前一字不差。理由（以及為什麼這不是「把斷言放寬」）見
+    /// <see cref="Options.AutostartAckPath"/>。
+    /// </para>
     /// </summary>
-    internal static int RunAutostartProbe(string subkeyPath, Evidence evidence)
+    internal static int RunAutostartProbe(string subkeyPath, string ackPath, int ackTimeoutMs, Evidence evidence)
     {
         int failed = 0;
         int checks = 0;
@@ -3713,6 +3750,37 @@ internal static class App
         autostart.Enable();
         string after = autostart.CurrentValue() ?? "(absent)";
         Report("enabled and the value round-trips", after == expected && autostart.IsEnabled(), $"current={after}");
+
+        // 只有外部觀察者要求時才按住這個值（見 Options.AutostartAckPath）。按住期間那個值就在機碼裡，
+        // 觀察者因此一定取樣得到；它取樣到之後建立 ack 檔，這裡才繼續往下（把值改成反向對照的髒值）。
+        // 超時就照常往下走並留下證據——檢查會因此紅，而且紅得穩定。
+        if (ackPath.Length > 0)
+        {
+            // 先清掉舊的：只有**這一輪**按住期間建立的 ack 才算數（上一輪留下來的檔案會讓會合變成
+            // 「還沒開始就已經完成」）。
+            try { File.Delete(ackPath); } catch (IOException) { /* 清不掉就照等，最壞情況是超時 */ }
+            catch (UnauthorizedAccessException) { /* 同上 */ }
+            var hold = System.Diagnostics.Stopwatch.StartNew();
+            bool acked = false;
+            while (hold.ElapsedMilliseconds < ackTimeoutMs)
+            {
+                if (File.Exists(ackPath)) { acked = true; break; }
+                System.Threading.Thread.Sleep(1);
+            }
+            if (acked)
+            {
+                evidence.Line($"autostart: observer acknowledged the live value after {hold.ElapsedMilliseconds}ms " +
+                              $"({ackPath}); releasing it now");
+            }
+            else
+            {
+                // 刻意**不**用 Report()：這一條講的是「外面的會合沒成就」，不是產品做錯了什麼。
+                // 產品有沒有把值寫對，仍然由外面那一格（S15.16）判定；這裡紅會讓探測自己回非 0，
+                // 反而把「觀察者沒取樣到」誤報成「探測失敗」。留一行證據，判定權留在外面。
+                evidence.Line($"autostart: the outside observer never acknowledged the live value " +
+                              $"(waited {hold.ElapsedMilliseconds}ms for {ackPath}); releasing it anyway");
+            }
+        }
 
         // 反向對照：值存在但路徑不對時必須回報「未啟用」。少了這一條，「只看值存不存在」的實作
         // 也會通過，而那正是「換了安裝位置之後畫面顯示已啟用、開機卻跑舊 exe」的成因。

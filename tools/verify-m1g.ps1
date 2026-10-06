@@ -241,25 +241,63 @@ $scratchFull = "HKCU:\$scratch"
 # registry WHILE it runs: "the value was really there, holding the path the app says it uses"
 # becomes a fact about the registry rather than the app's own report of itself.
 $probeLog = Join-Path $logDir 'autostart-probe.log'
-$probeProc = Start-Process -FilePath $Exe -ArgumentList @('--autostart-probe', $scratch, '--quiet', '--log', $probeLog) -PassThru -WindowStyle Hidden
+# S15.16 fix (see the sampling loop below): the probe holds the value until this file appears.
+$ackPath = Join-Path $Work 'autostart-observed.flag'
+$probeProc = Start-Process -FilePath $Exe -ArgumentList @('--autostart-probe', $scratch, '--autostart-ack', $ackPath, '--quiet', '--log', $probeLog) -PassThru -WindowStyle Hidden
 # The registry is sampled through the .NET API instead of the PowerShell provider: the probe
 # enables, then deliberately writes a STALE path (its own control case), then enables again and
 # disables -- so the correct value exists only in two short windows. A provider round-trip per
 # iteration is slow enough to miss both (measured with it: 1 sample, and it was the stale one),
 # and a check that usually reports "I did not see it" is exactly what this audit is about.
+#
+# S15.16 fix (2026-10-06): those two windows are ~1ms wide (measured: all four enable/disable log
+# lines land inside ONE millisecond), and this loop is descheduled by the OS for milliseconds at a
+# time, so "did I see it" was luck. Measured on this machine: 400 runs of exactly this block -> 3
+# RED, and all 3 red probe logs said checks=7 failed=0 ok=True -- i.e. the product was correct and
+# the CHECK was wrong. The race is now removed instead of survived: the probe HOLDS the correct
+# value until this loop, having really compared it, creates $ackPath. The assertion below is
+# unchanged (the sampled value must still BE the quoted absolute exe path) -- only the timing
+# stopped being a coin flip.
 $scratchParent = [Microsoft.Win32.Registry]::CurrentUser
 $observedValues = New-Object System.Collections.ArrayList
+# Precomputed outside the loop: the loop body must stay allocation-free, and an allocation inside
+# it is the very thing that lets a GC pause swallow the window.
+$ackTmp = $ackPath + '.tmp'
+$ackDone = $false
+# The expected value is what the probe itself logged. It is read from the probe log here -- BEFORE
+# the value it describes is written -- on purpose: the ack below must be sent only after a real
+# comparison, so the comparison target must already be known when the loop starts. Get-Field is
+# called at most a handful of times (only until the probe has flushed its first line); the probe
+# writes that line before it enables anything, so the target is always set before the first sample.
+$expected = Get-Field ((Get-Content -LiteralPath $probeLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n") 'expected'
 $probePollSw = [Diagnostics.Stopwatch]::StartNew()
 while (-not $probeProc.HasExited -and $probePollSw.ElapsedMilliseconds -lt 60000) {
+  if (-not $expected) {
+    $expected = Get-Field ((Get-Content -LiteralPath $probeLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n") 'expected'
+    if (-not $expected) { continue }
+  }
   $k = $null
   try { $k = $scratchParent.OpenSubKey($scratch) } catch { $k = $null }
   if ($null -ne $k) {
     try {
       $pv = $k.GetValue($runName)
-      if ($null -ne $pv) { [void]$observedValues.Add("$pv") }
+      if ($null -ne $pv) {
+        [void]$observedValues.Add("$pv")
+        if (-not $ackDone -and "$pv" -eq $expected) {
+          # Announce-only-after-comparing, and once: from here on the probe may change the value
+          # again. Written through a rename so the probe can never read a half-written file.
+          try {
+            Set-Content -LiteralPath $ackTmp -Value $scratch -Encoding ASCII -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $ackTmp -Destination $ackPath -Force -ErrorAction SilentlyContinue
+            $ackDone = $true
+          } catch { $ackDone = $false }
+        }
+      }
     } finally { $k.Close() }
   }
 }
+$probeAcked = [bool](Test-Path -LiteralPath $ackPath -PathType Leaf)
+if (Test-Path -LiteralPath $ackTmp) { Remove-Item -LiteralPath $ackTmp -Force -ErrorAction SilentlyContinue }
 $probeFinished = $probeProc.WaitForExit(60000)
 $probeExit = $null
 try { if ($probeFinished) { $probeExit = $probeProc.ExitCode } } catch { $probeExit = $null }
@@ -300,7 +338,7 @@ $sawExpectedValue = @($observedValues | Where-Object { $_ -eq $expected }).Count
 $distinctSeen = @($observedValues | Sort-Object -Unique)
 Check 'S15.16 the probe really wrote the expected value (seen live) and removed it afterwards' `
   (($sawExpectedValue -ge 1) -and ($leftBehind -eq 0)) `
-  "liveValueSamples=$($observedValues.Count) sawExpectedValue=$sawExpectedValue distinctSeen=[$($distinctSeen -join ' | ')] valuesLeft=$leftBehind"
+  "ack=$probeAcked liveValueSamples=$($observedValues.Count) sawExpectedValue=$sawExpectedValue distinctSeen=[$($distinctSeen -join ' | ')] valuesLeft=$leftBehind"
 if (Test-Path -LiteralPath $scratchFull) { Remove-Item -LiteralPath $scratchFull -Recurse -Force -ErrorAction SilentlyContinue }
 
 "=== S15.17-S15.20 the resident app: tray on, focus untouched, clean exit ==="
