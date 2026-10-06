@@ -802,3 +802,104 @@ settings ui selftest done: ok=True (opened=True singleInstance=True closed=True 
 ### 使用者現在可以做的事
 
 **測裁切**：拖圖進輪盤 → Shift 進工具層 → 第四顆「裁切」→ 視窗內拖框／選比例 → Enter 確認；Esc 取消；多張時同一比例各自換算。
+
+---
+
+## 第十二段（2026-10-06 晚間）：單一實例守衛補記錄與可量診斷（`4f75311`）——順手修掉一顆會永久鎖死的地雷
+
+### ⚠ 前提更正（重要，先讀這段）
+
+守衛**自專案第一個 commit `ccb69fd` 起就存在且有效**。前一輪把「使用者看到兩個 Confern 行程」誤判為「缺守衛」——那是**推論過頭**：診斷模式刻意排在守衛之前，可以與常駐程式並存，而且它不裝鉤子、不佔托盤。本次實際做的是**把拒絕行為變成明確、看得見、量得到**，不是補上一個原本不存在的守衛。
+
+### 提交 `4f75311`：單一實例守衛——補記錄與診斷，並修掉一顆地雷
+
+- 判定方式＝**位置**，不是旗標：守衛呼叫點排在**所有診斷分支（含 `--worker`）`return` 之後、`App.Run` 之前**。
+  - 能走到該行 ⇔ 沒設任何診斷旗標 ⇔ 常駐 GUI。
+  - **刻意不維護「哪些旗標算診斷」的清單**：漏一個，就會讓那條診斷在使用者開著 Confern 時**靜默回 3**——什麼都量不到，看起來卻像跑完了。
+- 新檔 `src/Sidecar/Startup/SingleInstance.cs`（mutex 名稱／搶佔／拒絕通知／探測的**唯一擁有者**）。本次只動 `src/Sidecar/Program.cs` 與這支新檔。
+- 第二個實例＝寫一筆清楚的**檔案** log 後安靜 `exit 3`（不彈窗、不搶焦點）。
+  - 理由：第一個實例仍在跑，使用者要的「程式在跑」已經滿足了；喚起第一個，會在「不是使用者親自按」（開機自動啟動＋捷徑幾乎同時觸發）時**搶焦點**。
+  - WinExe 從捷徑啟動**沒有主控台**，只寫 stderr 等於「按了完全沒反應」，所以**一定要落檔**。
+- **修掉的地雷**：原寫法 `initiallyOwned:true` ＋ `createdNew`，在前一實例**被強制結束**（mutex 處於 abandoned）時會**永遠拒絕啟動**，使用者只能重開機。改用 `WaitOne(0)` 並接手 `AbandonedMutexException`。
+- 新診斷 `--single-instance-probe`（回報是否取得槽位）。
+
+### 實測證據
+
+兩次常駐啟動（`trayWindows` 是**獨立客觀量測**：`EnumWindows` 數 class=`ConfernTray` 的視窗，不是靠行程數推論）：
+
+| 動作 | 量測 |
+|---|---|
+| 啟動第 1 個實例 | `procs=1 trayWindows=1` |
+| 啟動第 2 個實例 | `procs=1 trayWindows=1 secondExit=3` |
+
+第二次啟動寫出的日誌（原文）：
+
+```
+single instance: another Confern is already running (mutex Local\Confern.SingleInstance); this launch exits now: no hooks, no tray icon, no window, no settings change
+```
+
+**worker 未被擋（本案最重要的一格）**：
+
+| 情境 | 結果 |
+|---|---|
+| 常駐持有槽位 ＋ 起 3 個 `--worker` | `sampled at t=3s: total Confern=4 workerProcesses=3`，10 秒連線逾時後自行結束 |
+| 常駐持有槽位 ＋ 40 檔批次 | `exit=0`、`ok=40 failed=0`、產出 40/40 JPG |
+
+診斷未被擋（常駐持有槽位時）：
+
+| 診斷 | exit |
+|---|---|
+| `--version` | 0 |
+| `--tools-list` | 0 |
+| `--settings-ui-selftest` | 0 |
+| `--crop-ui-selftest`（512x384） | 0 |
+| `--convert` | 0 |
+| `--single-instance-probe`（槽位被佔） | 3（`acquired=False`） |
+
+反向驗證（另存一份暫存副本，**刪掉守衛 6 行**後重建）：
+
+| 版本 | 結果 |
+|---|---|
+| 紅（無守衛） | `procs=2 trayWindows=2`，第二個寫出完整 session log |
+| 綠（有守衛） | `procs=1 trayWindows=1`，第二個寫出拒絕行 |
+
+回歸（本段）：
+
+| 套件 | 結果 |
+|---|---|
+| m3d | **19/19** |
+| m3c | **20/20** |
+| m1d | **66/66** |
+| m1f | **34/34** |
+| m1c | **20/20** |
+| m1g | **25/25** |
+
+m1a／m1h 預設模式 `exit 3`（**未注入任何真實輸入**）。
+
+### 順手抓到、**非本次造成**、未修（照實記，別當成已解決）
+
+- **兩支 `--convert` 同時跑會互毀**：3 輪 **100% 重現**其中一支 `exit=9`、`ok=0 failed=40`（`IOException 0x800700B7`）。用**改動前原始碼**另建對照，同樣失敗 ⇒ **非本次造成**。最可能是共用 `%LOCALAPPDATA%\Confern\worker.log`／暫存日誌。
+- **`--crop-ui-selftest` 在 3000x2250 大圖下 `ok=False`（exit 1，內含 `fullFrameRefused=False`），512x384 才 `ok=True`**：改動前後逐字相同，但裁切是 `9ccaee4` 才有的功能，而且**使用者的真實情境就是 3000x4000 手機照片** ⇒ **已另派調查（狀態：調查中）**。要查兩件事：是否為真缺陷，以及 EXIF 旋轉來源＋裁切這一格目前**完全沒驗**。**這件尚未解決。**
+- `--dump-monitors` 仍排在守衛之後（既有路由）：常駐中跑它會拿到 `exit 3`。套件安全（m1a 會先 Stop-AllSidecar），但**使用者開著 Confern 時手動跑會拿到 3**。**刻意未修**（動它要動 frozen 套件依賴的路徑）。建議後續「抽出 `App.DumpMonitors` 並前移」。
+- `AbandonedMutexException` 的接手路徑**未被真正觸發過**（行程被殺後 mutex 直接消滅，走的是乾淨路徑）——A13「被強制結束後能立刻重啟」已實測通過，但**那段防禦本身未被觀測**。
+
+### 里程碑狀態
+
+- **M3 功能已齊**：旋轉、去中繼資料、壓縮、裁切。剩下需要**引入新相依**才能做的（去背、讀 QR、合併 PDF）**待使用者決定**。
+- **M2** 仍卡在 ffmpeg 授權決定。
+
+使用者實機驗收（本專案最強的證據類型）：
+
+| 項目 | 狀態 |
+|---|---|
+| 去中繼資料 | ✅ |
+| 輸出位置→桌面 | ✅ |
+| 設定頁自訂義輸入 | ✅ |
+| 壓縮 | ✅ |
+| **裁切** | ⏳ **待驗收** |
+
+### 使用者現在可以做的事
+
+**測裁切**：拖圖進輪盤 → Shift 進工具層 → 第四顆「裁切」→ 視窗內拖框／選比例 → Enter 確認；Esc 取消；多張時同一比例各自換算。
+
+⚠ 但**大圖（手機照片）目前調查中**，建議先用一般圖片測手感。
