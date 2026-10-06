@@ -10,6 +10,11 @@
 #       arming and a real drop in ONE gesture)                                          (human window)
 #   S5  kill the process while raised, restart must be clean (A13)                       (automatic)
 #
+# REAL INPUT: S3.1-S3.11 (real mouse/keyboard, including Ctrl+Alt+Shift+Q) and S4.1-S4.8 (a real
+# OLE drag through DragSim) only run when -WithRealInput is passed. By default they do NOT run,
+# and each one is registered as INCONCLUSIVE -- this suite's "unverified" class -- so the summary
+# line carries the true number. A skipped check is never reported as a pass.
+#
 # NOTE: keep this file ASCII-only. PowerShell 5.1 mis-decodes BOM-less UTF-8
 # script literals, so any non-ASCII text here corrupts string parsing.
 #
@@ -26,7 +31,11 @@ param(
   [string]$ArchiveDir = '',
   [int]$S4WindowSeconds = 75,
   [int]$WatchdogSeconds = 3,
-  [string]$LogDir = "$env:TEMP\sidecar-verify"
+  [string]$LogDir = "$env:TEMP\sidecar-verify",
+  # REAL INPUT. Off by default: a default run of this suite must never move the user's mouse.
+  # Declared LAST on purpose -- inserting it earlier would shift the positional parameters that
+  # older documents/tools may still pass by position.
+  [switch]$WithRealInput
 )
 
 $ErrorActionPreference = 'Stop'
@@ -170,6 +179,14 @@ function Expect([int]$n) { $script:ExpectedChecks += $n }
 function Inconclusive([string]$reason) {
   [void]$inconclusive.Add($reason)
   Write-Host "INCONCLUSIVE  $reason"
+}
+# Real input is off by default (see -WithRealInput). A check that cannot run must not disappear
+# from the report either: it is registered as INCONCLUSIVE with the exact reason, so the count
+# and the summary line stay honest and the run ends with the "unverified" exit code 3 instead of
+# a false green. Inconclusive() already feeds $registered, so no Expect correction is needed --
+# the promised count for the section is preserved exactly.
+function Skip-RealInput([string[]]$names) {
+  foreach ($n in $names) { Inconclusive ($n + " SKIPPED: needs real input (pass -WithRealInput)") }
 }
 function Get-LogLines([string]$p) { if (Test-Path -LiteralPath $p) { return @(Get-Content -LiteralPath $p -Encoding UTF8) } else { return @() } }
 function Test-Log([string[]]$lines, [string]$pattern) { return [bool]($lines | Select-String -Pattern $pattern -Quiet) }
@@ -326,6 +343,30 @@ function Invoke-S3 {
   $lines = Get-LogLines $run.Log
   Check "S3.0 foreground check disabled for this run and logged" (Test-Log $lines 'foreground check DISABLED \(--assume-explorer-foreground\)')
 
+  if (-not $WithRealInput) {
+    # S3.1-S3.11 drive the state machine with REAL SendInput (mouse down/move/up, space, and
+    # Ctrl+Alt+Shift+Q). They are not approximated by anything: without them the lifecycle is
+    # simply NOT verified, and that is what the run says below instead of going green.
+    Write-Host "      SKIPPED: S3.1-S3.11 need real input (pass -WithRealInput); nothing was injected"
+    Skip-RealInput @(
+      'S3.1 state machine Idle->Armed->Capturing',
+      'S3.2 hit layer raised on capture',
+      'S3.3 raised window is visible to the OS',
+      'S3.4 trigger release requests release (insurance #2)',
+      'S3.5 hidden after 250 ms grace',
+      'S3.6 second raise happened',
+      'S3.7 mouse up requests release (insurance #1)',
+      'S3.8 kill switch fired (insurance #5)',
+      'S3.9 detector disabled',
+      'S3.10 no further raise after kill switch',
+      'S3.11 the OS agrees the layer is hidden after the 250 ms grace (not just the log line)'
+    )
+    $run.Process.Refresh()
+    if (-not $run.Process.HasExited) { Stop-Process -Id $run.Process.Id -Force }
+    Start-Sleep -Milliseconds 400
+    return
+  }
+
   # -- trigger release drives insurance #2
   [Probe]::MoveTo(900, 800) | Out-Null
   Start-Sleep -Milliseconds 250
@@ -438,6 +479,24 @@ function Invoke-S3b {
 function Invoke-S4 {
   Write-Host ""
   Write-Host "=== S4 synthetic OLE drag onto the raised hit layer ==="
+  if (-not $WithRealInput) {
+    # S4.1-S4.8 need a REAL drag: DragSim drives SendInput and a real DoDragDrop, so the pointer
+    # moves and the button is pressed for real. Skipped by default and reported as unverified --
+    # never as a pass. (How the drop is produced is deliberately NOT changed in this step.)
+    Write-Host "      SKIPPED: S4.1-S4.8 need real input (pass -WithRealInput); nothing was dragged"
+    Skip-RealInput @(
+      'S4.1 hit layer raised for the drop test',
+      'S4.2 drop intercepted (OLE IDropTarget)',
+      'S4.3 the drop carried exactly one file',
+      'S4.3b the received path is the sample file',
+      'S4.4 hidden immediately after the drop',
+      'S4.5 the app is still alive after the drop',
+      'S4.6 source file untouched: same SHA256',
+      'S4.7 source file untouched: same mtime',
+      'S4.8 the OS agrees the layer is hidden after the drop resolved (not just the log line)'
+    )
+    return
+  }
   if ($DragSim -eq '' -or -not (Test-Path -LiteralPath $DragSim)) {
     Expect -8
     Inconclusive "S4 needs -DragSim <path to DragSim.exe>; drop delivery not verified"
