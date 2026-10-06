@@ -227,14 +227,31 @@ internal static class Program
             return App.RunAutostartProbe(opt.AutostartProbe, startupEvidence);
         }
 
-        // 單一實例守衛。A13 要求「被強制結束後能立刻重啟」，
-        // 因此這裡不留下任何需要清理的檔案鎖。
-        using var mutex = new Mutex(initiallyOwned: true, $@"Local\{ProductInfo.Name}.SingleInstance", out bool isFirst);
-        if (!isFirst)
+        // 單一實例守衛的**診斷接縫**：只問「這個行程拿不拿得到常駐槽位」，回報完就放掉。
+        //
+        // 為什麼這一條非有不可：守衛本身是「安靜地不做事」，而「安靜地不做事」跟
+        // 「根本沒在作用」在外部看起來一模一樣。有了它，「守衛有效」才是一個當場量得到的事實，
+        // 而不是讀程式碼相信的事。它**必須**排在下面那一行守衛之前——否則它問到的會變成
+        // 「守衛有沒有把我擋掉」。
+        if (opt.SingleInstanceProbe)
         {
-            Native.AttachParentConsole();
-            Console.Error.WriteLine($"{ProductInfo.Name} is already running.");
-            return 3;
+            return SingleInstance.Probe(opt.LogPath ?? "");
+        }
+
+        // 單一實例守衛（待辦）。A13 要求「被強制結束後能立刻重啟」，
+        // 因此這裡不留下任何需要清理的檔案鎖。
+        //
+        // ⚠ **這就是「常駐 GUI 模式」的判定點——判準是位置，不是旗標。**
+        // 所有診斷分支（含 `--worker`）都已經在前面 return 掉了，所以「能走到這一行」
+        // 就等於「沒有任何診斷旗標被設定過」＝這是唯一那條會裝全域鉤子、建托盤、
+        // 蓋一層常駐覆蓋層的路。守衛必須留在這裡，而且**只**留在這裡：
+        //   · 上移一格會讓 worker（每個工作一個，天生要同時存在多個）被擋 ⇒ 轉檔全壞；
+        //   · 下移一格沒有意義（那時視窗與鉤子已經建好了，正是要防的事）。
+        // 細節與「為什麼不用旗標判定」的理由見 Startup/SingleInstance.cs。
+        using SingleInstance instance = SingleInstance.Acquire();
+        if (!instance.IsOwner)
+        {
+            return SingleInstance.Refuse(opt.LogPath ?? "");
         }
 
         return App.Run(opt);
@@ -357,6 +374,11 @@ internal sealed class Options
           --autostart-probe <subkey>
                                     exercise the start-with-Windows entry against that HKCU subkey
                                     (enable -> read back -> disable); never touches the real Run key
+          --single-instance-probe   ask whether THIS process can take the resident single-instance
+                                    slot, print the answer and exit: 0 = yes (no resident Confern is
+                                    running), 3 = no (a resident Confern already holds it). It never
+                                    becomes resident, installs no hooks, creates no window and
+                                    releases the slot again before it exits
           --tray-exit-after <ms>    resident run: ask the tray to quit after N ms (acceptance runs must
                                     not inject input, and a resident app has to be asked to leave)
           --no-autostart            resident run: do NOT apply startWithWindows (spec 8). Verification
@@ -645,6 +667,22 @@ internal sealed class Options
     /// </summary>
     public string AutostartProbe = "";
     /// <summary>
+    /// --single-instance-probe：**只問不佔**——回報本行程拿不拿得到常駐槽位，然後立刻放掉。
+    ///
+    /// <para>
+    /// 存在的理由與 <see cref="ToolsList"/> 同一類：守衛的行為是「安靜地什麼都不做」，
+    /// 而「安靜地什麼都不做」與「根本沒生效」從外面看是一模一樣的。這一條把
+    /// 「槽位現在被誰佔著」變成一個當場量得到的答案（離開碼 0＝拿得到／3＝被佔著），
+    /// 於是「守衛有效」與「守衛被拿掉」可以用同一支腳本分辨出來。
+    /// </para>
+    ///
+    /// <para>
+    /// 它排在守衛**之前**：它是唯一被允許問「守衛會怎麼判」的診斷。不建視窗、不裝鉤子、
+    /// 不碰托盤、不改設定，而且跑完就把槽位放掉。
+    /// </para>
+    /// </summary>
+    public bool SingleInstanceProbe;
+    /// <summary>
     /// --tray-exit-after &lt;ms&gt;：常駐執行 N 毫秒後，**透過托盤的「結束」命令**要求正常關機。
     ///
     /// 存在的理由：常駐程式不會自己結束，而驗收腳本不得注入任何合成輸入（使用者可能正在用電腦），
@@ -830,6 +868,7 @@ internal sealed class Options
                 case "--autostart-probe":
                     if (++i < args.Length) o.AutostartProbe = args[i];
                     break;
+                case "--single-instance-probe": o.SingleInstanceProbe = true; break;
                 case "--tray-exit-after":
                     if (++i < args.Length && int.TryParse(args[i], out int exitMs) && exitMs > 0) o.TrayExitAfterMs = exitMs;
                     break;
