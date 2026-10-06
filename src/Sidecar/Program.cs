@@ -883,7 +883,9 @@ internal static class App
         // 觸發鍵交給 detector、逾時交給 guard、其餘由 _settings 帶著走（轉檔時才讀）。
         void ApplyFromSettingsUi()
         {
-            while (_settingsUiLog.TryDequeue(out string? uiLine)) evidence.Line(uiLine);
+            // 抽乾設定頁那條執行緒排過來的日誌行。**抽乾本身只有這一個實作**（見
+            // DrainSettingsUiLog）：這裡與常駐路徑的週期回呼都呼叫它，所以不存在第二個擁有者。
+            DrainSettingsUiLog(evidence);
             Settings? updated = Interlocked.Exchange(ref _pendingSettings, null);
             if (updated == null) return;
             _settings = updated;
@@ -901,6 +903,30 @@ internal static class App
                           $"(trigger=VK 0x{appliedVk:X2}, watchdog={updated.CaptureTimeoutSeconds * 1000} ms)");
         }
         visual.SettingsChanged += ApplyFromSettingsUi;
+
+        // 常駐路徑的可觀測性（2026-10-05）。
+        //
+        // 缺口（實測，不是推論）：設定頁那條 WPF 執行緒的日誌行一律排進 _settingsUiLog，由主執行緒
+        // 代寫；而抽乾點原本只有上面那個 ApplyFromSettingsUi——它掛在 visual.SettingsChanged 上，
+        // 也就是**只有設定頁按下「儲存」**（或 --settings-ui-live 的那條回呼）才會被叫到。
+        // 托盤那條路（OpenSettingsFromTray → LogFromSettingsUiThread）只『排隊』、不叫醒任何人，
+        // 所以純托盤操作（開設定頁 → 關掉，從不存檔）跑一整輪之後，日誌裡 `settings ui:` 的行數是 0。
+        // 使用者回報的 bug 正好落在那條路上：日誌在這件事上是瞎的。
+        //
+        // 接在哪裡：**既有**的 VisualLayer 週期回呼（TickRequested），不新增第二個計時器擁有者。
+        // 它就是這個程式既有的「執行緒計時器 → PostMessage → 主執行緒 WndProc」機制
+        // （Native.WM_APP_TICK 的註解說明了為什麼刻意不走 SetTimer/WM_TIMER），
+        // 而抽乾**必須在主執行緒**：Evidence.Line 沒有上鎖，這正是那些行要先排隊的理由。
+        // 常駐路徑沒有別的週期回呼可接——托盤是純 Win32 視窗（只被動收訊息，自己沒有任何計時器），
+        // 主迴圈是阻塞式 GetMessageW；ProgressPresenter 的 80 ms tick 只活在轉檔期間。
+        // 副作用只有一個：這個 tick 的訂閱者在本路徑上原本是空的（輪盤不訂它），
+        // 所以這裡多做的唯一一件事，就是每 200 ms 把一個（通常是空的）佇列抽乾。
+        visual.TickRequested += () => DrainSettingsUiLog(evidence);
+        visual.StartTick(SettingsUiLogDrainIntervalMs);
+        // 這一行刻意**不**以 `settings ui:` 開頭：那個前綴的意思是「設定頁那條執行緒排過來的行」，
+        // 而這一行是主執行緒自己說的（而且驗收要用 `settings ui:` 的行數來判斷抽乾有沒有生效）。
+        evidence.Line($"settings ui log drain: attached to the resident tick " +
+                      $"({SettingsUiLogDrainIntervalMs} ms interval; the settings page's own thread only queues)");
 
         // M1g：開機自動啟動的擁有者（規格 §8，待辦 4）。整個常駐路徑只有這一個實例，
         // 而且只有它會寫 Run 機碼。
@@ -1826,6 +1852,29 @@ internal static class App
     private static ConcurrentQueue<string> _settingsUiLog = new();
 
     /// <summary>
+    /// 常駐路徑抽乾 <see cref="_settingsUiLog"/> 的週期（毫秒）。
+    ///
+    /// 200 ms 的理由：設定頁的訊息是「使用者等級」的頻率（一次開啟只有個位數行），
+    /// 人眼分不出 200 ms 與 20 ms 的差別，而每一個 tick 的成本只是一個 PostMessage ＋
+    /// 一次空的 TryDequeue。刻意不比 200 ms 更短——這個回呼是常駐的，不是只在轉檔期間跑。
+    /// </summary>
+    private const int SettingsUiLogDrainIntervalMs = 200;
+
+    /// <summary>
+    /// 把設定頁那條執行緒排過來的日誌行寫進證據檔。**唯一的抽乾實作**，而且
+    /// **只可以在主執行緒呼叫**：<see cref="Evidence.Line"/> 沒有上鎖，這就是那些行
+    /// 要先排隊的理由（見 <see cref="_settingsUiLog"/>）。
+    ///
+    /// 兩個呼叫點都在主執行緒上：設定頁按下「儲存」時的 <c>ApplyFromSettingsUi</c>，
+    /// 以及常駐路徑的 VisualLayer 週期回呼。少了後者，純托盤操作（開設定頁 → 關掉，
+    /// 從不存檔）一整輪下來日誌裡不會有任何 `settings ui:` 的行。
+    /// </summary>
+    private static void DrainSettingsUiLog(Evidence evidence)
+    {
+        while (_settingsUiLog.TryDequeue(out string? uiLine)) evidence.Line(uiLine);
+    }
+
+    /// <summary>
     /// M1f：`--settings-ui`——只開設定頁，不啟動覆蓋層，**視窗關掉就結束**。
     /// 托盤（待辦 4）之前這是使用者唯一的入口，所以它必須像正常的設定視窗：不留背景行程、
     /// 不需要工作管理員。存檔本身由設定頁走 `SettingsStore.Save`（檔案當場就變），這裡只留證據。
@@ -1913,26 +1962,52 @@ internal static class App
         evidence.Line($"settings ui selftest: save via the real Save button ok={saved} detail={saveDetail}");
 
         Settings bad = settings with { TriggerKey = "NotARealKey" };
-        bool refused = SettingsUi.SelfTestSave(bad, 5000, out string badDetail, lines.Enqueue);
-        evidence.Line($"settings ui selftest: an invalid value is refused (save ok={refused}) detail={badDetail}");
+        bool invalidSaveAccepted = SettingsUi.SelfTestSave(bad, 5000, out string badDetail, lines.Enqueue);
+        // 命名刻意是「save accepted」而不是「refused」：SelfTestSave 回傳 false 正是**拒絕成功**，
+        // 舊名字（refused）讀起來剛好相反（refused=False 看起來像「沒有拒絕」）。
+        // 這裡只改命名與輸出文字，判定邏輯一行都沒動。
+        evidence.Line($"settings ui selftest: an invalid value is refused (save ok={invalidSaveAccepted}) detail={badDetail}");
 
         // 新的欄位也要能被拒絕：相對路徑的意思是「看誰在跑、從哪裡跑」，而檔案落在哪裡不該取決於那種事。
         Settings badFolder = settings with { OutputFolder = "relative-output" };
-        bool refusedFolder = SettingsUi.SelfTestSave(badFolder, 5000, out string badFolderDetail, lines.Enqueue);
+        bool relativeFolderSaveAccepted = SettingsUi.SelfTestSave(badFolder, 5000, out string badFolderDetail, lines.Enqueue);
         evidence.Line($"settings ui selftest: a relative output folder is refused " +
-                      $"(save ok={refusedFolder}) detail={badFolderDetail}");
+                      $"(save ok={relativeFolderSaveAccepted}) detail={badFolderDetail}");
 
         Thread.Sleep(700);      // 讓 WPF 真的完成第一次繪製，而不是只把物件建起來就說「開好了」
-        SettingsUi.Close();
+
+        // 關窗走**使用者自己的**那條路：按下取消鈕（＝ SettingsWindow 自己的 Close()，
+        // 右上角的 X 也是同一條）。產品的 SettingsUi.Close() 是另一條路徑，兩條都要能活——
+        // 使用者的 bug 正是從「視窗自己關掉」開始的。
+        bool cancelClicked = SettingsUi.SelfTestCancel(5000, out string cancelDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: closed via the window's own cancel button " +
+                      $"clicked={cancelClicked} detail={cancelDetail}");
         bool closed = WaitFor(() => !SettingsUi.IsOpen, 3000);
         evidence.Line($"settings ui selftest: closed={closed} isOpen={SettingsUi.IsOpen}");
 
+        // 「關掉之後**再開一次**」。這是使用者回報的那條路（托盤的命令確實送到了、日誌裡也沒有
+        // 「already open」，但視窗再也沒出現），而原本的自測只驗到「關得掉」就結束，
+        // 完全沒有覆蓋這一格。
+        SettingsUi.Open(good, path, _ => lines.Enqueue("settings ui selftest: REOPEN onSaved fired"), lines.Enqueue);
+        bool reopened = WaitFor(() => SettingsUi.IsOpen, 5000);
+        // 而且不只問 IsOpen：一個「視窗關了、Closed 沒送到、_isOpen 卡在 true」的 bug 會讓
+        // IsOpen 停在 true（於是「再開」被拒、畫面根本沒出現），只讀 IsOpen 的斷言照樣是綠的。
+        string reopenDetail = "(the window was never asked: the page never reported itself as open)";
+        bool windowPresent = reopened && SettingsUi.SelfTestWindowPresent(5000, out reopenDetail, lines.Enqueue);
+        evidence.Line($"settings ui selftest: reopened={reopened} windowPresent={windowPresent} " +
+                      $"isOpen={SettingsUi.IsOpen} detail={reopenDetail}");
+
+        SettingsUi.Close();     // 收尾：把視窗關掉（這裡不驗這條路徑，它上面已經被走過了）
+        WaitFor(() => !SettingsUi.IsOpen, 3000);
+
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
 
-        bool ok = opened && singleInstance && closed && saved && !refused && !refusedFolder;
+        bool ok = opened && singleInstance && closed && saved && !invalidSaveAccepted &&
+                  !relativeFolderSaveAccepted && reopened && windowPresent;
         evidence.Line($"settings ui selftest done: ok={ok} (opened={opened} singleInstance={singleInstance} " +
-                      $"closed={closed} saved={saved} refusedInvalid={refused} " +
-                      $"refusedRelativeOutputFolder={refusedFolder})");
+                      $"closed={closed} saved={saved} invalidSaveAccepted={invalidSaveAccepted} " +
+                      $"relativeOutputFolderSaveAccepted={relativeFolderSaveAccepted} " +
+                      $"reopened={reopened} windowPresent={windowPresent})");
         return ok ? 0 : 1;
     }
 
@@ -2267,11 +2342,34 @@ internal static class App
         bool uiOpen = SettingsUi.IsOpen;
         Report("the open-settings command reached the settings page", uiOpen,
                $"SettingsUi.IsOpen={SettingsUi.IsOpen} after {sw.ElapsedMilliseconds} ms");
-        SettingsUi.Close();
+
+        // 關窗走**使用者自己的**那條路：按下取消鈕（＝ SettingsWindow 自己的 Close()，X 也是同一條），
+        // 不是產品的 SettingsUi.Close()。原本這裡只走產品那條，於是「視窗自己關掉之後」這一格
+        // 完全沒有覆蓋——而使用者的 bug 正是從那個動作開始的。
+        bool cancelClicked = SettingsUi.SelfTestCancel(5000, out string cancelDetail, evidence.Line);
         var swClose = Stopwatch.StartNew();
         while (SettingsUi.IsOpen && swClose.ElapsedMilliseconds < 3000) Thread.Sleep(25);
-        Report("the settings page closes again (the process can exit)", !SettingsUi.IsOpen,
-               $"SettingsUi.IsOpen={SettingsUi.IsOpen} after {swClose.ElapsedMilliseconds} ms");
+        Report("the settings page closes again (the process can exit)",
+               cancelClicked && !SettingsUi.IsOpen,
+               $"cancelClicked={cancelClicked} SettingsUi.IsOpen={SettingsUi.IsOpen} " +
+               $"after {swClose.ElapsedMilliseconds} ms; {cancelDetail}");
+
+        // 再走一次托盤的「開啟設定」命令，而且斷言它**真的開起來**（不是只斷言 IsOpen=false）。
+        // 這一格就是使用者回報的 bug：他的日誌四次都只有 `tray: command -> open settings`、
+        // 沒有 `but the settings page is already open`，也就是要求確實送進去了，視窗卻再也沒出現。
+        tray.InvokeCommand(TrayCommand.OpenSettings);
+        for (int i = 0; i < 5; i++) Native.PumpMessages();
+        var swReopen = Stopwatch.StartNew();
+        while (!SettingsUi.IsOpen && swReopen.ElapsedMilliseconds < 5000) Thread.Sleep(25);
+        // 視窗存在也是斷言的一部分：只讀 IsOpen 會被「卡在 true 的舊快照」騙過去（見勾子的註解）。
+        string reopenDetail = "(the window was never asked: the page never reported itself as open)";
+        bool uiReopened = SettingsUi.IsOpen &&
+                          SettingsUi.SelfTestWindowPresent(5000, out reopenDetail, evidence.Line);
+        Report("the open-settings command opens the page AGAIN after it was closed", uiReopened,
+               $"SettingsUi.IsOpen={SettingsUi.IsOpen} after {swReopen.ElapsedMilliseconds} ms; {reopenDetail}");
+        SettingsUi.Close();     // 收尾：把視窗關掉，行程才結束得掉（這條路徑上面已經不用再驗）
+        var swFinal = Stopwatch.StartNew();
+        while (SettingsUi.IsOpen && swFinal.ElapsedMilliseconds < 3000) Thread.Sleep(25);
 
         // 關掉之後 shell 不可以還留著它。ProbeShellStillHasIcon 在 Dispose 之後一律回 false
         // （它本身就是「還留著嗎」），所以這裡同時檢查 NIM_DELETE 有回報成功。

@@ -243,8 +243,26 @@ internal static class SettingsUi
             // 「執行緒起來之前」排進來的工作先跑掉，之後每 25 ms 抽一次。
             // 用 DispatcherTimer（而不是另開執行緒）是因為它就在這條 Dispatcher 迴圈上跑，
             // 不需要任何跨執行緒同步；設定頁的動作是「使用者等級」的頻率，25 ms 足夠。
+            //
+            // ⚠ 回呼**只排一次 Drain，自己立刻返回**，絕對不可以直接在這裡抽乾佇列。
+            // 原因（2026-10-06 量到的，不是推論）：佇列裡的工作可能是「開設定頁」＝
+            // SettingsWindow.ShowDialog()，那是一個**阻塞**的巢狀 dispatcher 迴圈。
+            // 若那一項是在這個回呼的堆疊上被抽到，回呼就永遠不會返回，而 WPF 的 DispatcherTimer
+            // 在回呼返回之前**不會再排下一次 tick**——於是 Drain 再也沒有人叫，Pending 永久堆積：
+            // 「關掉之後再按托盤也叫不出來」就是這個形狀（日誌裡只看得到 open requested，
+            // 之後什麼都不會發生，連 Close() 的要求也永遠不會被執行）。
+            //
+            // 量到的證據（探針逐行記 tid／drainDepth／dialogDepth）：
+            //   第一次開：Drain 是在 Dispatcher.Run() **之前**被直接呼叫的，所以 modal 迴圈裡的
+            //             tick 照常觸發（drainDepth=2、dialogDepth=1）→ 一切正常。
+            //   第二次開：工作項是在 tick 的回呼裡被抽到的（drainDepth=1、dialogDepth=1），
+            //             那一行之後 tick 全部消失，直到 modal 迴圈退出才恢復。
+            // 改成「排隊」之後，回呼永遠立刻返回，計時器因此永遠活得下去；而被排出去的 Drain
+            // 會落在 modal 迴圈裡執行——已量測：巢狀 frame 會正常執行 Normal 優先權的
+            // dispatcher 操作（那一次探針就是在 dialogDepth=1 的情況下被執行完的）。
             var pump = new DispatcherTimer(
-                TimeSpan.FromMilliseconds(25), DispatcherPriority.Normal, (_, _) => Drain(), dispatcher);
+                TimeSpan.FromMilliseconds(25), DispatcherPriority.Normal,
+                (_, _) => dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(Drain)), dispatcher);
             pump.Start();
 
             Drain();
@@ -392,6 +410,74 @@ internal static class SettingsUi
         detail = $"selftest: onSaved fired=True; saved to {file}; {report}";
         Log(log, detail);
         return true;
+    }
+
+    /// <summary>
+    /// 以「和真人按下取消鈕完全相同的那條路徑」關掉設定頁：對 <c>CancelButton</c> 發出真正的
+    /// <see cref="Button.ClickEvent"/>，由 <see cref="SettingsWindow"/> 自己的處理常式
+    /// （<c>OnCancelClick =&gt; Close()</c>，右上角的 X 也是同一條）關閉視窗。
+    ///
+    /// 為什麼非要有這一條：產品自己的 <see cref="Close"/> 是**另一條**關窗路徑——它排一個 closure
+    /// 到 UI 執行緒去呼叫 <c>_window?.Close()</c>，而且要先比對世代編號。原本兩個自測都只走產品那條，
+    /// 於是「**視窗自己**關掉之後再也開不回來」這一格完全沒有覆蓋：那正是使用者回報的症狀
+    /// （點了一下設定頁就消失，之後托盤怎麼按都叫不出來，而日誌顯示要求確實送進去了）。
+    /// 兩條路徑的差別（誰先送 <c>Closed</c>、世代編號怎麼被用掉、關窗的請求與新視窗的建立誰先到）
+    /// 正好是 bug 最可能的藏身處。
+    ///
+    /// 這裡**沒有任何自己的關窗邏輯**：勾子只負責「按鈕、回報」，與 <see cref="SelfTestSave"/> 同一個風格。
+    /// 「按了卻關不掉」不會被這裡掩蓋：回傳 true 只代表按鈕真的被按到，關閉是否完成一律由呼叫端
+    /// 用 <see cref="IsOpen"/> 去等、去斷言。
+    /// </summary>
+    public static bool SelfTestCancel(int timeoutMs, out string detail, Action<string> log)
+    {
+        string report = "(the cancel handler never reported a result)";
+
+        bool ran = RunOnUiThread(timeoutMs, log, "selftest cancel", out string failure, () =>
+        {
+            SettingsWindow? w = _window;
+            if (w == null || !w.IsLoaded)
+                return "(no settings window is open)";
+
+            report = $"cancel clicked on the window editing {w.SettingsPath} (generation={w.Generation})";
+            w.CancelButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            return null;
+        });
+
+        detail = ran ? $"selftest: {report}" : $"selftest: {failure}";
+        Log(log, detail);
+        return ran;
+    }
+
+    /// <summary>
+    /// 自測用：現在**真的**有一張設定視窗開著嗎（物件存在，而且已經載入）。
+    ///
+    /// 為什麼不能只問 <see cref="IsOpen"/>：那只是「UI 執行緒上一次開啟有沒有成功」的快照。
+    /// 一個「視窗已經關掉、但 <c>Closed</c> 沒有送達、於是 <c>_isOpen</c> 卡在 true」的 bug，
+    /// 會讓只讀 <see cref="IsOpen"/> 的斷言照樣綠燈——而它的後果正是**再開一次被拒絕**，
+    /// 也就是使用者回報的那個症狀。所以要問的是視窗物件本身。
+    ///
+    /// 必須在 UI 執行緒上問：<c>_window</c> 只由那條執行緒存取，跨執行緒讀它是資料競爭
+    /// （所以經由 <see cref="RunOnUiThread"/>，與其他勾子同一條路）。
+    /// </summary>
+    public static bool SelfTestWindowPresent(int timeoutMs, out string detail, Action<string> log)
+    {
+        string report = "(no settings window)";
+
+        bool ran = RunOnUiThread(timeoutMs, log, "selftest window present", out string failure, () =>
+        {
+            SettingsWindow? w = _window;
+            if (w == null)
+                return "(no settings window object exists)";
+            if (!w.IsLoaded)
+                return $"(a settings window object exists but it is not loaded; generation={w.Generation})";
+
+            report = $"a settings window is loaded (generation={w.Generation}, path={w.SettingsPath})";
+            return null;
+        });
+
+        detail = ran ? $"selftest: {report}" : $"selftest: {failure}";
+        Log(log, detail);
+        return ran;
     }
 
     /// <summary>
