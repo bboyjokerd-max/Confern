@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows;                 // Int32Rect（裁切矩形用；WindowsBase）
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
@@ -602,6 +603,178 @@ internal sealed class ConversionEngine
         return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
     }
 
+    /// <summary>
+    /// 工具：裁切（工具 id `crop`，M3 的第四顆扇形；規格 §9.4）。
+    ///
+    /// **輸出格式＝來源格式**（裁切不換格式），骨架與 <see cref="Compress"/>／
+    /// <see cref="StripMetadata"/> 逐項對齊（格式檢查 → 「編不編得動」→ <see cref="AtomicWriter.Exists"/>
+    /// → <see cref="CodecRegistry.ProbeDecode"/> → <see cref="NamingPolicy.ResolveOutputPath"/>
+    /// → 處理 → <see cref="AtomicWriter.Write"/> ＋ 同一套 3 次重試）。
+    /// 規格 §5 的寫入契約只有一個擁有者，工具不得自己另開一條。
+    ///
+    /// **唯一的輸入是一個正規化的矩形**（<see cref="CropSpec"/>），換算成這一張圖的像素矩形
+    /// 全部交給 <see cref="CropMath.TryToPixels"/>——**引擎不自己算**。那是「批次＝同一比例套用到
+    /// 每一張」的唯一實作處，若在這裡再算一次，批次語意就會有兩份而其中一份會過期。
+    ///
+    /// 三種退化輸入的處置（都不丟例外）：
+    ///   • 矩形為空 → <see cref="ConversionError.CropRectEmpty"/>（不寫檔）；
+    ///   • 矩形等於全圖 → <see cref="ConversionError.CropNothingToDo"/>（不寫檔，理由見該成員）；
+    ///   • 不到 1 px → 夾成 1 px 並把夾制寫進日誌（<see cref="CropMath"/> 會回報）。
+    ///
+    /// ⚠ **EXIF 方向**：裁切的矩形是使用者在**視窗看到的那張圖**上框出來的，而視窗顯示的是
+    /// 「方向套用之後」的畫面（與本產品其他地方的裁定一致：WIC 的解碼器不會自動轉正）。
+    /// 所以方向 ≥ 2 時**必須先烤進像素再裁**，否則矩形會落在錯的地方；而且烤完必須把 tag
+    /// 中和成 1，否則會遵循 tag 的檢視器會把結果再轉一次。這一條對 JPG／TIFF 也一樣
+    /// （與 <see cref="Convert"/> 的「JPG／TIFF 保留 tag」不同）——差別的理由是：
+    /// 裁切**一定會動到像素**，保留一個已經與像素不符的方向 tag 只會讓結果顯示錯。
+    /// 方向＝1（絕大多數）時這一段完全不執行，行為與其他工具逐位元相同。
+    ///
+    /// 品質固定 100：與 <see cref="Rotate90"/> 同一個值、同一個理由——PNG／BMP／TIF 是無損
+    /// 容器，結果逐像素等於「來源的該矩形」；**JPEG 會重新壓縮**，100 只是最接近無損的一檔。
+    /// </summary>
+    public ConversionResult Crop(string sourcePath, CropSpec spec, TempJournal? journal = null,
+                                 string? targetDirectory = null)
+    {
+        string? sourceFormat = _codecs.FormatOfPath(sourcePath);
+        if (sourceFormat == null)
+            return Fail(sourcePath, ConversionError.Unsupported, "extension is not in the format table");
+        if (_codecs.Capability(sourceFormat) is { Decode: DecodeSupport.No })
+            return Fail(sourcePath, ConversionError.Unsupported, $"no decoder for {sourceFormat}");
+        // 與 Compress 同一條理由：輸出＝來源格式，所以「解碼得動」不等於「做得到」。
+        if (_codecs.Capability(sourceFormat) is { CanEncode: false })
+            return Fail(sourcePath, ConversionError.TargetUnavailable,
+                $"no encoder for the source format {sourceFormat}; the crop tool writes back in the " +
+                "source format, so it cannot run here (spec 7.1: say it, do not pretend)");
+        if (!AtomicWriter.Exists(sourcePath))
+            return Fail(sourcePath, ConversionError.SourceMissing, "source disappeared before cropping");
+
+        DecodeOutcome probe = _codecs.ProbeDecode(sourcePath);
+        if (probe.Status != DecodeStatus.Ok)
+            return Fail(sourcePath, MapDecodeStatus(probe.Status), probe.Detail);
+
+        string? extension = _codecs.PrimaryExtension(sourceFormat);
+        if (extension == null)
+            return Fail(sourcePath, ConversionError.TargetUnavailable, "no extension for source format");
+
+        string targetPath;
+        try
+        {
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            // 指定的輸出資料夾不存在 → NamingPolicy 已經回退到來源旁邊。**要說出來**。
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        BitmapSource frame;
+        int frameCount;
+        try
+        {
+            (frame, frameCount) = DecodeFirstFrame(sourcePath);
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, sourceFormat, sourcePath)),
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (frameCount > 1)
+            _log($"note: {Path.GetFileName(sourcePath)} has {frameCount} frames; only the first is cropped (spec 6.1)");
+
+        // 方向先烤進像素，**再**裁（順序不能顛倒：矩形是在轉正後的畫面上框的）。
+        int orientation = ReadOrientation(frame);
+        bool bakedOrientation = false;
+        if (orientation >= 2)
+        {
+            frame = ApplyOrientation(frame, orientation);
+            bakedOrientation = true;
+            _log($"crop: EXIF={orientation} baked into pixels BEFORE cropping " +
+                 $"({frame.PixelWidth}x{frame.PixelHeight}) -- the rectangle was drawn on the upright " +
+                 "picture, and the tag has to be neutralised afterwards or viewers rotate it again");
+        }
+
+        int inW = frame.PixelWidth, inH = frame.PixelHeight;
+        CropOutcome outcome = CropMath.TryToPixels(spec, inW, inH, out Int32Rect rect, out List<string> notes);
+        foreach (string note in notes) _log($"crop: {Path.GetFileName(sourcePath)}: {note}");
+
+        if (outcome == CropOutcome.EmptyRect)
+        {
+            _log($"crop: refusing {Path.GetFileName(sourcePath)} (empty rectangle {spec.Describe()}); " +
+                 "no file is written (say it, do not pretend)");
+            return Fail(sourcePath, ConversionError.CropRectEmpty,
+                $"the crop rectangle {spec.Describe()} is empty on a {inW}x{inH} image");
+        }
+        if (outcome == CropOutcome.FullFrame)
+        {
+            // 全圖＝什麼都沒做。留一個重壓過的檔案會讓使用者以為裁切成功了（見 CropNothingToDo）。
+            _log($"crop: refusing {Path.GetFileName(sourcePath)} (the rectangle covers the whole " +
+                 $"{inW}x{inH} image, so there is nothing to crop -- and a re-encode would be lossy " +
+                 "for JPEG); no file is written");
+            return Fail(sourcePath, ConversionError.CropNothingToDo,
+                $"the crop rectangle covers the whole {inW}x{inH} image; a crop that changes nothing " +
+                "is refused rather than re-encoded");
+        }
+
+        BitmapSource cropped;
+        try
+        {
+            var bitmap = new CroppedBitmap(frame, rect);
+            bitmap.Freeze();        // 凍結後才能跨執行緒交給編碼器（與 ApplyTransform 同一個理由）
+            cropped = bitmap;
+        }
+        catch (Exception ex)
+        {
+            // 到這裡理論上到不了（矩形已經夾在畫格內），但「理論上」不是一種保證方式。
+            return Fail(sourcePath, ConversionError.Unknown,
+                $"CroppedBitmap({rect.X},{rect.Y},{rect.Width},{rect.Height}) on {inW}x{inH} failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                long written = 0;
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                AtomicWriter.Write(targetPath, stream =>
+                {
+                    EncodeWithMetadataFallback(cropped, sourcePath, sourceFormat, 100, stream, bakedOrientation);
+                    written = stream.Length;
+                }, journal);
+                timer.Stop();
+
+                // ⚠ 這一行的格式是**驗收斷言的一部分**（輸入尺寸 → 輸出尺寸）。改它要先改計畫。
+                _log($"crop: {Path.GetFileName(sourcePath)} {inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
+                     $"(rect={rect.X},{rect.Y},{rect.Width},{rect.Height}, {spec.Describe()}, " +
+                     $"{sourceFormat}, quality=100, re-encode)");
+                return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+                    $"{inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
+                    $"({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
+            }
+            catch (Exception ex) when (attempt < 3 && IsTransient(ex))
+            {
+                _log($"write retry {attempt}/3 for {Path.GetFileName(targetPath)}: " +
+                     $"{ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                Thread.Sleep(150 * attempt);
+            }
+            catch (Exception ex)
+            {
+                return Fail(sourcePath, ClassifyWriteFailure(ex),
+                    $"{ex.GetType().Name} hresult=0x{ex.HResult:X8}: {ex.Message}");
+            }
+        }
+
+        return Fail(sourcePath, ConversionError.Locked, "still locked after 3 attempts");
+    }
+
     /// <summary>「壓縮到」的搜尋結果。</summary>
     /// <param name="Reachable">最低品質是否就進得了上限。false 時 <see cref="Bytes"/> 是 null。</param>
     /// <param name="Quality">找到的最佳品質（<see cref="Reachable"/> 為 false 時沒有意義）。</param>
@@ -761,7 +934,15 @@ internal sealed class ConversionEngine
     /// 解碼第一頁／第一格。來源**唯讀**開啟且允許他人共用——
     /// 這一條是規格 §7.2 的第一名（原檔被修改／被刪／被搬移），不能靠「記得不要寫」來保證。
     /// </summary>
-    private static (BitmapSource Frame, int FrameCount) DecodeFirstFrame(string sourcePath)
+    /// <summary>
+    /// 解碼第一頁／第一格。來源**唯讀**開啟且允許他人共用——
+    /// 這一條是規格 §7.2 的第一名（原檔被修改／被刪／被搬移），不能靠「記得不要寫」來保證。
+    ///
+    /// 可見度同 <see cref="ReadOrientation"/>：**裁切視窗**要用它顯示「引擎等一下會拿去裁的那一張
+    /// 畫格」。實作仍然只有這一份（解碼選項 <c>PreservePixelFormat</c> ＋ <c>OnLoad</c> 也是），
+    /// 所以視窗看到的與引擎裁的保證是同一張。
+    /// </summary>
+    internal static (BitmapSource Frame, int FrameCount) DecodeFirstFrame(string sourcePath)
     {
         using var input = new FileStream(LongPath.Prepare(sourcePath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         BitmapDecoder decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat,
@@ -831,8 +1012,14 @@ internal sealed class ConversionEngine
 
     private static readonly string[] OrientationQueries = { "/app1/ifd/{ushort=274}", "/ifd/{ushort=274}" };
 
-    /// <summary>讀 EXIF 方向；讀不到回 1（正常）。</summary>
-    private static int ReadOrientation(BitmapSource frame)
+    /// <summary>
+    /// 讀 EXIF 方向；讀不到回 1（正常）。
+    ///
+    /// ⚠ 2026-10-06：由 <c>private</c> 改為 <c>internal</c> 的唯一理由是**裁切視窗**——
+    /// 它要顯示的必須是「引擎等一下會拿去裁的那張畫格」，否則使用者在躺著的圖上框出來的矩形
+    /// 會落在錯的地方。**沒有任何行為改變**（可見度不影響 IL 行為），而且擁有者仍然只有這裡一份。
+    /// </summary>
+    internal static int ReadOrientation(BitmapSource frame)
     {
         if (frame is not BitmapFrame asFrame || asFrame.Metadata is not BitmapMetadata metadata) return 1;
         foreach (string query in OrientationQueries)
@@ -849,8 +1036,8 @@ internal sealed class ConversionEngine
         return 1;
     }
 
-    /// <summary>把 EXIF 方向套用到像素上（1–8 的完整對應）。</summary>
-    private static BitmapSource ApplyOrientation(BitmapSource source, int orientation)
+    /// <summary>把 EXIF 方向套用到像素上（1–8 的完整對應）。可見度同 <see cref="ReadOrientation"/>：裁切視窗要顯示同一張畫格。</summary>
+    internal static BitmapSource ApplyOrientation(BitmapSource source, int orientation)
     {
         Transform? transform = orientation switch
         {

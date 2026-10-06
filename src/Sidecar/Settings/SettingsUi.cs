@@ -239,6 +239,59 @@ internal static class SettingsUi
         _isOpen = false;
     }
 
+    // =====================================================================================
+    // 共用的 WPF UI 執行緒（裁切視窗借用它）
+    //
+    // 為什麼是**借用同一條**，而不是讓裁切視窗再開一條自己的：一個 AppDomain 只准有一個
+    // Application（見 UiThreadMain 的說明），第二條執行緒拿不到自己的 Application，
+    // 而本檔已經量到「沒有 Application 的那條執行緒開出來的視窗不會上螢幕」那個形狀。
+    // 兩條執行緒誰先起來就決定了誰能拿到 Application——那是一種**看啟動順序才會出現**的 bug。
+    // 借用同一條執行緒，這個問題就不存在：永遠只有一個 Application、一條 STA 執行緒、
+    // 一個工作佇列、一個 generation。裁切視窗與設定頁因此可以同時開著而不互相破壞。
+    // =====================================================================================
+
+    /// <summary>
+    /// 確定共用的 WPF UI 執行緒已經起來（可以從任何執行緒呼叫；內部自己上鎖）。
+    /// 這是「借用」的**唯一入口**：呼叫端不必、也不可以自己管那條執行緒。
+    /// </summary>
+    internal static void EnsureSharedUiThread(Action<string>? log)
+    {
+        lock (Gate) EnsureUiThread(log);
+    }
+
+    /// <summary>
+    /// 把一件工作排到共用的 WPF UI 執行緒上並**立刻返回**（不等待、不丟例外）。
+    ///
+    /// 為什麼不能拿 <see cref="RunOnUiThread"/> 代替它：那一個會等到工作做完才返回，而
+    /// 「開一個 modal 視窗」這件工作要等到使用者關窗才做完——用它等於把呼叫端（主訊息迴圈）
+    /// 凍在那裡，托盤、鉤子、放手偵測全部停擺。
+    ///
+    /// 回傳 false 只有一種情況：佇列還沒有人抽（呼叫端要先 <see cref="EnsureSharedUiThread"/>）。
+    /// </summary>
+    internal static bool PostToSharedUiThread(Action work, Action<string>? log, string what)
+    {
+        if (work == null)
+        {
+            Log(log, $"settings ui: post rejected ({what}: work is null)");
+            return false;
+        }
+        Pending.Enqueue(work);
+        return true;
+    }
+
+    /// <summary>
+    /// 這個行程裡是不是已經有可用的 WPF dispatcher（＝共用的 UI 執行緒活著且在抽佇列）。
+    /// 給「排工作之前要先確認」的呼叫端用。
+    /// </summary>
+    internal static bool SharedUiThreadReady => _dispatcher != null && _uiThreadId != 0;
+
+    /// <summary>
+    /// 目前是不是在**共用的 WPF UI 執行緒**上。呼叫端據此拒絕「自己開窗再自己等」的自我等待，
+    /// 以及「從 UI 執行緒直接寫 Evidence」這種沒有上鎖的日誌。
+    /// </summary>
+    internal static bool OnSharedUiThread =>
+        _uiThreadId != 0 && Environment.CurrentManagedThreadId == _uiThreadId;
+
     /// <summary>把 UI 執行緒拉起來（只拉一次）。呼叫端必須持有 <see cref="Gate"/>。</summary>
     private static void EnsureUiThread(Action<string>? log)
     {
@@ -788,8 +841,11 @@ internal static class SettingsUi
     /// 把 <paramref name="work"/> 排到 UI 執行緒上執行並**等它做完**。
     /// <paramref name="work"/> 回傳 null 表示成功，否則回傳失敗原因。
     /// 已在這條 UI 執行緒上時直接執行（排隊會自我等待）。不丟例外。
+    ///
+    /// ⚠ 這裡的「等」是重點：**不可以**拿它來開 modal 視窗（那要等到使用者關窗才返回），
+    /// 開窗請用 <see cref="PostToSharedUiThread"/>。
     /// </summary>
-    private static bool RunOnUiThread(int timeoutMs, Action<string>? log, string what,
+    internal static bool RunOnUiThread(int timeoutMs, Action<string>? log, string what,
         out string failure, Func<string?> work)
     {
         const string NotStarted = "(not run)";
@@ -857,9 +913,10 @@ internal static class SettingsUi
 
     /// <summary>
     /// 解回 PNG 並數不同的 RGB 顏色數（透明像素不算）。用來判斷「這張圖是不是空的」。
-    /// 只在勾子裡用到；解不開就當成失敗（回 0）。
+    /// 設定頁與**裁切視窗**的 dump 都用它（同一個「不是空白圖」的判準，不各自實作一份）；
+    /// 解不開就當成失敗（回 0）。
     /// </summary>
-    private static int CountDistinctColors(byte[] png)
+    internal static int CountDistinctColors(byte[] png)
     {
         try
         {
@@ -945,6 +1002,24 @@ internal static class SettingsUi
 
         /// <summary>選中／作用中＝選中扇區填色 <see cref="WheelDesign.SelFill"/>（實心 #3F6B7A）。</summary>
         public static readonly SolidColorBrush SelectedBg = Opaque(WheelDesign.SelFill);
+
+        // ---- 裁切視窗（M3 第四顆扇形）----
+        // 這三個是**唯一**允許帶透明度的筆刷：它們疊在「使用者自己的照片」上，而不是疊在
+        // 不透明的視窗底色上。照片的亮度無法預測，所以遮罩必須是半透明的（不透明的遮罩會把
+        // 使用者正在判斷的那張圖整個蓋掉）；琥珀色取自輪盤「選中」的同一支權杖，所以
+        // 「被選取的範圍」在全產品是同一個顏色。
+
+        /// <summary>裁切框**以外**的暗化遮罩：暗罩 <see cref="WheelDesign.Veil"/> 壓到 60 %。</summary>
+        public static readonly SolidColorBrush CropMask = new(System.Windows.Media.Color.FromArgb(
+            153, WheelDesign.Veil.R, WheelDesign.Veil.G, WheelDesign.Veil.B));
+
+        /// <summary>裁切框線與把手外框＝琥珀 <see cref="WheelDesign.SelStroke"/>（與「選中扇區」同一色）。</summary>
+        public static readonly SolidColorBrush SelectionStroke = new(System.Windows.Media.Color.FromArgb(
+            255, WheelDesign.SelStroke.R, WheelDesign.SelStroke.G, WheelDesign.SelStroke.B));
+
+        /// <summary>把手填色＝輪盤標籤白 <see cref="WheelDesign.Label"/>（實心，抓得到的那一種白）。</summary>
+        public static readonly SolidColorBrush HandleFill = new(System.Windows.Media.Color.FromArgb(
+            255, WheelDesign.Label.R, WheelDesign.Label.G, WheelDesign.Label.B));
 
         /// <summary>字體。無襯線；中文用 <c>Microsoft JhengHei UI</c>，缺字時 WPF 自己往後退。</summary>
         public static readonly FontFamily Font =

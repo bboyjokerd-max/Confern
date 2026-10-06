@@ -551,6 +551,23 @@ Check 'S12.13d no .tmp-* after batch' (@(Get-ChildItem -LiteralPath $Work -Filte
 #                  new: ($layerTools -eq 3)  -- ROTATE + CLEAN + COMPRESS. Adding a
 #                       fourth tool must update this number on purpose; the failure
 #                       message prints the value that was actually measured.
+#                CHANGED 2026-10-06 (M3 fourth sector, tool id "crop"): the tool catalog
+#                went 3 -> 4, so the pin moves with it.
+#                  old: ($layerTools -eq 3)  -- ROTATE + CLEAN + COMPRESS
+#                  new: ($layerTools -eq 4)  -- ROTATE + CLEAN + COMPRESS + CROP
+#                       (the fourth sector is the last one: ToolCatalog.Tools keeps
+#                       the drawing order, and crop is appended). The failure message
+#                       and the check's own name say "4 tools" now, because a stale
+#                       name is how a green run starts lying about what it measured.
+#                A tool count of 0 still fails, exactly as before.
+#
+#                NOTE (why this pin can be trusted from a distance): the tool layer's
+#                composition is also queryable WITHOUT the wheel and WITHOUT the
+#                single-instance guard, through `--tools-list` / `--tools-list`, which
+#                prints the same ToolCatalog.ToolsFor list with ids, labels and icons.
+#                That path is asserted by tools\verify-m3d.ps1 S18.03, so a wrong
+#                number here is cross-checked by a check that can run while the user's
+#                own Confern is open (this suite cannot).
 #                The semantics did NOT change: this is still "no key held => the wheel
 #                stays on the format layer, and the tool catalog is not empty". A tool
 #                count of 0 still fails, exactly as before.
@@ -829,9 +846,9 @@ if ($payloadLine) {
   if ($tm.Success) { $layerTools = [int]$tm.Groups[1].Value }
 }
 $dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $layerDump).Length } else { -1 }
-Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=3 tools) and dumps that frame' `
-  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 3) -and ($dumpLen -gt 8000)) `
-  "exit=$($layerRun.Exit) tools=$layerTools (expected 3: rotate90+strip-metadata+compress; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=4 tools) and dumps that frame' `
+  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 4) -and ($dumpLen -gt 8000)) `
+  "exit=$($layerRun.Exit) tools=$layerTools (expected 4: rotate90+strip-metadata+compress+crop; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
 
 "=== result ==="
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"

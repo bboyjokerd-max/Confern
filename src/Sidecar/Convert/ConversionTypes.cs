@@ -23,7 +23,30 @@ internal enum ConversionError
     /// 而是失敗於**使用者的要求本身**。使用者訊息若不說出這一件事，他看到的會是「轉檔失敗」，
     /// 然後一直重試同一個做不到的上限。規格 §7.1 的精神就是「原因要說得出來」。
     /// </summary>
-    TargetTooSmall
+    TargetTooSmall,
+
+    /// <summary>
+    /// 工具 `crop`（M3 第四顆扇形）專用：選取的矩形**是空的**（換算後寬或高為 0）。
+    ///
+    /// 為什麼是拒絕而不是夾成 1 px：一個「零面積」的矩形沒有任何區塊可以指認，
+    /// 夾成 1 px 是**替使用者發明一個他沒有選的區域**（還可能是畫面外的 1 px）。
+    /// 相對地「不到 1 px 但大於 0」是真的指了一小塊，那一種才夾成 1 px（見 <see cref="CropMath"/>）。
+    /// 兩者的界線就畫在「面積是不是 0」，這一條不是口味問題。
+    /// </summary>
+    CropRectEmpty,
+
+    /// <summary>
+    /// 工具 `crop` 專用：選取的矩形（在**這一張圖的尺寸上**）**等於整張圖**。
+    ///
+    /// 為什麼是拒絕而不是「原樣輸出」：本產品的寫出是「解碼 → 處理 → **重新編碼**」。
+    /// 全圖裁切是**可證明沒有任何處理**的一步，對 JPEG 卻是**一次有損的重新編碼**——
+    /// 付了畫質、換到一個位元組不同的同名檔案。用一個會損失畫質的動作去執行一個「什麼都沒做」
+    /// 的請求，是這個產品最不該做的事。所以**大聲拒絕**：使用者拖到全圖時會看到
+    /// 「選取範圍等於整張圖」，而不是拿到一個看起來一樣、其實已經重壓過的檔案。
+    /// （⚠ 對照組：`strip-metadata` 對「沒有 metadata 的圖」是照樣輸出並在日誌說明，
+    /// 因為那一條路是**逐位元組相同**的，代價是 0。差別在這裡。）
+    /// </summary>
+    CropNothingToDo
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
@@ -53,6 +76,9 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         ConversionError.Timeout => "雲端檔案下載逾時",
         // 工具 compress 專用（規格 §9.4）。說的是「你的上限太低」，不是「轉檔壞了」。
         ConversionError.TargetTooSmall => "已達最低品質仍超過指定大小",
+        // 工具 crop 專用（規格 §9.4）。同樣是「你的要求本身沒有東西可以做」，不是「轉檔壞了」。
+        ConversionError.CropRectEmpty => "選取範圍是空的",
+        ConversionError.CropNothingToDo => "選取範圍等於整張圖",
         _ => "轉檔失敗"
     };
 

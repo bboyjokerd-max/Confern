@@ -174,6 +174,40 @@ internal static class Program
             return App.RunConvert(opt, convertEvidence);
         }
 
+        // M3 第四顆扇形：`--crop`——走**完整的一條路**（worker 行程、op=crop、管道、快照）。
+        //
+        // ⚠ 位置刻意在單一實例守衛**之前**（與 `--convert` 同一條規矩）：守衛是為了擋下第二個
+        // **常駐**行程，而這條診斷跑完就結束。若把它放在守衛之後，使用者自己開著 Confern 的時候
+        // （＝最可能想跑它的時候）這條診斷只會回一個「已經有一個在跑」的 3，什麼都量不到。
+        if (!string.IsNullOrEmpty(opt.Crop))
+        {
+            Native.AttachParentConsole();
+            using var cropEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.CropDiagnostic(cropEvidence, opt);
+        }
+        // M3 第四顆扇形：`--tools-list`——把工具層**有哪些扇區**變成一個不必開視窗、不必滑鼠、
+        // 也不必搶單一實例就能問的事實。
+        //
+        // 為什麼需要它：工具層的組成原本只能從 `--wheel-payload --wheel-tools` 那條路看出來，
+        // 而那一條會跑起完整的常駐路徑（會撞單一實例守衛、會建覆蓋層）。「有哪幾顆工具」是這條
+        // 產品線最容易被改動、也最該被釘住的一件事（加一顆＝改協議、改輪盤、改介面），
+        // 所以它必須隨時問得到——包含使用者自己開著 Confern 的時候。
+        if (opt.ToolsList)
+        {
+            Native.AttachParentConsole();
+            using var toolEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunToolsList(opt, toolEvidence);
+        }
+
+        // M3 第四顆扇形：裁切視窗的生命週期與互動自測（不必畫面、**不必滑鼠**）。
+        // 與上面的 `--crop` 是兩條不同的路：這一條驗的是**視窗**，那一條驗的是**引擎與協議**。
+        if (opt.CropUiSelfTest || !string.IsNullOrEmpty(opt.CropUiDump))
+        {
+            Native.AttachParentConsole();
+            using var cropUiEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunCropUiSelfTest(opt, cropUiEvidence);
+        }
+
         // M1g：托盤圖示的自測（待辦 4）。與設定頁的自測一樣必須在單一實例守衛之前——
         // 否則「已經有一個 Confern 在跑」時，診斷會被守衛擋掉，而這正是使用者最有機會
         // 想跑它的時候。
@@ -256,6 +290,23 @@ internal sealed class Options
           --compress <path>         run tool compress on <path> and report; the level comes from the
                                     settings file (compressionMode / compressionTargetKb), never
                                     from the command line; the source file is never touched
+          --crop <p1;p2>            run tool crop on these files through the real WORKER process
+                                    (op=crop over the pipe) and report; one normalized rectangle is
+                                    applied to every file, each according to its own size;
+                                    the source files are never touched
+          --crop-rect x,y,w,h       the NORMALIZED crop rectangle (0..1, '.' as the decimal point).
+                                    This is the no-mouse seam: it is what dragging in the crop window
+                                    would have produced, so the whole path can be verified without
+                                    touching the user's mouse
+          --crop-ratio <id>         aspect preset for --crop: free | 1:1 | 16:9 | 4:3 | original
+                                    (default free)
+          --crop-ui-selftest        open the crop window, set a rectangle programmatically, drag with
+                                    synthetic coordinates, confirm, close and reopen (no screen, no mouse)
+          --crop-ui-dump <png>      render the crop window to a PNG (offscreen composite, not a screen
+                                    capture) so the layout and the absence of scrollbars can be asserted
+          --crop-source <path>      the image shown by --crop-ui-selftest / --crop-ui-dump
+          --tools-list              print the tool layer's sectors (ids, labels, icons) and exit;
+                                    no window, no mouse, and it works while Confern is already running
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
           --wheel-targets <a,b,c>   with --wheel-demo: target format list (default PNG,JPG,WEBP,BMP)
           --wheel-selected <N>      with --wheel-demo: initially selected sector (default 0)
@@ -401,6 +452,50 @@ internal sealed class Options
     /// 旗標等於讓驗收繞過那條鏈，驗到一個產品裡不存在的組合。
     /// </summary>
     public string? Compress;
+    /// <summary>
+    /// M3 診斷（2026-10-06）：`--crop &lt;p1;p2&gt;` 走**完整的一條路**（worker 行程、`op=crop`、
+    /// 管道、快照）對這幾個檔案跑工具 `crop`（第四顆扇形）。分號分隔＝一次批次，
+    /// 而批次正是「同一比例套用到每一張」唯一的驗法。
+    ///
+    /// 與前三個工具診斷的差別（刻意的）：前三條是**同一個行程內直接呼叫引擎**，
+    /// 這一條起真的 worker 行程。理由是裁切帶著**五個新的協議欄位**
+    /// （<c>cropX</c>…<c>cropRatio</c>）——那五個欄位有沒有真的跨過管道，只有走管道才驗得到。
+    /// 一個「在本地算得好好的」矩形，跟一個「跨了管道之後還算得對」的矩形，
+    /// 壞掉的原因完全不同（後者最可能的壞法是欄位沒送／被當成 0）。
+    /// </summary>
+    public string? Crop;
+    /// <summary>
+    /// `--crop-rect x,y,w,h`：**正規化**的裁切矩形（0..1，小數點固定是「.」）。
+    ///
+    /// 這個旗標就是「無滑鼠的診斷接縫」：裁切的互動是拖曳，而本專案 2026-10-06 起
+    /// **預設跑套件絕不碰使用者的滑鼠**。所以拖曳的產物（一個正規化矩形）必須能從命令列餵進來，
+    /// 讓整條路徑（矩形 → worker → 引擎 → 每一張圖各自的像素矩形 → 寫檔）在沒有任何輸入下被驗。
+    /// 它同時也是 `--wheel-payload --wheel-tools --wheel-tool crop` 的矩形來源：
+    /// 少了它，那條診斷會去開裁切視窗並永遠等不到人按確認。
+    /// </summary>
+    public string CropRect = "";
+    /// <summary>
+    /// `--crop-ratio &lt;id&gt;`：比例預設（`free`／`1:1`／`16:9`／`4:3`／`original`，
+    /// 見 <see cref="CropRatios"/>）。空＝`free`。認不得的值會被拒絕並說出來（不靜默退回）。
+    /// </summary>
+    public string CropRatio = "";
+    /// <summary>
+    /// `--crop-ui-selftest`：裁切視窗的生命週期與互動自測（不必畫面、**不必滑鼠**）。
+    /// 見 <see cref="App.RunCropUiSelfTest"/>；形狀比照 `--settings-ui-selftest`。
+    /// </summary>
+    public bool CropUiSelfTest;
+    /// <summary>
+    /// `--crop-ui-dump &lt;png&gt;`：把裁切視窗畫成一張 PNG（**離屏合成**，不是螢幕擷取），
+    /// 讓驗收能斷言「視窗長什麼樣、有沒有捲軸」。搭配 `--crop-rect` 可以指定圖上框的那一塊。
+    /// </summary>
+    public string CropUiDump = "";
+    /// <summary>--crop-ui-selftest／--crop-ui-dump 要顯示的影像（第一張＝預覽那一張）。</summary>
+    public string? CropUiSource;
+    /// <summary>
+    /// M3：`--tools-list`——把工具層的扇區清單印出來就結束（不必視窗、不必滑鼠、不必搶單一實例）。
+    /// 見 <see cref="App.RunToolsList"/>。
+    /// </summary>
+    public bool ToolsList;
     /// <summary>
     /// 玻璃底材來源：`screen`（預設，抓真實桌面）／`dark`／`light`（合成桌布）。
     /// 合成桌布是為了**可重現的驗收**：自動化不能依賴「當時桌面上剛好有什麼」，
@@ -570,8 +665,7 @@ internal sealed class Options
     /// </summary>
     public bool NoAutostart;
     /// <summary>--trigger-key 是否由命令列明確指定（決定它與設定檔的優先順序）。</summary>
-    public bool TriggerKeyFromCli;
-    /// <summary>--watchdog-seconds 是否由命令列明確指定（同上）。</summary>
+    public bool TriggerKeyFromCli;    /// <summary>--watchdog-seconds 是否由命令列明確指定（同上）。</summary>
     public bool WatchdogFromCli;
     public int WheelSimulateCycles;
 
@@ -613,7 +707,16 @@ internal sealed class Options
         case "--wheel-tool": if (i + 1 < args.Length) o.WheelTool = args[++i]; break;
                 case "--rotate90": if (i + 1 < args.Length) o.Rotate90 = args[++i]; break;
                 case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
-        case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
+                case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
+                case "--crop":
+                    if (i + 1 < args.Length) { o.Crop = args[i + 1]; o.CropUiSource ??= args[i + 1].Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(); i++; }
+                    break;
+                case "--crop-rect": if (i + 1 < args.Length) o.CropRect = args[++i]; break;
+                case "--crop-ratio": if (i + 1 < args.Length) o.CropRatio = args[++i]; break;
+                case "--crop-source": if (i + 1 < args.Length) o.CropUiSource = args[++i]; break;
+                case "--crop-ui-selftest": o.CropUiSelfTest = true; break;
+                case "--tools-list": o.ToolsList = true; break;
+                case "--crop-ui-dump": if (i + 1 < args.Length) o.CropUiDump = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -833,6 +936,8 @@ internal static class App
 
         // M1f：設定（規格 §8）必須在**建立偵測器之前**載入——觸發鍵與接收層逾時都來自它。
         // 優先順序：命令列（診斷用）> 設定檔 > 規格預設值；預設值即規格值，檔案壞掉／超範圍都會說明。
+        // 選項本身也留在進程層級（CommitWheel 的裁切那一條要讀 `--crop-rect`）。
+        _options = opt;
         _settings = SettingsStore.Load(string.IsNullOrEmpty(opt.SettingsFile) ? null : opt.SettingsFile, evidence.Line);
         // 「診斷記錄」只影響 detail 行的多寡，不影響必要事件——所以它可以在這裡就生效，
         // 而且必須在**其他東西開始寫日誌之前**生效，否則同一份日誌會有兩種規矩。
@@ -951,6 +1056,9 @@ internal static class App
         // 副作用只有一個：這個 tick 的訂閱者在本路徑上原本是空的（輪盤不訂它），
         // 所以這裡多做的唯一一件事，就是每 200 ms 把一個（通常是空的）佇列抽乾。
         visual.TickRequested += () => DrainSettingsUiLog(evidence);
+        // 裁切視窗的確認要在**主執行緒**上接手（它要起 worker，而視覺層與進度藥丸是主執行緒的）：
+        // 接在同一個週期回呼上，不新增第二個計時器。這條回呼在診斷路徑上通常沒有東西可抽。
+        visual.TickRequested += () => DrainPendingCrops(evidence, runner);
         visual.StartTick(SettingsUiLogDrainIntervalMs);
         // 這一行刻意**不**以 `settings ui:` 開頭：那個前綴的意思是「設定頁那條執行緒排過來的行」，
         // 而這一行是主執行緒自己說的（而且驗收要用 `settings ui:` 的行數來判斷抽乾有沒有生效）。
@@ -1655,6 +1763,200 @@ internal static class App
         return 0;
     }
 
+    /// <summary>
+    /// M3 診斷：`--crop &lt;p1;p2&gt; --crop-rect x,y,w,h [--crop-ratio id]`（第四顆扇形）。
+    ///
+    /// 與另外三個工具診斷最大的差別：**它起真的 worker 行程、走真的管道**。前三個是「同一個行程內
+    /// 直接呼叫引擎」，所以它們驗不到協議欄位；裁切帶著五個新欄位（<c>cropX</c>…<c>cropRatio</c>），
+    /// 而「欄位有沒有真的跨過去」正是最可能壞掉、又最難看出來的一件事（送出去的是
+    /// <c>x=0.125</c>，另一端讀到的是 null/0，結果是一個沒有裁到的檔案，而且回報成功）。
+    ///
+    /// 它刻意把五件事印成可斷言的事實：
+    ///   ①**這一輪用的矩形與比例**（正規化；來自命令列，不是猜的）；
+    ///   ②worker **自己那一行** `worker job N: ... op=crop crop=(...) ratio=...`——矩形真的跨過管道
+    ///     的證據在**另一端**，不在這裡；
+    ///   ③引擎每一張圖各自回報的 `crop: name WxH -> WxH (rect=..., ...)`——「同一比例、各自換算」
+    ///     的實測值就是這一行的左邊與右邊；
+    ///   ④每一張的**輸出尺寸**（用產品自己的解碼器量回來的畫格，不是算式）；
+    ///   ⑤來源檔**完全沒被動到**——SHA256／長度／mtime 三項前後比對（規格 §5 的第一名）。
+    ///
+    /// 回傳碼：0 全部成功、1 來源被動到（§5 紅線）、2 參數或來源有問題（**沒有送出任何工作**）、
+    /// 3 引擎失敗（含「空的矩形」與「等於整張圖」這兩種具名拒絕）。
+    /// </summary>
+    internal static int CropDiagnostic(Evidence evidence, Options opt)
+    {
+        if (!CropSpec.TryParse(opt.CropRect, out CropSpec parsed, out string parseError))
+        {
+            evidence.Line($"--crop: refusing to run: {parseError}");
+            evidence.Line("--crop FAILED (nothing was sent to the worker)");
+            return 2;
+        }
+        if (opt.CropRatio.Length > 0 && !CropRatios.IsCanonical(opt.CropRatio))
+        {
+            // 認不得的比例**不靜默退回 free**：那會讓「1:1」這種打錯字變成一條看起來成功的裁切。
+            evidence.Line($"--crop: unknown --crop-ratio '{opt.CropRatio}' " +
+                          $"(expected one of {string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+            evidence.Line("--crop FAILED (nothing was sent to the worker)");
+            return 2;
+        }
+        CropSpec spec = parsed with { RatioId = CropRatios.CanonicalId(opt.CropRatio) };
+
+        string[] paths = opt.Crop!.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        if (paths.Length == 0)
+        {
+            evidence.Line("--crop: no source path was given");
+            return 2;
+        }
+        foreach (string path in paths)
+        {
+            if (!File.Exists(LongPath.Prepare(path)))
+            {
+                evidence.Line($"--crop: source not found: {path}");
+                return 2;
+            }
+        }
+
+        // 來源的三項指紋（規格 §5）：整批送出之前先量一次，跑完再量一次。
+        var before = paths.Select(p => (Path: p, Hash: Sha256Of(p), Length: new FileInfo(p).Length,
+                                        Mtime: File.GetLastWriteTimeUtc(p))).ToList();
+
+        Settings settings = _settings ?? new Settings();
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"tool crop: outputDir={outputDir ?? "(source folder)"}");
+        evidence.Line($"tool crop: request {spec.Describe()} files={paths.Length} " +
+                      $"(normalized rectangle -> every file is converted with ITS OWN size)");
+
+        int journalRecovered = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
+        evidence.Line($"temp journal: recovered {journalRecovered} stale temp file(s)");
+
+        // **真的 worker**：同一條路徑、同一份協議、同一個 op。不使用 ConversionRunner 是因為
+        // 它一定要一個 ProgressPresenter（＝螢幕上的進度藥丸），而診斷不該在使用者畫面上畫東西。
+        string exePath = Environment.ProcessPath ?? $"{ProductInfo.Name}.exe";
+        var client = new ConversionClient(exePath, evidence.Line);
+        try
+        {
+            if (!client.Start(paths, "", 100, outputDir: outputDir, toolOp: WorkerProtocol.OpCrop,
+                              out string? startError, crop: spec))
+            {
+                evidence.Line($"--crop FAILED: the worker did not start ({startError})");
+                return 3;
+            }
+
+            var sw = Stopwatch.StartNew();
+            while (!client.Snapshot.Finished && sw.ElapsedMilliseconds < 120000) Thread.Sleep(20);
+            ConversionSnapshot snapshot = client.Snapshot;
+
+            evidence.Line($"crop snapshot: finished={snapshot.Finished} done={snapshot.Done}/{snapshot.Total} " +
+                          $"ok={snapshot.Ok} failed={snapshot.Failed} error={snapshot.Error ?? "-"} " +
+                          $"line='{snapshot.Line}'");
+            foreach (string failure in snapshot.Failures)
+                evidence.Line($"crop failure: {failure}");
+
+            // ④ 用**產品自己的解碼器**量回每一張輸出（不是把算式再算一次：算式的第二份實作
+            //    正好就是最可能出現的那個錯）。輸出檔名取自引擎自己的 `output=`，不在這裡重組規則。
+            int measured = 0;
+            foreach (string path in paths)
+            {
+                string? output = LatestCropOutputOf(evidence, path);
+                if (output == null || !File.Exists(LongPath.Prepare(output)))
+                {
+                    evidence.Line($"crop output: {Path.GetFileName(path)} -> (no output file was reported)");
+                    continue;
+                }
+                (int w, int h) = MeasureImage(output);
+                evidence.Line($"crop output: {Path.GetFileName(path)} {ImageSizeOf(path)} -> " +
+                              $"{Path.GetFileName(output)} {w}x{h}");
+                measured++;
+            }
+            evidence.Line($"crop measured outputs: {measured}/{paths.Length}");
+
+            bool untouched = true;
+            foreach ((string path, string hash, long length, DateTime mtime) in before)
+            {
+                string nowHash = Sha256Of(path);
+                bool same = nowHash == hash && new FileInfo(path).Length == length
+                            && File.GetLastWriteTimeUtc(path) == mtime;
+                untouched &= same;
+                evidence.Line($"tool crop: source-untouched[{Path.GetFileName(path)}]={same} " +
+                              $"(sha256 {hash.Substring(0, 12)} -> {nowHash.Substring(0, 12)}, " +
+                              $"len {length}, mtime {(mtime == File.GetLastWriteTimeUtc(path) ? "same" : "CHANGED")})");
+            }
+
+            if (!untouched)
+            {
+                evidence.Line("--crop FAILED: a source file was modified (spec 5 violation)");
+                return 1;
+            }
+            if (!snapshot.Finished || snapshot.Failed > 0)
+            {
+                evidence.Line($"--crop FAILED: finished={snapshot.Finished} failed={snapshot.Failed}");
+                return 3;
+            }
+            evidence.Line($"crop summary: ✓ {snapshot.Ok}/{paths.Length} (all outputs written, sources untouched)");
+            return 0;
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 引擎這一輪寫出來的裁切輸出檔（在來源檔旁邊找）。回 null＝找不到，由呼叫端說出來。
+    ///
+    /// ⚠ 這**不是**第二份命名規則：命名規則仍然只有 <see cref="NamingPolicy"/> 一份，這裡只是
+    /// 「跑完之後在資料夾裡找那一個新檔案」。之所以不自己組：「組出正確的名字」正是會與產品
+    /// 不一致的那種第二份實作（撞名加「 (1)」、輸出資料夾回退…）；而**這裡若找錯檔案，
+    /// 下面量到的尺寸就會是錯的**——所以它寧可找不到並說出來。
+    /// </summary>
+    private static string? LatestCropOutputOf(Evidence evidence, string source)
+    {
+        string full = Path.GetFullPath(source);
+        string folder = Path.GetDirectoryName(full) ?? ".";
+        string stem = Path.GetFileNameWithoutExtension(full);
+        string extension = Path.GetExtension(full);
+
+        // 產品的規則：同主檔名 ＋ 同副檔名，撞名才加「 (n)」。取**編號最小**的那一個，
+        // 否則會回一個舊批次留下的檔案（那會讓「這次有沒有產出」變成一個說不準的答案）。
+        string? best = null;
+        int bestIndex = int.MaxValue;
+        for (int n = 0; n <= 9; n++)
+        {
+            string candidate = n == 0 ? Path.Combine(folder, stem + extension)
+                                      : Path.Combine(folder, $"{stem} ({n}){extension}");
+            if (string.Equals(Path.GetFullPath(candidate), full, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!File.Exists(LongPath.Prepare(candidate))) continue;
+            if (n >= bestIndex) continue;
+            bestIndex = n;
+            best = candidate;
+        }
+        if (best == null)
+            evidence.Line($"crop output: no output file was found next to {Path.GetFileName(source)} " +
+                          "(the run reported success but nothing new is in that folder)");
+        return best;
+    }
+
+    /// <summary>用產品的解碼器量一張圖的像素尺寸（不含方向、不含縮放）。量不到回 (0,0) 並說出來。</summary>
+    private static (int Width, int Height) MeasureImage(string path)
+    {
+        try
+        {
+            var (frame, _) = ConversionEngine.DecodeFirstFrame(path);
+            return (frame.PixelWidth, frame.PixelHeight);
+        }
+        catch (Exception)
+        {
+            return (0, 0);
+        }
+    }
+
+    /// <summary>來源檔的像素尺寸（診斷日誌用；量不到就寫 `?x?`）。</summary>
+    private static string ImageSizeOf(string path)
+    {
+        (int w, int h) = MeasureImage(path);
+        return w > 0 && h > 0 ? $"{w}x{h}" : "?x?";
+    }
+
     /// <summary>檔案內容的 SHA256（十六進位大寫）。診斷用，不進產品路徑。</summary>
     private static string Sha256Of(string path)
     {
@@ -1884,6 +2186,71 @@ internal static class App
         evidence.Line($"ENTER: commit -> {(toolOp ?? target)}, files={paths.Length}, " +
                       $"wheelCenter=({centerX},{centerY}) (real conversion via worker, spec 9.1)");
 
+        // M3 第四顆扇形（裁切）：**它需要一個只有使用者才知道的輸入**——框在哪裡。
+        // 所以這一條不可以像其他三顆一樣直接送工作，而要先問。
+        //
+        // 兩條路，都是同一份權威（`--crop-rect` 的矩形與視窗拖出來的矩形都是 CropSpec）：
+        //   ① 有 `--crop-rect`（診斷）：直接用那個矩形提交，**不開視窗**。這是無滑鼠的接縫，
+        //      也是 `--wheel-payload --wheel-tools --wheel-tool crop` 能跑完的唯一方式。
+        //   ② 沒有（正式路徑）：開裁切視窗，讓使用者框；確認之後由**主執行緒**接手起 worker
+        //      （視窗那條是 WPF 執行緒，視覺層與進度藥丸都屬於主執行緒）。
+        if (toolOp == WorkerProtocol.OpCrop)
+        {
+            string cliRect = _options.CropRect;
+            string cliRatio = _options.CropRatio;
+            // ⚠ 先宣告再 out：`out` 變數宣告在 if 的條件裡時，編譯器無法證明「另一個分支有被賦值」，
+            // 而下面那條「--crop-rect 給了卻不能用」的拒絕正是走在另一個分支上（CS0165）。
+            CropSpec fromCli = CropSpec.Free(0, 0, 1, 1);
+            string cliError = "";
+            bool rectFromCli = cliRect.Length > 0 && CropSpec.TryParse(cliRect, out fromCli, out cliError);
+            if (rectFromCli)
+            {
+                if (cliRatio.Length > 0 && !CropRatios.IsCanonical(cliRatio))
+                {
+                    evidence.Line($"ENTER: crop refused (--crop-ratio '{cliRatio}' is not one of " +
+                                  $"{string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+                    return false;
+                }
+                CropSpec spec = fromCli with { RatioId = CropRatios.CanonicalId(cliRatio) };
+                evidence.Line($"ENTER: crop uses --crop-rect {spec.Describe()} (diagnostic seam: " +
+                              "no window, no mouse)");
+                guard.OnUserResolved("enter");      // 收起輪盤
+                if (runner == null)
+                {
+                    evidence.Line("ENTER: no conversion runner in this mode (diagnostic path)");
+                    return true;
+                }
+                StartCrop(evidence, runner, paths, spec, centerX, centerY,
+                          _settings ?? new Settings());
+                PendingPaths = Array.Empty<string>();
+                PendingTools = Array.Empty<ToolDescriptor>();
+                return true;
+            }
+            if (cliRect.Length > 0)
+            {
+                evidence.Line($"ENTER: crop refused (--crop-rect '{cliRect}' is unusable: {cliError})");
+                return false;
+            }
+
+            evidence.Line($"ENTER: crop needs a rectangle -> opening the crop window for " +
+                          $"{paths.Length} file(s) (the commit will happen when the user confirms)");
+            guard.OnUserResolved("enter");      // 收起輪盤
+            string[] batch = paths;
+            CropUi.Open(batch, spec =>
+            {
+                // ⚠ 這裡是 **WPF UI 執行緒**。起 worker 會碰視覺層與進度藥丸（都屬於主執行緒），
+                // 所以只排隊，由既有的週期回呼（見 DrainPendingCrops）在主執行緒上接手。
+                PendingCrops.Enqueue((batch, spec));
+                evidence.Line($"crop ui: the user confirmed {spec.Describe()} -> queued for the main " +
+                              "thread (the worker starts there)");
+            }, evidence.Line);
+            PendingPaths = Array.Empty<string>();
+            PendingTools = Array.Empty<ToolDescriptor>();
+            // **回 false**：這一刻還沒有任何東西被轉檔，說 true 會讓 `--wheel-payload` 那一條
+            // 診斷去等一個永遠不會開始的工作（然後回報一個看起來成功的 0）。
+            return false;
+        }
+
         guard.OnUserResolved("enter");      // 收起輪盤（收層是幂等的）
 
         if (runner == null)
@@ -1923,6 +2290,71 @@ internal static class App
         return true;
     }
 
+    /// <summary>
+    /// 起一個裁切工作（**必須在主執行緒**：它會碰視覺層與進度藥丸）。
+    /// <paramref name="spec"/> 是**正規化**矩形——視窗拖出來的與 `--crop-rect` 給的是同一種東西。
+    /// </summary>
+    private static bool StartCrop(Evidence evidence, ConversionRunner runner, string[] paths,
+                                  CropSpec spec, int centerX, int centerY, Settings settings)
+    {
+        if (paths.Length == 0)
+        {
+            evidence.Line("crop: no payload paths recorded -> nothing to crop");
+            return false;
+        }
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"crop: start {spec.Describe()} files={paths.Length} " +
+                      $"outputDir={outputDir ?? "(source folder)"}");
+        // targetFormat 給空字串、quality 固定 100：與另外三個工具同一條規矩（工具自己決定輸出格式，
+        // 裁切必須重新編碼，所以品質取最接近無損的那一個；理由見 ConversionEngine.Crop）。
+        runner.Start(paths, "", 100, centerX, centerY,
+                     toolOp: WorkerProtocol.OpCrop, outputDir: outputDir, crop: spec);
+        return true;
+    }
+
+    /// <summary>
+    /// 把「使用者在裁切視窗按下確認」的請求在主執行緒上接手（見 <see cref="PendingCrops"/>）。
+    /// 由**既有**的視覺層週期回呼呼叫，與設定頁日誌的抽乾同一條路（<see cref="DrainSettingsUiLog"/>）——
+    /// 不新增第二個計時器擁有者。
+    /// </summary>
+    private static void DrainPendingCrops(Evidence evidence, ConversionRunner? runner)
+    {
+        while (PendingCrops.TryDequeue(out (string[] Paths, CropSpec Spec) job))
+        {
+            if (runner == null)
+            {
+                evidence.Line("crop: confirmed, but this mode has no conversion runner (diagnostic path)");
+                continue;
+            }
+            // 進度藥丸畫在**游標所在處**：使用者剛按下的就是裁切視窗的確認鈕，結果出現在同一個
+            // 位置最不需要東張西望。取不到游標座標時退回主螢幕工作區的中心（絕不用 (0,0)——
+            // 那會讓藥丸黏在左上角，看起來像壞掉）。
+            (double anchorX, double anchorY) = CursorAnchor();
+            StartCrop(evidence, runner, job.Paths, job.Spec, (int)anchorX, (int)anchorY,
+                      _settings ?? new Settings());
+        }
+    }
+
+    /// <summary>進度藥丸的落點：游標位置，取不到就退回主螢幕工作區中心。**不注入任何輸入**（只讀）。</summary>
+    private static (double X, double Y) CursorAnchor()
+    {
+        try
+        {
+            if (Native.GetCursorPos(out Native.POINT point))
+                return (point.X, point.Y);
+        }
+        catch (Exception)
+        {
+            // 讀游標位置失敗不是錯誤，退回下面的預設值就好
+        }
+        // 主螢幕工作區的中心（**不是**整個虛擬桌面：多螢幕時那可能落在兩顆螢幕之間的縫上）。
+        double fallbackX = System.Windows.SystemParameters.WorkArea.Left
+                           + System.Windows.SystemParameters.WorkArea.Width / 2;
+        double fallbackY = System.Windows.SystemParameters.WorkArea.Top
+                           + System.Windows.SystemParameters.WorkArea.Height / 2;
+        return (fallbackX, fallbackY);
+    }
+
     /// <summary>最近一次拖曳／注入的檔案清單——Enter 要靠它才知道要轉哪些檔。</summary>
     private static string[] PendingPaths = Array.Empty<string>();
 
@@ -1947,6 +2379,22 @@ internal static class App
 
     /// <summary>啟動時載入的設定（規格 §8）；null 代表還沒載入。</summary>
     private static Settings? _settings;
+
+    /// <summary>
+    /// 這個行程的命令列選項（<see cref="RunCore"/> 一開始就寫）。只有常駐路徑會走到需要它的地方
+    /// ——目前是 <see cref="CommitWheel"/> 的裁切那一條（它要讀 <c>--crop-rect</c> 這個診斷接縫）。
+    /// 與 <see cref="_settings"/> 同一種作法：進程層級只有一份，不在每個呼叫點重新解析 argv。
+    /// </summary>
+    private static Options _options = new();
+
+    /// <summary>
+    /// 裁切視窗確認之後、等著由**主執行緒**起 worker 的工作（見 <see cref="CommitWheel"/>）。
+    ///
+    /// 為什麼要過這一手：確認鈕是在 **WPF UI 執行緒**上被按下的，而 <see cref="ConversionRunner"/> 會
+    /// 碰視覺層與進度藥丸——那些都是主執行緒的視窗。從別的執行緒去動它們只會隨機損壞。
+    /// 抽乾點是**既有**的視覺層週期回呼（<see cref="DrainPendingCrops"/>），不新增第二個計時器。
+    /// </summary>
+    private static readonly ConcurrentQueue<(string[] Paths, CropSpec Spec)> PendingCrops = new();
 
     /// <summary>
     /// 開機自動啟動的唯一擁有者（待辦 4）。常駐路徑建立它，診斷路徑建立的是**別的**子機碼
@@ -2237,6 +2685,272 @@ internal static class App
                       $"symptom2FatalDelivered={fatalDelivered} symptom2ThreadUsable={threadUsable} " +
                       $"symptom2Reopened={reopenedAfterFatal} symptom2WindowBack={windowBack})");
         return ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// M3：`--tools-list`——工具層的扇區清單（**唯一權威**是 <see cref="ToolCatalog"/>）。
+    ///
+    /// 它與 `--wheel-payload --wheel-tools` 不是兩種實作，而是**同一個清單的無視窗查詢**：
+    /// 兩者都呼叫 <c>ToolCatalog.ToolsFor</c>。存在的理由是可及性——這一條在單一實例守衛**之前**，
+    /// 所以「使用者自己開著 Confern」的時候也問得到；而「工具層有哪幾顆」正是這條產品線上最容易
+    /// 被改動、也最該被釘住的一件事（多一顆＝改協議、改輪盤、改介面、改這條清單）。
+    ///
+    /// 回傳碼：0 有清單、3 清單是空的（那代表這個組合下輪盤的工具層什麼都不會顯示）。
+    /// </summary>
+    internal static int RunToolsList(Options opt, Evidence evidence)
+    {
+        var verdict = new PayloadVerdict(PayloadStatus.Ready,
+                                        string.IsNullOrEmpty(opt.WheelSource) ? "png" : opt.WheelSource);
+        IReadOnlyList<ToolDescriptor> tools = new ToolCatalog().ToolsFor(verdict);
+        evidence.Line($"tool list: count={tools.Count} tools=[{string.Join(",", tools.Select(t => t.Id))}] " +
+                      $"(source={verdict.SourceFormat}, source of truth: ToolCatalog)");
+        for (int i = 0; i < tools.Count; i++)
+        {
+            ToolDescriptor t = tools[i];
+            evidence.Line($"tool list: {i} id={t.Id} label='{t.Label}' desc='{t.Description}' icon={t.Icon}");
+        }
+        if (tools.Count == 0)
+        {
+            evidence.Line("tool list: FAILED the tool layer would be empty (the wheel would show nothing)");
+            return 3;
+        }
+        evidence.Line("tool list done: ok=True");
+        return 0;
+    }
+
+    /// <summary>
+    /// M3：`--crop-ui-selftest` / `--crop-ui-dump &lt;png&gt;`——裁切視窗的生命週期與互動自測。
+    ///
+    /// 這一條是裁切功能**唯一**能在「不碰使用者滑鼠」的前提下被驗到的入口（2026-10-06 的規則：
+    /// 預設跑套件絕不注入合成輸入）。所以它必須把使用者真的會做的每一件事都走一遍，而且走的
+    /// **都是真物件**：真的視窗、真的按鈕（RaiseEvent 打 Click）、滑鼠事件呼叫的那三個拖曳方法。
+    ///
+    /// 依序驗（每一格的成敗都印出來，不只印總結）：
+    ///   ① 開得起來、而且**真的在螢幕上**（IsLoaded ＋ hwnd，不只是「有一個物件」）；
+    ///   ② 設定頁與裁切視窗**可以同時開著**（兩者共用同一條 WPF 執行緒與同一個 Application，
+    ///      這正是「一個 AppDomain 只准有一個 Application」那個坑的實測）；
+    ///   ③ 程式化拖曳（＝滑鼠會走的那三個方法）真的改變了矩形，而且逐格被記錄下來；
+    ///   ④ 每一個比例鈕都按得到、按下去之後矩形真的符合那個比例（**含容差**，見下面的數字）；
+    ///   ⑤ 退化輸入（空的矩形、整張圖）**當場被拒絕並顯示提示**，不會帶著壞矩形去寫檔；
+    ///   ⑥ 確認 → 帶回正規化矩形、視窗真的關掉；
+    ///   ⑦ 關掉之後**可以再開**（單一實例的反面）；
+    ///   ⑧ 取消 → 不帶回任何矩形；
+    ///   ⑨ `--crop-ui-dump`：離屏合成一張 PNG（不是螢幕擷取），而且視窗自己會拒絕交出空白圖。
+    ///
+    /// 回傳碼：0 全過、1 有任何一格沒過。
+    /// </summary>
+    internal static int RunCropUiSelfTest(Options opt, Evidence evidence)
+    {
+        var lines = new ConcurrentQueue<string>();
+        bool dumpOnly = !opt.CropUiSelfTest && !string.IsNullOrEmpty(opt.CropUiDump);
+
+        string? source = opt.CropUiSource;
+        if (string.IsNullOrEmpty(source) || !File.Exists(LongPath.Prepare(source)))
+        {
+            evidence.Line($"crop ui selftest: FAILED to open: no usable --crop-source " +
+                          $"(got '{source ?? "(none)"}'; it must be an existing image file)");
+            return 1;
+        }
+        string[] batch = { source };
+
+        // `--crop-ui-dump` 自己先開一次（只為了畫圖），不跑整條自測。
+        if (dumpOnly)
+        {
+            CropUi.Open(batch, _ => { }, lines.Enqueue);
+            bool up = WaitFor(() => CropUi.IsOpen, 8000);
+            if (!up)
+            {
+                while (lines.TryDequeue(out string? early)) evidence.Line(early);
+                evidence.Line("crop ui dump: FAILED to open the window");
+                return 1;
+            }
+            Thread.Sleep(500);      // 沒畫完就截會得到半張圖，所以先讓它畫完
+            if (!string.IsNullOrEmpty(opt.CropRect))
+            {
+                if (CropSpec.TryParse(opt.CropRect, out CropSpec dumpSpec, out string dumpParse))
+                {
+                    CropUi.SelfTestSetRect(dumpSpec.X, dumpSpec.Y, dumpSpec.Width, dumpSpec.Height,
+                                           5000, out string setDetail, lines.Enqueue);
+                    evidence.Line($"crop ui dump: {setDetail}");
+                }
+                else
+                {
+                    evidence.Line($"crop ui dump: --crop-rect was ignored ({dumpParse})");
+                }
+            }
+            bool dumped = CropUi.DumpFrame(opt.CropUiDump, 8000, out string dumpDetail, lines.Enqueue);
+            CropUi.Close();
+            WaitFor(() => !CropUi.IsOpen, 3000);
+            while (lines.TryDequeue(out string? line)) evidence.Line(line);
+            evidence.Line($"crop ui dump: ok={dumped} detail={dumpDetail} path={opt.CropUiDump}");
+            return dumped ? 0 : 1;
+        }
+
+        // ① 開得起來，而且真的在螢幕上
+        CropSpec? confirmed = null;
+        CropUi.Open(batch, spec => confirmed = spec, lines.Enqueue);
+        bool opened = WaitFor(() => CropUi.IsOpen, 8000);
+        bool windowPresent = false;
+        string presentDetail = "(never asked)";
+        for (int attempt = 0; attempt < 20 && !windowPresent; attempt++)
+        {
+            windowPresent = CropUi.SelfTestWindowPresent(3000, out presentDetail, lines.Enqueue);
+            if (!windowPresent) Thread.Sleep(250);
+        }
+        evidence.Line($"crop ui selftest: opened={opened} windowPresent={windowPresent} " +
+                      $"state={CropUi.SelfTestState()}");
+        evidence.Line($"crop ui selftest: window detail: {presentDetail}");
+        if (!opened || !windowPresent)
+        {
+            while (lines.TryDequeue(out string? early)) evidence.Line(early);
+            evidence.Line($"crop ui selftest done: ok=False (opened={opened} windowPresent={windowPresent})");
+            return 1;
+        }
+
+        // ② 已經開著時**拒絕**第二次開啟（單一實例）
+        CropUi.Open(batch, _ => confirmed = CropSpec.Free(0, 0, 0, 0), lines.Enqueue);
+        bool singleInstance = CropUi.IsOpen;
+        evidence.Line($"crop ui selftest: a second open while the window is up was " +
+                      $"{(singleInstance ? "ignored (single instance)" : "ACCEPTED (two windows!)")}");
+
+        // ②b 設定頁與裁切視窗共用同一條 WPF 執行緒：兩個視窗同時開著互不干擾。
+        string settingsPath = string.IsNullOrEmpty(opt.SettingsFile)
+            ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-crop-selftest.json")
+            : opt.SettingsFile;
+        Settings settings = SettingsStore.Load(File.Exists(settingsPath) ? settingsPath : null, lines.Enqueue);
+        SettingsUi.Open(settings, settingsPath, _ => { }, lines.Enqueue);
+        bool settingsOpen = WaitFor(() => SettingsUi.IsOpen, 8000);
+        Thread.Sleep(300);
+        bool cropStillThere = CropUi.SelfTestWindowPresent(3000, out string coexistDetail, lines.Enqueue);
+        evidence.Line($"crop ui selftest: the settings page and the crop window share one WPF thread: " +
+                      $"settingsOpen={settingsOpen} cropWindowStillPresent={cropStillThere} " +
+                      $"state={CropUi.SelfTestState()}");
+        SettingsUi.Close();
+        WaitFor(() => !SettingsUi.IsOpen, 3000);
+
+        // ③ 程式化拖曳（滑鼠事件呼叫的就是這三個方法）
+        bool dragged = CropUi.SelfTestDrag(200, 150, 520, 380, 5000, out string dragDetail, lines.Enqueue);
+        evidence.Line($"crop ui selftest: programmatic drag (the three mouse handlers) ok={dragged} " +
+                      $"{dragDetail}");
+
+        // ④ 每一個比例鈕都真的按得到，而且按下去之後矩形真的符合那個比例
+        var ratioResults = new List<string>();
+        bool ratiosOk = true;
+        foreach (CropRatioPreset preset in CropRatios.Presets)
+        {
+            CropUi.SelfTestSelectRatio(preset.Id, 5000, out string ratioDetail, lines.Enqueue);
+            // 先給它一個大的自由框，再按比例鈕：這樣「比例鈕真的改到了矩形」才看得出來
+            // （否則會出現「框本來就剛好是 1:1，所以按不按都對」那種假綠燈）。
+            CropUi.SelfTestSetRect(0.05, 0.05, 0.90, 0.90, 5000, out _, lines.Enqueue);
+            CropUi.SelfTestSelectRatio(preset.Id, 5000, out ratioDetail, lines.Enqueue);
+            string state = CropUi.SelfTestState();
+            ratioResults.Add($"{preset.Id}: {state}");
+            evidence.Line($"crop ui selftest: ratio '{preset.Id}' -> {state}");
+            // 「自由」不該改動矩形；其餘的比例必須讓矩形的比例接近目標值。
+            // 容差 1 %：換算的最後一步是取整（見 CropMath 的邊界取整），最多差半個像素。
+            if (preset.Id != CropRatios.DefaultId && !state.Contains("ratio-ok=True", StringComparison.Ordinal))
+                ratiosOk = false;
+        }
+
+        // ⑤ 退化輸入之一：整張圖 → **當場拒絕**並顯示提示（不可以帶著它去寫檔）。
+        // 這一格的關鍵是「拒絕之後視窗還開著、而且沒有東西被交回去」——只看「有沒有印出拒絕」
+        // 會被一個已經自己關掉的視窗騙過去。
+        bool fullSet = CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out string fullDetail, lines.Enqueue);
+        string fullState = CropUi.SelfTestState();
+        CropUi.SelfTestConfirm(5000, out string fullConfirm, lines.Enqueue);
+        bool openAfterFull = CropUi.IsOpen;
+        bool fullRefused = (confirmed == null) && openAfterFull && fullState.Contains("rect=0,0,512,384");
+        evidence.Line($"crop ui selftest: full-frame rectangle -> set={fullSet} refused={fullRefused} " +
+                      $"stillOpen={openAfterFull} ({fullDetail}) ({fullConfirm})");
+        evidence.Line($"crop ui selftest: full-frame state: {fullState}");
+
+        // ⑤b 退化輸入之二：比一個像素還細 → **夾成 1 px**（不是拒絕，也不是 0）。
+        bool tinySet = CropUi.SelfTestSetRect(0.5, 0.5, 0.0001, 0.0001, 5000, out string tinyDetail, lines.Enqueue);
+        string tinyState = CropUi.SelfTestState();
+        bool tinyClamped = tinySet && CropUi.IsOpen && tinyState.Contains("rect=") &&
+                           (tinyState.Contains("1,1 ") || tinyState.Contains(",1,1 ") ||
+                            tinyState.Contains("width=1 height=1"));
+        evidence.Line($"crop ui selftest: sub-pixel rectangle -> set={tinySet} clampedTo1px={tinyClamped} " +
+                      $"{tinyDetail} state={tinyState}");
+
+        // ⑥ 確認 → 帶回**剛剛畫的那個**正規化矩形、視窗真的關掉。
+        // 先切回「自由」：否則目前的比例預設會在換算時再把矩形修一次，這一格就變成在斷言
+        // 「比例預設的數學」而不是「確認帶回了什麼」。
+        CropUi.SelfTestSelectRatio(CropRatios.DefaultId, 5000, out _, lines.Enqueue);
+        bool finalSet = CropUi.SelfTestSetRect(0.125, 0.125, 0.75, 0.75, 5000, out string finalDetail, lines.Enqueue);
+        evidence.Line($"crop ui selftest: final rectangle set={finalSet} {finalDetail}");
+        CropUi.SelfTestConfirm(5000, out string confirmDetail, lines.Enqueue);
+        bool closed = WaitFor(() => !CropUi.IsOpen, 3000);
+        // ⚠ 視窗關閉與「回呼交回矩形」是兩件事，而它們的順序**不是**保證的：Closed 事件先到，
+        // 交回矩形的那一行才跑。所以這裡等的是**矩形本身**，不是「視窗關了」——
+        // 否則這一格會用 0 ms 的視窗去讀一個還沒被填的值，變成一個看時序綠紅的假斷言。
+        WaitFor(() => confirmed != null, 3000);
+        CropSpec? handedOver = confirmed;
+        string confirmedText = handedOver is { } handed ? handed.Describe() : "(nothing)";
+        // 交回來的必須就是畫的那個矩形（0.125/0.75 在 512x384 上是整數邊界，所以可以要求精確）。
+        bool handedOverMatches = handedOver is { } h2 &&
+                                 Math.Abs(h2.X - 0.125) < 0.002 && Math.Abs(h2.Y - 0.125) < 0.002 &&
+                                 Math.Abs(h2.Width - 0.75) < 0.002 && Math.Abs(h2.Height - 0.75) < 0.002;
+        evidence.Line($"crop ui selftest: confirmed={confirmedText} matchesWhatWasDrawn={handedOverMatches} " +
+                      $"closed={closed} ({confirmDetail})");
+
+        // ⑦ 關掉之後可以再開
+        confirmed = null;
+        CropUi.Open(batch, spec => confirmed = spec, lines.Enqueue);
+        bool reopened = WaitFor(() => CropUi.IsOpen, 8000);
+        bool reopenedPresent = false;
+        string reopenDetail = "(never asked)";
+        for (int attempt = 0; attempt < 20 && !reopenedPresent; attempt++)
+        {
+            reopenedPresent = CropUi.SelfTestWindowPresent(3000, out reopenDetail, lines.Enqueue);
+            if (!reopenedPresent) Thread.Sleep(250);
+        }
+        evidence.Line($"crop ui selftest: the window can be opened again after a close: " +
+                      $"reopened={reopened} windowPresent={reopenedPresent} state={CropUi.SelfTestState()}");
+
+        // ⑧ 取消 → 不帶回任何矩形
+        CropUi.SelfTestSetRect(0.2, 0.2, 0.5, 0.5, 5000, out _, lines.Enqueue);
+        CropUi.SelfTestCancel(5000, out string cancelDetail, lines.Enqueue);
+        bool closedByCancel = WaitFor(() => !CropUi.IsOpen, 3000);
+        bool cancelGaveNothing = confirmed == null;
+        evidence.Line($"crop ui selftest: cancel -> closed={closedByCancel} resultHandedBack={!cancelGaveNothing} " +
+                      $"({cancelDetail})");
+
+        while (lines.TryDequeue(out string? buffered)) evidence.Line(buffered);
+
+        bool ok = opened && windowPresent && singleInstance && settingsOpen && cropStillThere
+                  && dragged && ratiosOk && fullSet && fullRefused && tinyClamped
+                  && finalSet && closed && handedOverMatches
+                  && closedByCancel && cancelGaveNothing
+                  && reopened && reopenedPresent;
+        evidence.Line($"crop ui selftest done: ok={ok} (opened={opened} windowPresent={windowPresent} " +
+                      $"singleInstance={singleInstance} settingsPageCoexists={settingsOpen && cropStillThere} " +
+                      $"programmaticDrag={dragged} ratioPresetsOk={ratiosOk} " +
+                      $"fullFrameRefused={fullRefused} subPixelClamped={tinyClamped} " +
+                      $"confirmedClosed={closed} confirmedMatches={handedOverMatches} " +
+                      $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing} " +
+                      $"reopened={reopened} reopenedPresent={reopenedPresent})");
+        evidence.Line("crop ui selftest: ratio states: " + string.Join(" ; ", ratioResults));
+        return ok ? 0 : 1;
+    }
+
+    /// <summary>有界等待（自測用）。回傳「時間內變成 true」。</summary>
+    private static bool WaitFor(Func<bool> condition, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            try
+            {
+                if (condition()) return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            Thread.Sleep(25);
+        }
+        try { return condition(); } catch (Exception) { return false; }
     }
 
     /// <summary>

@@ -32,7 +32,7 @@
 #     claim is not asserted here because it is a property of this machine's codecs.
 #   - WebP cannot be ENCODED on this machine at all, so compress on a WebP source fails
 #     early with TargetUnavailable instead of reaching the search. Not asserted.
-#   - the wheel sector's LOOK is asserted structurally (three sectors, the right ids, a
+#   - the wheel sector's LOOK is asserted structurally (four sectors, the right ids, a
 #     frame that renders), not visually: this file never compares against a stored image.
 #   - the cross-BUILD comparison (old exe vs new exe, same old settings file) was done by
 #     hand before this suite existed; a runner is only given one exe, so what is asserted
@@ -489,8 +489,8 @@ function Invoke-S17 {
   # The worker's output must be byte-for-byte what the in-process engine produced for the
   # same source and the same level: that is what makes "the same engine" a measurement.
   $wLen = Get-FileLength (Join-Path $wOut 'photo.jpg')
-  Check 'S17.20 the wheel tool layer has three sectors, the compress op really travels to the worker process, and it returns the same bytes' `
-    (($w.Exit -eq 0) -and (Test-Log $w.Lines 'tools=\[rotate90,strip-metadata,compress\]') -and
+  Check 'S17.20 the wheel tool layer has four sectors, the compress op really travels to the worker process, and it returns the same bytes' `
+    (($w.Exit -eq 0) -and (Test-Log $w.Lines 'tools=\[rotate90,strip-metadata,compress,crop\]') -and
      ($jobLine -match 'op=compress') -and ($finLine -match 'finished=True ok=1') -and
      ($wLen -gt 0) -and ($wLen -eq $small.OutLen)) `
     "job='$jobLine' finished='$finLine' workerOut=${wLen}B inProcess=$($small.OutLen)B"

@@ -105,7 +105,8 @@ internal sealed class ConversionClient : IDisposable
     /// 這裡只搬運，不在 UI 端先算品質：真正要知道「每個檔是什麼格式」的是 worker。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
-                      string? toolOp, out string? error, CompressionPolicy? compression = null)
+                      string? toolOp, out string? error, CompressionPolicy? compression = null,
+                      CropSpec? crop = null)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -183,11 +184,21 @@ internal sealed class ConversionClient : IDisposable
             compressMode = compression?.Mode,
             compressTargetBytes = compression?.TargetBytes ?? 0,
             standardJpgQuality = compression?.StandardJpgQuality ?? 0,
-            standardWebpQuality = compression?.StandardWebpQuality ?? 0
+            standardWebpQuality = compression?.StandardWebpQuality ?? 0,
+            // 裁切矩形（只有 op=crop 會填）。五個欄位一起送／一起不送，理由與壓縮那一組相同：
+            // 半套的矩形（有 x、沒有 w）在 worker 端是**說不出來的請求**，寧可整個缺席讓它
+            // 具名拒絕（RejectCropWithoutRect），也不要送一個殘缺的座標過去。
+            // ⚠ 用 double?：值型別的 0 會被序列化進每一個封包，而 x=0 是完全合法的左緣。
+            cropX = crop?.X,
+            cropY = crop?.Y,
+            cropW = crop?.Width,
+            cropH = crop?.Height,
+            cropRatio = crop?.RatioId
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
+        // 裁切矩形也只在行尾、而且只有 op=crop 時才出現（既有那一行的其餘部分逐字元不變）。
         _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, " +
-             $"quality={quality}, op={op})");
+             $"quality={quality}, op={op})" + (crop != null ? $" crop={crop.Describe()}" : ""));
 
         _snapshot = new ConversionSnapshot(0, sourcePaths.Length, null, false, 0, 0,
                                            Array.Empty<string>(), null);

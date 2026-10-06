@@ -5,9 +5,10 @@ namespace Sidecar;
 /// <see cref="ToolDescriptor"/> ＋ 對應的執行實作，輪盤與命中測試不必改一行
 /// （<see cref="WheelGeometry"/> 早就對扇區數泛化：<c>SweepDeg(count)</c>／<c>SectorAt(…, count)</c>）。
 ///
-/// 目前有三個工具（2026-10-06），三個都是**已經能執行**才放上來的：`ROTATE`（順時針 90°）、
-/// `CLEAN`（去 metadata）與 `COMPRESS`（壓縮，等級由設定頁決定）。
-/// M3 的其餘四項（裁切、讀 QR、合併 PDF、去背）各自需要新互動或新相依，
+/// 目前有四個工具（2026-10-06），四個都是**已經能執行**才放上來的：`ROTATE`（順時針 90°）、
+/// `CLEAN`（去 metadata）、`COMPRESS`（壓縮，等級由設定頁決定）與 `CROP`（裁切，矩形由
+/// 獨立的裁切視窗決定）。
+/// M3 的其餘三項（讀 QR、合併 PDF、去背）各自需要新互動或新相依，
 /// 見 `docs/aegis/plans/2026-10-05-m3-tools-wheel.md` §1 的相依盤點。
 /// </summary>
 internal sealed class ToolCatalog : IToolCatalog
@@ -83,10 +84,34 @@ internal sealed class ToolCatalog : IToolCatalog
         Icon: ToolIcon.Compress);
 
     /// <summary>
+    /// M3 的第四個工具：**裁切**（`crop`）。輸出格式＝來源格式，只把使用者框出來的
+    /// **正規化矩形**套上去（比例預設由裁切視窗決定，見 <see cref="CropRatios"/>）。
+    ///
+    /// ⚠ **裁切的互動不在輪盤上**（使用者 2026-10-06 拍板）：輪盤只負責「選到這一顆、按下 Enter」，
+    /// 按下之後開**獨立的裁切視窗**（<c>CropUi</c>）讓使用者拖一個矩形。所以這一顆扇形與前三顆
+    /// 有一個結構上的不同：**它的提交不是「立刻起 worker」而是「開一個視窗」**，
+    /// 那條分岔寫在 <c>App.CommitWheel</c>，而不是偷偷塞進 runner。
+    ///
+    /// 為什麼要有第二層的「批次＝同一比例」而不是「同一組像素」：使用者框的是比例，
+    /// 拖進多張圖時每一張依自己的尺寸各自換算（例如都裁成中央 1:1，不管原圖多大）。
+    /// 換算的唯一實作是 <see cref="CropMath"/>，這裡只提供工具的身分。
+    ///
+    /// 文字長度預算（圓心鏤空直徑 94px）：`裁切` 是**兩個漢字**，比既有的 `去中繼資料`（5 個）
+    /// 與 `依設定壓縮`（5 個）都短，膠囊只會更窄。扇區標籤 `CROP` 是 4 個大寫字母，
+    /// 比 `COMPRESS`（8 個）短——4 扇區的字級是 11.3px、文字框寬 80px。
+    /// </summary>
+    private static readonly ToolDescriptor Crop = new(
+        Id: "crop",
+        Label: "CROP",
+        Description: "裁切",
+        Icon: ToolIcon.Crop);
+
+    /// <summary>
     /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
     /// 輪盤與命中測試不必改一行。
     /// </summary>
-    public IReadOnlyList<ToolDescriptor> Tools { get; } = new[] { Rotate90, StripMetadata, Compress };
+    public IReadOnlyList<ToolDescriptor> Tools { get; } =
+        new[] { Rotate90, StripMetadata, Compress, Crop };
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {

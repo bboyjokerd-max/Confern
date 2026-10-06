@@ -618,6 +618,31 @@ internal sealed class WheelPresenter
                 g.DrawLine(pen, cx + wing, cy + wing, cx, cy + tip);
                 g.DrawLine(pen, cx, cy + wing, cx, cy + s * 0.48f);
                 break;
+
+            case ToolIcon.Crop:
+                // 斜的裁切框 ＋ 兩條對角線（「這是一塊選取範圍」）。全部由 s 推導（與其他三顆同一個規矩）。
+                //
+                // 為什麼是斜的：正的矩形與 `Compress` 的上下對稱直線在 17px 下會撞形；
+                // 傾斜約 20° 之後，四條邊的方向與另外三顆都不同，一眼可分。
+                // 兩條對角線是「框內被選中」在線稿裡的通用寫法；實測在 17px、筆寬 1.9px 之下，
+                // 對角線與框邊仍留得住約 3px 的空隙（框半寬 0.40s ≈ 6.8px、對角線由角往內縮 0.16s），
+                // 不會糊成一團。
+                float halfW = s * 0.40f, halfH = s * 0.30f, skew = s * 0.17f;
+                var c1 = new PointF(cx - halfW + skew, cy - halfH);
+                var c2 = new PointF(cx + halfW + skew, cy - halfH);
+                var c3 = new PointF(cx + halfW - skew, cy + halfH);
+                var c4 = new PointF(cx - halfW - skew, cy + halfH);
+                g.DrawLine(pen, c1, c2);
+                g.DrawLine(pen, c2, c3);
+                g.DrawLine(pen, c3, c4);
+                g.DrawLine(pen, c4, c1);
+                // 兩條對角線：由角往框內縮 0.16s，免得四個端點在轉角上疊成一團墨。
+                float inset = s * 0.16f;
+                g.DrawLine(pen, cx - halfW + skew + inset, cy - halfH + inset,
+                                cx + halfW - skew - inset, cy + halfH - inset);
+                g.DrawLine(pen, cx + halfW + skew - inset, cy - halfH + inset,
+                                cx - halfW - skew + inset, cy + halfH - inset);
+                break;
         }
     }
 

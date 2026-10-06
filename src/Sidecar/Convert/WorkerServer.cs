@@ -41,11 +41,18 @@ internal static class WorkerProtocol
     /// 換句話說：**未知 op 已經有明確的失敗路徑，版本閘門在這裡是多的**，
     /// 而多升一次版本會讓「舊 exe 配新 exe」的升級情境無謂地多斷一次線。
     ///
+    /// <summary>
     /// **2026-10-06 新增 `op=compress`（第三顆扇形）——同樣不升，理由逐條相同。**
     /// 另外檢查過它帶來的新欄位（<c>compressMode</c>／<c>compressTargetBytes</c>／
     /// <c>standardJpgQuality</c>／<c>standardWebpQuality</c>）：一個舊 worker **根本走不到**
     /// 讀它們的那一行，因為 `op=compress` 會在它身上變成 <see cref="WorkerServer.RejectUnknownOp"/>。
     /// 「欄位被忽略」這種靜默錯誤需要「op 被接受但欄位被丟掉」這個前提，而那個前提不成立。
+    ///
+    /// **2026-10-06 新增 `op=crop`（第四顆扇形）——同樣不升，理由逐條相同。**
+    /// 它帶來五個新欄位（<c>cropX</c>／<c>cropY</c>／<c>cropW</c>／<c>cropH</c>／<c>cropRatio</c>），
+    /// 五個都是 <c>null</c> 且 <c>WhenWritingNull</c>，所以**既有 op 的封包逐位元不變**；
+    /// 而舊 worker 收到 `op=crop` 一樣走到 <see cref="WorkerServer.RejectUnknownOp"/>，
+    /// 到不了讀那五個欄位的那一行。
     /// </summary>
     public const int Version = 3;
 
@@ -75,6 +82,16 @@ internal static class WorkerProtocol
     /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由寫在 <see cref="Version"/> 的註解裡。
     /// </summary>
     public const string OpCompress = "compress";
+
+    /// <summary>
+    /// 工具 `crop`（裁切，M3 第四顆扇形）。輸出格式＝來源格式，矩形是一個**正規化**的
+    /// 0..1 矩形（<see cref="WorkerMessage.cropX"/>…）＋一個比例預設（<see cref="WorkerMessage.cropRatio"/>），
+    /// 每一張圖各自換算，見 <see cref="ConversionEngine.Crop"/> 與 <see cref="CropMath"/>。
+    ///
+    /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由與前兩顆逐條相同：舊 worker 走
+    /// <see cref="WorkerServer.RejectUnknownOp"/>，而且它**根本走不到**讀那五個新欄位的那一行。
+    /// </summary>
+    public const string OpCrop = "crop";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -176,6 +193,30 @@ internal sealed class WorkerMessage
     /// </summary>
     public int? standardJpgQuality { get; set; }
     public int? standardWebpQuality { get; set; }
+
+    /// <summary>
+    /// 裁切矩形（**正規化 0..1**，2026-10-06 M3 第四顆扇形，<see cref="WorkerProtocol.OpCrop"/> 專用）。
+    ///
+    /// 為什麼是正規化而不是像素：使用者 2026-10-06 拍板「批次＝同一比例套用到每一張」。
+    /// 像素座標只能在一個尺寸上有意義，送像素等於把「用第一張的尺寸套到每一張」寫進協議。
+    /// 每一個檔各自乘上自己的尺寸（<see cref="CropMath.TryToPixels"/>）。
+    ///
+    /// ⚠ 五個欄位**一起出現、一起不出現**（與壓縮那一組同一個規矩）：null 一律不進訊息
+    /// （<c>WhenWritingNull</c>），所以既有的 job 封包逐位元不變。其中四個是 <c>double?</c>
+    /// 而不是 <c>double</c>：值型別的 0 會被序列化進**每一個**封包（<c>x=0</c> 是完全合法的矩形左緣），
+    /// 那會讓既有的封包多出四個欄位——而「既有封包逐位元不變」是這一顆扇形唯一的相容性契約。
+    /// </summary>
+    public double? cropX { get; set; }
+    public double? cropY { get; set; }
+    public double? cropW { get; set; }
+    public double? cropH { get; set; }
+
+    /// <summary>
+    /// 比例預設 id（2026-10-06，<see cref="WorkerProtocol.OpCrop"/> 專用）。正規值見
+    /// <see cref="CropRatios"/>；**null／空／認不得＝<see cref="CropRatios.IdFree"/>（自由）**，
+    /// 那是「這個欄位還不存在的年代」的封包該有的意思，也正是**不做比例修飾**的那條路。
+    /// </summary>
+    public string? cropRatio { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -294,9 +335,17 @@ internal static class WorkerServer
         string op = string.IsNullOrEmpty(job.op) ? WorkerProtocol.OpConvert : job.op!;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
+        // 裁切的矩形/比例先解析一次：它同時要進 job 那一行日誌與每一張圖的分派。
+        // 解析兩次會讓「認不得的比例 id」那句警告被寫兩次（而其中一次還是被丟掉的），
+        // 也會讓「送出去的是什麼」與「用的是什麼」有機會不一致。
+        CropSpec? cropSpec = op == WorkerProtocol.OpCrop ? CropOf(job, evidence.Line) : null;
+
         // ⚠ op= 只**附加在行尾**：既有套件比對的是 `worker job N: files=... target=...`，
         // 插在中間會直接弄紅它們（與 wheel shown 那行同一條規矩）。
-        evidence.Line($"worker job {job.jobId}: files={paths.Length} target={target} quality={quality} op={op}");
+        // 裁切的矩形同樣只追加在**尾巴**：它是這一顆扇形唯一跨管道的事實，不放進日誌就只剩
+        // 「UI 說它送出去了」可以相信。
+        evidence.Line($"worker job {job.jobId}: files={paths.Length} target={target} quality={quality} op={op}" +
+                      (op == WorkerProtocol.OpCrop ? $" crop={cropSpec?.Describe() ?? "(none)"}" : ""));
         link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Progress, jobId = job.jobId, done = 0, total = paths.Length,
@@ -331,6 +380,11 @@ internal static class WorkerServer
                 WorkerProtocol.OpStripMetadata => engine.StripMetadata(paths[i], journal, job.outputDir),
                 WorkerProtocol.OpCompress => engine.Compress(paths[i], PolicyOf(job, evidence.Line), journal,
                                                              job.outputDir),
+                WorkerProtocol.OpCrop => cropSpec is { } spec
+                    ? engine.Crop(paths[i], spec, journal, job.outputDir)
+                    // 矩形整個缺席：那是同版本的 UI 送出了不該送的東西＝bug。**不猜**、也不默默
+                    // 用一個全圖矩形去裁（那會變成 CropNothingToDo 的拒絕，訊息還會誤導人）。
+                    : RejectCropWithoutRect(paths[i]),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
@@ -397,6 +451,53 @@ internal static class WorkerServer
     }
 
     /// <summary>
+    /// 封包上的裁切欄位 → <see cref="CropSpec"/>（<c>op=crop</c> 的唯一輸入）；整個矩形缺席時回 null。
+    ///
+    /// ⚠ 這裡**不是第二個政策擁有者**：合法值的清單來自 <see cref="CropRatios"/>，
+    /// 「什麼是合法的矩形」由 <see cref="CropMath"/> 把關。worker 只做一件防禦性的收斂：
+    /// 認不得的比例 id 一律回自由裁切並**大聲記 log**——到得了這裡代表同版本的 UI 送出了
+    /// 不該送的東西，那是 bug，不該靜默（與 <see cref="PolicyOf"/> 同一條規矩）。
+    /// </summary>
+    private static CropSpec? CropOf(WorkerMessage job, Action<string> log)
+    {
+        if (job.cropX is not { } x || job.cropY is not { } y
+            || job.cropW is not { } w || job.cropH is not { } h)
+        {
+            return null;
+        }
+
+        string given = job.cropRatio ?? "";
+        if (given.Length > 0 && !CropRatios.IsCanonical(given))
+        {
+            log($"crop: unknown cropRatio '{given}' -> '{CropRatios.DefaultId}' " +
+                $"(this worker speaks {string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+        }
+
+        // 逐值防護：NaN／Infinity 會在 CropMath 的夾制裡變成 0（夾制本身就是那份規則），
+        // 但先在這裡說出來——「收到一個非數字的欄位」是另一件事，不該混進夾制的日誌裡。
+        foreach ((string name, double value) in
+                 new[] { ("cropX", x), ("cropY", y), ("cropW", w), ("cropH", h) })
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                log($"crop: {name}={value} is not a finite number -> treated as 0 by the clamp " +
+                    "(a same-version UI should never send this)");
+        }
+
+        return new CropSpec(x, y, w, h, CropRatios.CanonicalId(given));
+    }
+
+    /// <summary>
+    /// `op=crop` 但封包上沒有矩形：**具名失敗**，不猜、也不默默裁一張全圖。
+    /// 訊息沿用規格 §7.1 既有的「無法讀取來源檔案」那一類嗎？不——那不是原因。
+    /// 這裡用 <see cref="ConversionError.Unknown"/>（「轉檔失敗」）配上真正的細節在 detail，
+    /// 因為對使用者而言這確實是「不該發生的失敗」，而維修的人看得到 detail。
+    /// </summary>
+    private static ConversionResult RejectCropWithoutRect(string sourcePath) =>
+        new(sourcePath, null, ConversionError.Unknown,
+            $"op=crop without cropX/cropY/cropW/cropH (this worker speaks {CropRatios.DefaultId} " +
+            "only when all four are present; nothing is guessed here)");
+
+    /// <summary>
     /// 未知的 op：回一個**失敗的結果**（不丟例外，讓既有的失敗回報路徑接手），
     /// 使用者訊息走 <see cref="ConversionError.Unknown"/> 的規格字串（UI 不必為它多寫一條路徑），
     /// 真正的細節放在 detail 給日誌——那才是維修的人看得到的地方。
@@ -409,7 +510,7 @@ internal static class WorkerServer
         new(sourcePath, null, ConversionError.Unknown,
             $"unknown op '{op}' (this worker speaks " +
             $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata}/" +
-            $"{WorkerProtocol.OpCompress})");
+            $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop})");
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

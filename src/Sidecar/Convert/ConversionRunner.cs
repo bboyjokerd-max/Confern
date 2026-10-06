@@ -33,7 +33,7 @@ internal sealed class ConversionRunner : IDisposable
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y,
                       string? toolOp = null, string? outputDir = null,
-                      CompressionPolicy? compression = null)
+                      CompressionPolicy? compression = null, CropSpec? crop = null)
     {
         _progress.Start(x, y);
 
@@ -52,7 +52,7 @@ internal sealed class ConversionRunner : IDisposable
             // 不靠位置（見 ConversionClient.Start 的說明）。
             if (!_client.Start(sourcePaths, targetFormat, quality,
                                outputDir: outputDir, toolOp: toolOp, out string? error,
-                               compression: compression))
+                               compression: compression, crop: crop))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
                 ReportStartFailure(sourcePaths.Length);
