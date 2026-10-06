@@ -328,6 +328,29 @@ internal static class CropUi
         return ran;
     }
 
+    /// <summary>
+    /// 這張視窗正在顯示的**影像像素尺寸**（自測的斷言對象）；沒有視窗時 (0,0)。
+    ///
+    /// 為什麼需要這一條：自測要斷言「全圖的像素矩形就是 <c>0,0,W,H</c>」，而 W／H 必須是
+    /// **這張圖自己的尺寸**。期望值若寫死一組數字（原本是 512x384＝當時唯一的夾具），
+    /// 整條自測就只在那一個夾具上成立：換一張 3000x2250 的圖，矩形的像素值正確地變成
+    /// <c>0,0,3000,2250</c>、確認鈕也正確地拒絕了全圖，那一格卻仍然紅——紅在一件做對了的產品上。
+    /// 尺寸只有一個來源：<see cref="CropWindow.ImageWidth"/>／<see cref="CropWindow.ImageHeight"/>。
+    /// </summary>
+    public static (int Width, int Height) SelfTestImageSizePx()
+    {
+        int width = 0, height = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest image size", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            width = window.ImageWidth;
+            height = window.ImageHeight;
+            return null;
+        });
+        return (width, height);
+    }
+
     /// <summary>一句話的狀態（含 hwnd 與矩形的像素值／正規化值）。</summary>
     public static string SelfTestState()
     {

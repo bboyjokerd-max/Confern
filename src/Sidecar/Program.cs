@@ -2898,7 +2898,15 @@ internal static class App
         string fullState = CropUi.SelfTestState();
         CropUi.SelfTestConfirm(5000, out string fullConfirm, lines.Enqueue);
         bool openAfterFull = CropUi.IsOpen;
-        bool fullRefused = (confirmed == null) && openAfterFull && fullState.Contains("rect=0,0,512,384");
+        // ⚠ 期望值必須是**這張圖自己的尺寸**，不是一組寫死的數字。這裡原本是
+        // `fullState.Contains("rect=0,0,512,384")`——512x384 是當時唯一的夾具，於是整條自測
+        // 只在那一個尺寸上成立：換一張 3000x2250 的大圖，矩形的像素值正確地是 0,0,3000,2250、
+        // 確認鈕也正確地拒絕了全圖（confirmed 仍是 null、視窗還開著），這一格卻仍然紅。
+        // 尺寸的來源只能是視窗自己（CropUi.SelfTestImageSizePx），不是夾具。
+        (int fullImageW, int fullImageH) = CropUi.SelfTestImageSizePx();
+        bool fullRefused = (confirmed == null) && openAfterFull &&
+                           fullImageW > 0 && fullImageH > 0 &&
+                           fullState.Contains($"rect=0,0,{fullImageW},{fullImageH}");
         evidence.Line($"crop ui selftest: full-frame rectangle -> set={fullSet} refused={fullRefused} " +
                       $"stillOpen={openAfterFull} ({fullDetail}) ({fullConfirm})");
         evidence.Line($"crop ui selftest: full-frame state: {fullState}");

@@ -27,16 +27,31 @@
 #      machine).
 #   7. FAULT INJECTION (-FaultInjection): the same checks with a deliberately wrong expected
 #      value, so a green run can be trusted to mean something. See the docstring of that switch.
+#   8. BIG IMAGES ARE PART OF THE SUITE (S18.18-S18.20). Every other fixture here is small, and a
+#      512x384 fixture cannot answer "does it work on MY photo": while this file reported 19/19
+#      green, the crop WINDOW selftest was red on any image bigger than its fixture, because that
+#      assertion had the fixture's pixel size written into it (512x384). The user's own pictures
+#      are 3000x2250 and up, so 3000x2250 is now checked end to end - size, region and the
+#      full-frame refusal, both through the engine and through the window.
+#   9. A ROTATED SOURCE (S18.21-S18.22). Orientation 6 (a phone held sideways) + crop: the
+#      rectangle must be taken on the UPRIGHT picture, and the tag must be neutralised afterwards
+#      or a viewer would rotate the result a second time.
 #
 # NOT covered here (stated so a green run is not read as more than it is):
 #   - the drag HAND FEEL is not verifiable by any script. What is verified is that the three
 #     methods the mouse handlers call produce the rectangle the state line reports. Cursor
 #     shape, grabbing a 1px handle with a real mouse, and "does it feel right" are human calls.
+#   - the window's screen->pixel mapping is exact only where round(W*scale) lands back on W*scale
+#     (the stage is a fixed 860x520 canvas and the drawn size is rounded to whole pixels, while
+#     the conversion divides by the unrounded scale). The residual is bounded by 0.5 display px,
+#     i.e. ~1.5 image px on the 3000x2250 fixture and 0 px on a 3000x4000 one. No check here pins
+#     that residual, and it is NOT what made the big case red.
 #   - the crop window's LOOK is asserted structurally (a rendered frame that is not blank, no
 #     scrollbar with a non-zero extent), never against a stored reference image.
 #   - JPEG output is lossy: a JPEG source is re-encoded at quality 100, so the PIXEL comparison
 #     below only runs on a PNG source (where the round trip is lossless and an exact match is
-#     a meaningful assertion).
+#     a meaningful assertion). The rotated-source checks therefore assert the nearest of four
+#     quadrant colours, not an exact RGB value.
 #   - --wheel-payload --wheel-tools --wheel-tool crop (the wheel's own commit path) is NOT run
 #     here: it needs the resident path, and therefore the single-instance guard. --tools-list
 #     covers the same catalog query without it.
@@ -53,6 +68,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
+# PresentationCore / WindowsBase are here for the EXIF fixture and for reading the orientation tag
+# back out of a cropped JPEG (BitmapFrame + BitmapMetadata). Same recipe as
+# verify-orientation-matrix.ps1, which is what proves orientations 1-8 actually reach the pixels.
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
 if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
 
 $Work = Join-Path $LogDir 'm3d'
@@ -146,6 +166,124 @@ function Get-DistinctColours([string]$path) {
   $n = $seen.Count
   $bmp.Dispose()
   return $n
+}
+
+# A BIG fixture made by ONE native fill. LinearGradientBrush paints a 3000x2250 area in C++ code,
+# so a big fixture costs the same as a small one. The per-pixel SetPixel loop of New-FixturePng
+# would take about 20 s at that size, and a suite that gets slow stops being run.
+# The fill runs at 45 degrees, so the colour depends on (x + y): a crop that took the wrong offset
+# - in EITHER axis - lands on a different colour. The source is read back with the same reader as
+# the output, so the exact ramp never has to be predicted here.
+function New-BigGradientPng([string]$path, [int]$w, [int]$h) {
+  $bmp = New-Object System.Drawing.Bitmap($w, $h)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $rect = New-Object System.Drawing.Rectangle -ArgumentList @(0, 0, $w, $h)
+  $dark = [System.Drawing.Color]::FromArgb(255, 0, 0, 0)
+  $light = [System.Drawing.Color]::FromArgb(255, 255, 255, 255)
+  $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush `
+             -ArgumentList @($rect, $dark, $light, [single]45.0)
+  $g.FillRectangle($brush, 0, 0, $w, $h)
+  $brush.Dispose(); $g.Dispose()
+  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $bmp.Dispose()
+}
+
+# Four flat quadrants: A=red B=green C=blue D=yellow, the vocabulary verify-orientation-matrix.ps1
+# already uses. Cheap (four fills) and unambiguous: with the source and the expected region known,
+# "a region of the right SIZE" and "the RIGHT region" stop looking alike.
+# The EXIF recipe is the one that script proved for orientations 1-8: encode with WPF, then write
+# tag 274 back with BitmapMetadata. No per-pixel loop, so it works at any size.
+function New-QuadrantJpeg([string]$path, [int]$w, [int]$h, [int]$orientation) {
+  $bmp = New-Object System.Drawing.Bitmap($w, $h)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $hw = [int]($w / 2); $hh = [int]($h / 2)
+  $a = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(255, 255, 0, 0))
+  $b = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(255, 0, 255, 0))
+  $c = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(255, 0, 0, 255))
+  $d = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(255, 255, 255, 0))
+  $g.FillRectangle($a, 0, 0, $hw, $hh)
+  $g.FillRectangle($b, $hw, 0, $w - $hw, $hh)
+  $g.FillRectangle($c, 0, $hh, $hw, $h - $hh)
+  $g.FillRectangle($d, $hw, $hh, $w - $hw, $h - $hh)
+  $g.Dispose()
+  foreach ($brush in @($a, $b, $c, $d)) { $brush.Dispose() }
+  $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+  $bmp.Dispose()
+  if ($orientation -le 1) { return }
+
+  $s = [System.IO.File]::OpenRead($path)
+  $frame = [System.Windows.Media.Imaging.BitmapFrame]::Create($s,
+      [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+      [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+  $meta = New-Object System.Windows.Media.Imaging.BitmapMetadata -ArgumentList @('jpg')
+  $meta.SetQuery('/app1/ifd/{ushort=274}', [uint16]$orientation)
+  $enc = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+  $enc.QualityLevel = 100
+  $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($frame, $null, $meta, $null))
+  $tmp = "$path.tmp"
+  $fs = [System.IO.File]::Create($tmp)
+  $enc.Save($fs); $fs.Dispose(); $s.Dispose()
+  Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+# Nearest of the four quadrant colours. JPEG is lossy (and subsamples chroma), so an exact RGB
+# match would be the wrong assertion for a .jpg output.
+function Get-ColourName([int]$r, [int]$g, [int]$b) {
+  $ref = @(
+    [pscustomobject]@{ N = 'A-red';    R = 255; G = 0;   B = 0 },
+    [pscustomobject]@{ N = 'B-green';  R = 0;   G = 255; B = 0 },
+    [pscustomobject]@{ N = 'C-blue';   R = 0;   G = 0;   B = 255 },
+    [pscustomobject]@{ N = 'D-yellow'; R = 255; G = 255; B = 0 })
+  $best = ''; $bestD = [int]::MaxValue
+  foreach ($p in $ref) {
+    $d = [Math]::Abs($r - $p.R) + [Math]::Abs($g - $p.G) + [Math]::Abs($b - $p.B)
+    if ($d -lt $bestD) { $bestD = $d; $best = $p.N }
+  }
+  return $best
+}
+function Get-PixelName([string]$path, [int]$x, [int]$y) {
+  $raw = Get-PixelAt $path $x $y
+  if ($raw -notmatch '^(\d+),(\d+),(\d+)$') { return $raw }
+  return (Get-ColourName ([int]$Matches[1]) ([int]$Matches[2]) ([int]$Matches[3])) + "($raw)"
+}
+
+# A sample point outside the bitmap has to FAIL a check, not abort the whole run: with
+# -ErrorActionPreference Stop a raw GetPixel throws, and a fault injection that makes an output
+# smaller than expected would then end the suite with an exception instead of a red check
+# (that is how this helper came to exist - the first rotated-source injection did exactly that).
+function Get-PixelAt([string]$path, [int]$x, [int]$y) {
+  try {
+    $bmp = New-Object System.Drawing.Bitmap($path)
+    if (($x -lt 0) -or ($y -lt 0) -or ($x -ge $bmp.Width) -or ($y -ge $bmp.Height)) {
+      $s = "OUT-OF-RANGE(sampled $x,$y of $($bmp.Width)x$($bmp.Height))"
+      $bmp.Dispose()
+      return $s
+    }
+    $c = $bmp.GetPixel($x, $y)
+    $s = "$($c.R),$($c.G),$($c.B)"
+    $bmp.Dispose()
+    return $s
+  } catch { return 'UNREADABLE' }
+}
+
+# The EXIF orientation tag (274) of a file, 0 when absent, -1 when unreadable. "the tag must not be
+# left saying 'rotate me again'" is only an assertion if a script can read the tag back.
+function Get-ExifOrientation([string]$path) {
+  try {
+    $s = [System.IO.File]::OpenRead($path)
+    $f = [System.Windows.Media.Imaging.BitmapFrame]::Create($s,
+        [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+        [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    $v = 0
+    if ($f.Metadata -is [System.Windows.Media.Imaging.BitmapMetadata]) {
+      $m = [System.Windows.Media.Imaging.BitmapMetadata]$f.Metadata
+      foreach ($q in @('/app1/ifd/{ushort=274}', '/ifd/{ushort=274}')) {
+        if ($m.ContainsQuery($q)) { $o = $m.GetQuery($q); if ($null -ne $o) { $v = [int]$o; break } }
+      }
+    }
+    $s.Dispose()
+    return $v
+  } catch { return -1 }
 }
 
 # The output of one crop run: the product never overwrites, so it lands next to the source with
@@ -489,6 +627,126 @@ function Invoke-S18 {
     ((Test-Log $ui.Lines 'image=512x384') -and (Test-Log $ui.Lines 'normalized=rect=') -and
      (Test-Log $ui.Lines 'stage=860x520')) `
     "state='$(Get-LogLine $ui.Lines 'crop ui selftest: opened=')'"
+
+  # ================================================================ the user's own picture size
+  # Every fixture above is small, and this suite was 19/19 green while the crop WINDOW selftest was
+  # in fact RED on any image bigger than its fixture: the window's own assertion had 512x384
+  # written into it ("the full-frame rectangle is 0,0,512,384"), so on a 3000x2250 image - where the
+  # rectangle is correctly 0,0,3000,2250 and the confirm button correctly refuses it - that flag
+  # went false and the whole selftest exited 1. A green suite that cannot see the user's own data
+  # size is the failure mode these three checks exist to remove.
+  #
+  # Time: ONE big fixture, built by a single native fill (no per-pixel loop) and reused by all three
+  # checks below; the three of them cost about 7 s in total, against about 50 s for the 19 small ones.
+  $fBig = Join-Path $fdir 'img-3000x2250.png'
+  New-BigGradientPng $fBig 3000 2250
+
+  # ---------------------------------------------------------------- S18.18 the big crop
+  # 3000x2250, box 0.05,0.05,0.9,0.9, asked for 1:1. Boundaries are rounded half-up, away from zero:
+  #   left=round(0.05*3000)=150   right=round(0.95*3000)=2850  -> 2700 wide
+  #   top=round(0.05*2250)=113    bottom=round(0.95*2250)=2138  -> 2025 tall   (112.5 and 2137.5)
+  #   1:1 -> the box is already wider than tall, so the biggest centred square in it is 2025x2025
+  #          at x=150+(2700-2025)/2=487, y=113.
+  # A size alone cannot tell "the right region" from "a region of the right size" (see S18.12), so
+  # both ends of the used box are compared with the source pixel by pixel. PNG output is lossless,
+  # so an exact match is a meaningful assertion.
+  $big = Invoke-Crop 'big-3000x2250' $fBig '0.05,0.05,0.9,0.9' '1:1'
+  $bigCornerOk = $false
+  $bigFarOk = $false
+  $bigDetail = 'no output to sample'
+  if (($null -ne $big.Out) -and (Test-Path -LiteralPath $big.Out)) {
+    $s0 = Get-PixelAt $big.Src 487 113
+    $o0 = Get-PixelAt $big.Out 0 0
+    $bigCornerOk = ($s0 -eq $o0)
+    $s1 = Get-PixelAt $big.Src 2511 2137
+    $o1 = Get-PixelAt $big.Out 2024 2024
+    $bigFarOk = ($s1 -eq $o1)
+    $bigDetail = "out(0,0)=$o0 vs src(487,113)=$s0 | out(2024,2024)=$o1 vs src(2511,2137)=$s1"
+  }
+  Check 'S18.18 a 3000x2250 image crops to exactly 2025x2025 at (487,113), and both corner pixels match the source' `
+    (($big.Exit -eq 0) -and ($big.OutSize -eq '2025x2025') -and $bigCornerOk -and $bigFarOk -and $big.Untouched) `
+    "exit=$($big.Exit) measured=$($big.OutSize) $bigDetail line='$($big.OutputLine)'"
+
+  # ---------------------------------------------------------------- S18.19 the big image, full frame
+  # The engine-level sibling of the window flag that was red: "covers the whole image" must still
+  # fire at a size the suite never used, and a no-op crop must still write nothing.
+  $bigFull = Invoke-Crop 'big-full-frame' $fBig '0,0,1,1' 'free'
+  Check 'S18.19 a full-frame rectangle on a 3000x2250 image is refused as well (no file written, named reason)' `
+    (($bigFull.Exit -eq 3) -and ($bigFull.OutSize -eq 'MISSING') -and $bigFull.Untouched -and
+     (Test-Log $bigFull.Lines 'CropNothingToDo')) `
+    "exit=$($bigFull.Exit) output=$($bigFull.OutSize) line='$($bigFull.OutputLine)'"
+
+  # ---------------------------------------------------------------- S18.20 the WINDOW on a big image
+  # The regression guard for the defect itself. The keys are the ones the window reports about
+  # ITSELF (its own image size, the pixel rectangle it produced, the refusal), never a literal
+  # taken from a fixture - that is exactly what makes them true for every size.
+  $fBigUi = Invoke-Confern 'ui-selftest-big' @('--crop-ui-selftest', '--crop-source', $fBig)
+  $fBigUiKeys = @('opened=True', 'windowPresent=True', 'image=3000x2250',
+                  'refused=True stillOpen=True', 'rect=0,0,3000,2250',
+                  'clampedTo1px=True', 'matchesWhatWasDrawn=True',
+                  'reopened=True windowPresent=True')
+  $fBigUiMissing = @()
+  foreach ($k in $fBigUiKeys) {
+    if (-not (Test-Log $fBigUi.Lines ([regex]::Escape($k)))) { $fBigUiMissing += $k }
+  }
+  Check 'S18.20 the crop WINDOW selftest passes on a 3000x2250 image, full-frame refusal included' `
+    (($fBigUi.Exit -eq 0) -and ($fBigUiMissing.Count -eq 0)) `
+    ("exit=$($fBigUi.Exit) missing='" + ($fBigUiMissing -join ' | ') + "' summary='" +
+     (Get-LogLine $fBigUi.Lines 'selftest done:') + "'")
+
+  # ---------------------------------------------------------------- S18.21 a ROTATED source, cropped
+  # Nothing above carried an EXIF orientation, so "the phone photo is rotated and then cropped" was
+  # unverified. Orientation 6 means "rotate 90 CW to display", so a STORED 800x400 is SEEN as
+  # 400x800:
+  #   stored  : TL=red   TR=green        (800 wide, 400 tall)
+  #   upright : TL=blue  TR=red          (400 wide, 800 tall)
+  #             BL=yellow BR=green
+  # (Same table as verify-orientation-matrix.ps1, which proves orientations 1-8 on the pixels.)
+  # The window shows the upright picture, so the rectangle is drawn on it and the engine bakes the
+  # orientation in BEFORE cropping. A crop of 0,0,0.5,0.5 must therefore be 200x400 and BLUE. If the
+  # tag were ignored the frame would still be 800x400 and the same rectangle would give 400x200 of
+  # stored-TL red - so the size and the colour each discriminate on their own.
+  $fO6 = Join-Path $fdir 'exif6-800x400.jpg'
+  New-QuadrantJpeg $fO6 800 400 6
+  $o6Tl = Invoke-Crop 'exif6-tl-corner' $fO6 '0,0,0.5,0.5' 'free'
+  $o6Right = Invoke-Crop 'exif6-right-half' $fO6 '0.5,0,0.5,1' 'free'
+  $o6TlColour = 'MISSING'; $o6TopColour = 'MISSING'; $o6BottomColour = 'MISSING'
+  if (($null -ne $o6Tl.Out) -and (Test-Path -LiteralPath $o6Tl.Out)) {
+    $o6TlColour = Get-PixelName $o6Tl.Out 100 200
+  }
+  if (($null -ne $o6Right.Out) -and (Test-Path -LiteralPath $o6Right.Out)) {
+    $o6TopColour = Get-PixelName $o6Right.Out 100 100
+    $o6BottomColour = Get-PixelName $o6Right.Out 100 600
+  }
+  Check 'S18.21 EXIF orientation 6 + crop: the rectangle is taken on the UPRIGHT picture (200x400 blue, 200x800 red over green)' `
+    (($o6Tl.Exit -eq 0) -and ($o6Tl.OutSize -eq '200x400') -and
+     ($o6Right.Exit -eq 0) -and ($o6Right.OutSize -eq '200x800') -and
+     ($o6TlColour -like 'C-blue*') -and ($o6TopColour -like 'A-red*') -and
+     ($o6BottomColour -like 'B-green*') -and $o6Tl.Untouched -and $o6Right.Untouched) `
+    ("tl=$($o6Tl.OutSize) $o6TlColour | right=$($o6Right.OutSize) top=$o6TopColour " +
+     "bottom=$o6BottomColour")
+
+  # ---------------------------------------------------------------- S18.22 ...and the tag is gone
+  # The orientation was baked into the pixels, so a viewer that honours the tag must not rotate the
+  # result a SECOND time. "JPG keeps its metadata" is the rule for --convert, but a crop always
+  # moves pixels, so a stale tag here would be a lie.
+  #
+  # WHAT THIS DOES AND DOES NOT PROVE (measured, not assumed): the crop path never carries metadata
+  # over at all today, because the frame it encodes is a CroppedBitmap and Encode only adopts
+  # metadata when "frame is BitmapFrame". So the output has NO orientation tag (0, absent) rather
+  # than a neutralised one, and this check cannot go red from "the tag was ignored while cropping"
+  # - that failure is S18.21's job. What it pins is the property itself, so that a future change
+  # which starts carrying metadata across a crop has to neutralise it to pass. The source half of
+  # the assertion (tag=6 read back off the fixture) is what keeps this from being a reader that
+  # always answers 0.
+  $o6SrcTag = Get-ExifOrientation $fO6
+  $o6OutTag = -1
+  if (($null -ne $o6Right.Out) -and (Test-Path -LiteralPath $o6Right.Out)) {
+    $o6OutTag = Get-ExifOrientation $o6Right.Out
+  }
+  Check 'S18.22 the cropped output carries no EXIF orientation left to rotate it again (source 6, output 0 or 1)' `
+    (($o6SrcTag -eq 6) -and ($o6OutTag -ge 0) -and ($o6OutTag -le 1)) `
+    "source orientation=$o6SrcTag output orientation=$o6OutTag"
 }
 
 # ------------------------------------------------------------------ main
@@ -501,7 +759,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S18' { Expect 19; Invoke-S18 }
+    'S18' { Expect 24; Invoke-S18 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
