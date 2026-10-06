@@ -1,6 +1,13 @@
 param(
   [Parameter(Mandatory=$true)][string]$Exe,
-  [string]$Work = "$env:TEMP\m1d-verify"
+  [string]$Work = "$env:TEMP\m1d-verify",
+  # The output folder the S12.10 payload run is put in, through a settings file THIS
+  # suite writes (see the S12.10 block). Default "" = next to the source. Passing
+  # "desktop" runs the very same checks against the real shell desktop. Either way the
+  # suite neither reads nor writes the operator's own settings file, so the result is
+  # the same whatever that file says -- and this parameter is how both states get
+  # exercised without ever touching it.
+  [string]$PayloadOutputFolder = ''
 )
 # =============================================================================
 #  M1d / M1e regression (S12): the file contract, the failure contract,
@@ -63,6 +70,27 @@ function Run-Convert([string[]]$files, [string]$target, [string]$tag) {
   $args = @('--convert', ($files -join ';'), '--target', $target, '--quiet', '--log', $log)
   $p = Start-Process -FilePath $Exe -ArgumentList $args -PassThru -Wait -WindowStyle Hidden
   return @{ Exit = $p.ExitCode; Log = $log; Text = (Get-Content -LiteralPath $log -Encoding UTF8) -join "`n" }
+}
+
+# ---------------------------------------------------------------------------
+#  Helpers shared by the S12.10 payload block and the S12.16 output-folder
+#  block. They sit up here because PS 5.1 executes a script top to bottom: a
+#  function defined further down is NOT callable from a call site above it.
+# ---------------------------------------------------------------------------
+
+# Does this path name the same folder? (case and trailing separators ignored)
+function Test-DSameFolder([string]$a, [string]$b) {
+  if (-not $a -or -not $b) { return $false }
+  $x = [System.IO.Path]::GetFullPath($a).TrimEnd([char[]]@([char]92, [char]47))
+  $y = [System.IO.Path]::GetFullPath($b).TrimEnd([char[]]@([char]92, [char]47))
+  return [string]::Equals($x, $y, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# A settings file whose ONLY field matters here. ASCII, no BOM (the loader must not
+# be given a different document shape than the one the product writes).
+function Write-DSettings([string]$path, [string]$outputFolder) {
+  $json = '{ "OutputFolder": "' + $outputFolder + '" }'
+  [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # ---- the line the user actually sees ----------------------------------------
@@ -234,7 +262,31 @@ $staleWorkerBytes = if (Test-Path -LiteralPath $workerLog) { (Get-Item -LiteralP
 if (Test-Path -LiteralPath $workerLog) { Remove-Item -LiteralPath $workerLog -Force -ErrorAction SilentlyContinue }
 $payloadStarted = Get-Date
 $payloadLog = Join-Path $logDir 'payload.log'
-$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $srcJpg, '--no-autostart', '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
+# ---------------------------------------------------------------------------
+# P1-11 (2026-10-06): the payload run below is a REAL conversion, so its output
+# folder is decided by the settings file in effect (spec 9.5). This run had NO
+# --settings-file, so it silently inherited the OPERATOR's own
+# %LOCALAPPDATA%\Confern\settings.json: with "OutputFolder": "desktop" the
+# artifacts landed on the desktop while S12.10i looked next to the source, and the
+# suite went red on a product that was behaving correctly. Measured, same binary,
+# one field changed: OutputFolder=desktop -> 65/66 (FAIL S12.10i files=0);
+# OutputFolder="" -> 66/66. A suite that is red or green depending on the
+# operator's own settings measures nothing, so the settings are the SUITE's to own
+# here -- the same device S12.16a/b/c already use. $PayloadOutputFolder exists only
+# so BOTH states can be exercised without ever touching the operator's real file.
+# ---------------------------------------------------------------------------
+$cfgPayload = Join-Path $Work 'payload-settings.json'
+Write-DSettings $cfgPayload $PayloadOutputFolder
+$payloadDesk = [Environment]::GetFolderPath('DesktopDirectory')
+$payloadDest = $PayloadOutputFolder
+if ($PayloadOutputFolder -eq '') { $payloadDest = Split-Path -Parent $srcJpg }
+if ($PayloadOutputFolder -eq 'desktop') { $payloadDest = $payloadDesk }
+# The "desktop" state really writes onto the operator's desktop, so read what is
+# there BEFORE the run: the cleanup after S12.10i removes exactly the files this run
+# added, and never anything that was already there.
+$payloadDeskBefore = @(Get-ChildItem -LiteralPath $payloadDesk -Filter 'art*' -File -ErrorAction SilentlyContinue |
+                       ForEach-Object { $_.Name })
+$p = Start-Process -FilePath $Exe -ArgumentList @('--settings-file', $cfgPayload, '--wheel-payload', $srcJpg, '--no-autostart', '--quiet', '--log', $payloadLog) -PassThru -Wait -WindowStyle Hidden
 $payloadText = (Get-Content -LiteralPath $payloadLog -Encoding UTF8) -join "`n"
 Check 'S12.10a payload path converts through the worker' ($payloadText -match 'conversion finished: finished=True ok=1 failed=0') ''
 
@@ -327,12 +379,40 @@ $releaseLine = ($payloadText -split "`n" | Where-Object { $_ -match 'release-pat
 if ($releaseLine) {
   $target = ([regex]::Match($releaseLine, 'target=([A-Z]+)')).Groups[1].Value
   $expectedExt = '.' + $target.ToLower()
-  $found = @(Get-ChildItem -LiteralPath (Split-Path -Parent $srcJpg) -File -Filter "*$expectedExt" |
-             Where-Object { $_.Name -like 'art*' })
-  Check 'S12.10i the released drop produced its own file' ($found.Count -ge 1) "target=$target files=$($found.Count)"
+  # WHERE the artifact is looked for is owned by the settings file THIS suite wrote
+  # ($payloadDest), not by a guess. At HEAD this line hard-coded the source folder, so
+  # the check was really asking "is the operator's OutputFolder empty?" rather than
+  # "did the released drop produce its own file". And the product's OWN report for the
+  # same run ("wheel destination: outputDir=...", spec 9.5) must agree with it: a run
+  # that ignores the settings file, or that writes somewhere else, fails here instead
+  # of quietly passing.
+  $destLine = ($payloadText -split "`n" | Where-Object { $_ -match 'wheel destination: outputDir=' } | Select-Object -Last 1)
+  $reportedDir = ''
+  if ($destLine) {
+    $dm = [regex]::Match($destLine, 'outputDir=(.*?) sourceFolder=')
+    if ($dm.Success) { $reportedDir = $dm.Groups[1].Value }
+  }
+  if ($reportedDir -eq '(source folder)') { $reportedDir = Split-Path -Parent $srcJpg }
+  $destAgrees = Test-DSameFolder $reportedDir $payloadDest
+  # A file THIS run wrote: with the "desktop" state the folder is shared with the user,
+  # and a leftover from an earlier run must not be able to satisfy the check.
+  $found = @(Get-ChildItem -LiteralPath $payloadDest -File -Filter "*$expectedExt" -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -like 'art*' -and ($_.LastWriteTime -ge $payloadStarted) })
+  Check 'S12.10i the released drop produced its own file' `
+    (($found.Count -ge 1) -and $destAgrees) `
+    "target=$target folder='$payloadDest' reported='$reportedDir' agrees=$destAgrees files=$($found.Count)"
 } else {
   Inconclusive 'S12.10i the released drop produced its own file' 'no release-path line'
 }
+# Desktop hygiene: with -PayloadOutputFolder desktop the payload run above really wrote
+# onto the operator's desktop, so the art* files that were NOT there before it go away
+# again (counted, never assumed). Reported, not asserted: this suite's check count is
+# fixed by $ExpectedChecks.
+$deskStray = @(Get-ChildItem -LiteralPath $payloadDesk -Filter 'art*' -File -ErrorAction SilentlyContinue |
+               Where-Object { $payloadDeskBefore -notcontains $_.Name })
+foreach ($df in $deskStray) { Remove-Item -LiteralPath $df.FullName -Force -ErrorAction SilentlyContinue }
+"[cleanup] desktop: this run added $($deskStray.Count) art* file(s) ($($deskStray.Name -join ', ')) and removed " +
+"them; art* files left on the desktop = $(@(Get-ChildItem -LiteralPath $payloadDesk -Filter 'art*' -File -ErrorAction SilentlyContinue).Count)"
 
 # The 2026-10-01 defect lived HERE, not in the headless path: the pill renders
 # ConversionSnapshot.Line, and that snapshot carried its own copy of the rule.
@@ -348,7 +428,10 @@ $failPayloadLog = Join-Path $logDir 'payload-failure.log'
 $corruptHash = (Get-FileHash -LiteralPath $corrupt -Algorithm SHA256).Hash
 $corruptStamp = (Get-Item -LiteralPath $corrupt).LastWriteTimeUtc.ToString('o')
 $corruptLen = (Get-Item -LiteralPath $corrupt).Length
-$p = Start-Process -FilePath $Exe -ArgumentList @('--wheel-payload', $corrupt, '--no-autostart', '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
+# Same settings file as the S12.10 payload run (P1-11): this run writes no output (the
+# fixture cannot be decoded), but it must not be the one place left that decides a
+# destination from the operator's own settings either.
+$p = Start-Process -FilePath $Exe -ArgumentList @('--settings-file', $cfgPayload, '--wheel-payload', $corrupt, '--no-autostart', '--quiet', '--log', $failPayloadLog) -PassThru -Wait -WindowStyle Hidden
 $failText = (Get-Content -LiteralPath $failPayloadLog -Encoding UTF8) -join "`n"
 $failPill = Get-PillLine $failText
 Check 'S12.15a the pill shows the reason, not a bare count' ($failPill.Contains($MSG_DECODE)) "pill='$failPill'"
@@ -476,13 +559,6 @@ function Get-DToolOutputPath([string]$text, [string]$marker) {
   return $value
 }
 
-function Test-DSameFolder([string]$a, [string]$b) {
-  if (-not $a -or -not $b) { return $false }
-  $x = [System.IO.Path]::GetFullPath($a).TrimEnd([char[]]@([char]92, [char]47))
-  $y = [System.IO.Path]::GetFullPath($b).TrimEnd([char[]]@([char]92, [char]47))
-  return [string]::Equals($x, $y, [System.StringComparison]::OrdinalIgnoreCase)
-}
-
 # Raw JPEG segment names, in file order, up to the start of the scan data.
 function Get-DJpegSegments([string]$path) {
   $b = [System.IO.File]::ReadAllBytes($path)
@@ -531,13 +607,6 @@ function Invoke-DTool([string[]]$arguments) {
        -PassThru -Wait -WindowStyle Hidden
   return @{ Exit = $p.ExitCode; Log = $log; Start = $started;
             Text = (Get-Content -LiteralPath $log -Encoding UTF8) -join "`n" }
-}
-
-# A settings file whose ONLY field matters here. ASCII, no BOM (the loader must not
-# be given a different document shape than the one the product writes).
-function Write-DSettings([string]$path, [string]$outputFolder) {
-  $json = '{ "OutputFolder": "' + $outputFolder + '" }'
-  [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 "=== S12.16-S12.20 D slice: the 2026-10-05/06 measurements, as assertions ==="
