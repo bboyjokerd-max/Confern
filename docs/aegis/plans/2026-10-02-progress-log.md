@@ -1480,3 +1480,98 @@ crop ui selftest: move drag on a rectangle that spans the full WIDTH
 - **`143925a` 的提交訊息本身**——本輪不 commit，只讀 `git show`。
 
 ---
+
+## 2026-10-07 M3：讀 QR 與合併 PDF 兩刀落地，並由我自己完成獨立驗收
+
+### 這一輪的界線
+
+- **讀 QR**：已提交（`e54844b`／`c48c0b9`／`8ff518a`），本輪不重做。
+- **合併 PDF 核心**：已提交 **`e1ef7b1`**（14 檔、+922／−21）；相依 `PDFsharp-WPF 6.2.4`（MIT）由前一刀的 `6db68d8` 引入。
+- **合併 PDF 的拖拉排序視窗（切片 B）**：本輪**尚未完成**，已派工給子代理，正在進行。
+- **去背**：本輪**尚未開始**（不可與切片 B 並行：兩者都會改 `Program.cs` 與套件）。
+- 本輪**未動**已凍結的 `Visual/WheelDesign.cs`、方向 D 色票、輪盤幾何；**未跑合成滑鼠套件**；**未動**使用者的 `%LOCALAPPDATA%\Confern\settings.json`（端到端驗證一律用 `--settings-file` 隔離）。
+
+### 這一輪實跑的數字（全部由我自己執行，不是照抄子代理）
+
+| 項目 | 結果 |
+| --- | --- |
+| `verify-m3d.ps1 -Section S18,S19,S20` | `checks=72 pass=72 fail=0 inconclusive=0 expected=72`；**S18.01 綠** |
+| `verify-m3c.ps1`（S17） | `checks=20 pass=20 fail=0 inconclusive=0 expected=20` |
+| `verify-m1d.ps1` | `checks=74 pass=74 fail=0 inconclusive=0 expected=74` |
+| 故障注入 `merge-order` | `checks=72 pass=71 fail=1`，**唯一紅燈 S20.03（頁序）** |
+| 故障注入 `merge-drop` | `checks=72 pass=71 fail=1`，**唯一紅燈 S20.02（頁數和）** |
+| 建置 | `dotnet build -c Release` ⇒ `exit=0 warnings=0 errors=0`，**但 exe 時間戳未移動**（見下「我自己踩到的坑」） |
+
+`72 = S18(39) + S19(18) + S20(15)`，與子代理自報的逐項相符。
+
+**兩支演練都是「一因一紅」**：注入頁序反轉時，只有拿硬編期望表比對的 S20.03 轉紅；注入頁數 −1 時，只有 S20.02 轉紅。其餘 71 條維持綠 ⇒ 這批斷言各自守著不同的契約，不是靠一條總開關在撐。
+
+### 我自己的見證程式（**不是**產品的 `--merge-pdf-inspect`）
+
+用我另外寫的 .NET 8 唯讀程式（PDFsharp-WPF 6.2.4）逐頁讀出 `WxH @Rotate contents=<bytes> sha=<前12碼>`，對 `fixtures/pdf/` 全部測資複核：
+
+- `fx-a`：2 頁 `200x300 @0`（74／`9102714aeeb4`）、`210x310 @0`（80／`2b2962f9ecba`）
+- `fx-b`：1 頁 `300x200 @0`（74／`9afd975a8921`）
+- `fx-c`：3 頁 `100x100 @0`（73／`4d17d32e24d6`）、`120x140 @0`（80／`2814e72c9603`）、`160x180 @0`（78／`711c279a7ae1`）
+- `fx-r`：1 頁 `300x200 **@90**`（74／**`9afd975a8921`**）⇒ 與 `fx-b` **內容雜湊完全相同、只差 `/Rotate`**，所以旋轉必須獨立斷言，不能靠內容雜湊帶過
+- `fx-broken.pdf` ⇒ **`The StartXRef table could not be found`**（在開檔階段就死）
+- `fx-broken-page-tree.pdf` ⇒ **先讀到 `pages=1`、接著 `NullReferenceException`**（PDFsharp Issue #388 的形狀：開得起來、碰到頁面才炸）
+- `fx-hybrid-xrefstm-onlystream.pdf` ⇒ **`pages=0`**（開得起來卻宣告零頁）
+
+另外，產品實際合併出來的 `fx-a (1).pdf`（4461 B）我也用同一支見證程式讀過，頁序與尺寸與測資表逐頁相符：`200x300`、`210x310`、`300x200`、`100x100`、`120x140`、`160x180`（皆 `@0`）⇒ **頁序＝要求順序、沒有縮放、內容逐位元保留**。
+
+### S20.11 的缺口，以及我怎麼在 repo 外把它補上
+
+子代理在最終報告第 10.1 節**主動自曝**：S20.11 的加密檔**沒有端到端跑**。原因是本機的套件宿主是 **Windows PowerShell 5.1（.NET Framework）**，載入 net8.0 的 `PdfSharp-wpf.dll` 會失敗（`Could not load file or assembly 'System.Runtime, Version=8.0.0.0'`），而本機沒有 PowerShell 7 ⇒ 該檢查退化成「產品有一條獨立的密碼訊息路徑」，**那一臂若壞掉它仍會綠**。
+
+我用**自己的 .NET 8 探針**產生真正的加密 PDF（29719 B，檔案含 `/Encrypt`，密碼 `secret123`），在 `%TEMP%\m3-s2011` 內（**repo 外、未在 repo 產生任何檔**）端到端實跑四條：
+
+- A `good1;locked-user-pw` ⇒ **exit 3、整個目錄零新檔、訊息指名 `locked-user-pw.pdf`**
+- B 對照組 `good1;good2` ⇒ **exit 0、恰好一個新檔** `good1 (1).pdf`（3271 B）——**這一條是必要的**，否則「全部都失敗」也會通過
+- C 只給加密檔 ⇒ exit 3、零新檔
+- D 加密的拒絕訊息與壞檔的通用訊息**不同且更長**（84 vs 64 字元）
+
+實測訊息（讀 UTF-8 日誌檔，**不是** stdout——stdout 是 CP950，中文會變亂碼）：
+
+```
+merge-pdf failure: locked-user-pw.pdf（第 2 個檔） 這個 PDF 需要密碼才能開啟，請先解除密碼再合併
+merge-pdf why: stage PdfReader.Open (Import): PdfReaderException: A password is required to open the PDF document.
+               -- the source is ENCRYPTED and this tool has no way to ask for a password
+               (there is no field for one in the wheel or in the worker protocol),
+               so the whole batch is given up rather than merged without it
+merge-pdf failure: fx-broken.pdf（第 2 個檔） 無法合併這個 PDF
+```
+
+⇒ 加密來源得到的是**自己的訊息＋為什麼不硬合**，不是通用訊息。
+
+### 我自己踩到的坑（留給下一個人）
+
+**`dotnet build` 可能是 no-op 建置。** 我第一次驗收跑出 `exit=0 warnings=0 errors=0`，但 `exe` 時間戳 **17:59:43.782 完全沒動**：樹停在 `e1ef7b1` 且已被建置過，MSBuild 判定輸出最新就**跳過編譯** ⇒ 那個 0/0 只代表「沒有東西要編」，**不代表「編過了而且乾淨」**。這正是「驗收前先殺 Sidecar 並確認 exe 時間戳有變」要防的事。要真正的編譯量測得用 `-t:Rebuild`（或 `--no-incremental`），確認時間戳移動後再對**剛編出來的** exe 跑套件。
+
+在這一輪裡它是**無害的**，因為 S18.01（「受測 exe 比它應該被建出來的每個來源檔都新」）**綠**——那才是「受測二進位檔與已提交原始碼一致」的實質保證。
+
+### 被糾正／我原先判斷錯的地方
+
+1. **我對演練紅燈分佈的預期是錯的。** 我原本預期 `merge-order` 會讓 S20.03 **與 S20.05** 一起紅；子代理實測**只有 S20.03 紅**，並解釋 S20.05 比的是「與來源相同的內容雜湊」，而注入同時反轉了期望值 ⇒ 不受影響。我的實測**確認了它的解釋**。我接受更正。
+2. **「把 m3c／m1d 的 5 個工具改成 6」是我的指示錯了。** 子代理沒有照做，而是只加註解說明「5 是對的」，理由是那些檢查的 payload 是 **JPEG／PNG**，而 `ToolCatalog.ToolsFor` 只對 **PDF** 提供 `merge-pdf`；改了反而製造假紅。我在派工前**沒有先問 payload 是什麼格式**就從「工具總數 5→6」推論要改斷言。裁決：維持現狀。
+3. 子代理自己也修掉三個真缺陷，值得記下：`merge-pdf why:` 在**成功路徑也印**；訊息帶檔名的判準**列舉錯誤碼**而漏掉批次前檢的 `Unsupported`／`SourceMissing`（使用者只看到「不支援的格式」而不知道是哪個檔）；套件的 `Invoke-Confern` 用 `Start-Process -ArgumentList` 時**沒有為含空白的參數加引號**（含空白的批次參數被拆開，錯誤訊息指向 harness 而不是產品）。
+
+### 照抄、我沒能獨立複核
+
+- **相依性體積**（輸出目錄 6→18 檔、+1,970,880 B、`PdfSharp*` 9 檔／1,576,960 B、`System.Drawing.Common` = 0）——這是子代理前一刀量的，我本輪只讀了它的提交訊息，**沒有重新量**。
+- **`fixtures/pdf/README.md` 裡「兩次產生同尺寸但 sha 不同」的不可重現性**（首個差異位元組是 `/CreationDate`、XMP `CreateDate`、`xmmMM:DocumentID`）——照抄，未重跑產生器。
+- **各頁內容 sha256 與測資表的對應**：我用見證程式複核的是**前 12 碼**與 `contents=` 位元組數，**沒有**逐一比對完整的 64 碼 sha256。
+- **PDFsharp 授權與 Issue #388 的出處**——照抄早先的查證，本輪未再上網複核（本機網頁工具目前回 402）。
+- **`e1ef7b1` 之前的相依引入刀（`6db68d8`）的內容**——本輪只讀了最新一筆提交的訊息與 `--stat`。
+
+### 尚未完成（明確列出，避免下一個人以為 M3 已經收尾）
+
+1. **合併 PDF 的拖拉排序視窗（切片 B）**：進行中。`merge-pdf` 目前只能在命令列表達順序。
+2. **去背**：未開始。
+3. **S20.04 與 S20.05 不交叉**（子代理自曝）：尺寸與內容理論上可被分別調包而兩條都綠；建議補一條把「尺寸＋內容雜湊」配成對比對的斷言（`Expect` 15→16）。
+4. **`--wheel-payload --wheel-tool merge-pdf` 的真實提交路徑未跑**（需要單一實例守衛，且使用者可能正在用自己的那份 App）。
+5. **速度未量**：測資只有 1–3 頁。
+6. **`/Outlines`（書籤）不保留**、`/Annots` 不深拷貝、object stream 不寫出——已誠實寫進 `fixtures/pdf/README.md` 與程式註解。
+7. 這一輪**尚未**更新 Obsidian 同步（`tools\obsidian\sync.ps1`）——留待 M3 全部收尾時一併執行。
+
+---
