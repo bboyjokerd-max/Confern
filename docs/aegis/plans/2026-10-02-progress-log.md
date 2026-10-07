@@ -1656,3 +1656,74 @@ merge-pdf failure: fx-broken.pdf（第 2 個檔） 無法合併這個 PDF
 6. 加密 PDF 的端到端由我在 repo 外以自製探針覆蓋（四條全過），**不在** repo 的套件裡。
 
 ---
+
+## 2026-10-07 M3 收尾：去背（`remove-bg`）完成，三個工具全部到齊並經我方獨立驗收
+
+### 交付
+
+**`a720084`**：`src\Sidecar\Convert\RemoveBgModel.cs`（解析／三態檢查／快取 session／tensor／mask）、`ConversionEngine.RemoveBg`、`ConversionTypes` 三個新錯誤碼、`WorkerServer` 的 `op=remove-bg`＋分派＋reject 清單、`ConversionClient`／`ConversionRunner` 的 `removeBgModel`；目錄第七筆 `RemoveBg = (id:"remove-bg", label:"CUTOUT", desc:"去背")` 與 `WheelPresenter` 的圖示；`tools\get-rembg-model.ps1`（純 ASCII、無 BOM、LF）；`fixtures\rembg\`（`real-512.png` ＋ `README.md`）。UI 走**既有的**輪盤 commit 路徑（`App.CommitWheel`），由**既有的** `visual.TickRequested` 抽乾，**沒有第二個計時器**。
+
+**模型不進版控**（實測：`git ls-files` 238 個檔案中沒有任何 `.onnx` 或 `models/`；工作樹乾淨）。取得腳本實測三次：不存在→下載並驗 sha256 `25F165DA…E5CF6`／長度 12,984,781；已存在且正確→`already present and verified`；**改壞 1 個位元**→報出實測到的錯 sha 並自動重抓修好。
+
+### 產品的三個具名狀態（都不寫任何檔案）
+
+`ModelUnavailable`（模型不在）／`ModelCorrupt`（檔在但載不起來）／`NoSubjectFound`（載起來了但這張圖沒有人像主體），門檻 `Max < 0.30 || Mean < 0.02`。
+
+**第三個是這顆扇形存在的理由**：MODNet 是**人像**模型，對非人像會回近乎全空的遮罩，那時**絕不靜默輸出一張全透明的 PNG**（那會讓使用者以為去背成功，實際上什麼都沒了）。
+
+### 我方獨立驗收（對 `a720084`，全部我自己跑）
+
+| 項目 | 結果 |
+| --- | --- |
+| 強制重建 `-t:Rebuild` | `0 warnings 0 errors`；`Confern.dll` sha256 `FD1CFECB…` 重建前後**相同**（原始碼未變 ⇒ 可重現）、時間戳有動 ⇒ 真的編譯過 |
+| `verify-m3d.ps1 -Section S18,S19,S20,S21,S22` | **`checks=98 pass=98 fail=0 inconclusive=0 expected=98`** |
+| `verify-m3c.ps1`（S17） | `20/20 expected=20` |
+| `verify-m1d.ps1` | `74/74 expected=74` |
+| 注入 `rembg-nosubject` | `checks=13 pass=12 fail=1`，**唯一紅燈 S22.04** |
+| 注入 `rembg-png` | `checks=13 pass=12 fail=1`，**唯一紅燈 S22.06** |
+| 人像實跑 | `exit=0`、恰好 1 個新檔（37,595 B）、來源 sha256 不變 |
+| **我自己讀那個 PNG**（不用產品的 inspect） | 檔頭 `89504e470d0a1a0a`（真 PNG）、`512x410`、`depth=8`、**`colorType=6`（RGBA）**、`PixelFormat=Format32bppArgb`；**全部 209,920 個像素**掃過 ⇒ `alpha min=0 max=1 mean=0.5253 clear=0.459 opaque=0.4954` |
+| 與產品自報比對 | 產品 `--remove-bg-inspect` 報 `mean=0.5253 clear=0.4590 opaque=0.4954` ⇒ **逐項相同** |
+| 三個具名狀態 | `missing=exit3/0檔`、`corrupt=exit3/0檔`、`nosubject=exit3/0檔`，**三則訊息兩兩不同**；**對照組**（同一組設定、人像＋好模型）`exit0/1檔` ⇒ 「全部都失敗」不可能通過 |
+
+### 子代理自己抓到的兩個「量測本身在說謊」（值得單獨記）
+
+1. **平均值把真相藏起來**：診斷原本只印「四角平均 0.30」，而那個平均值把**乾淨的右上角（0.00）**藏在**有東西的左下角（0.97）**後面 ⇒ 改成四個角各自一列。它在報告裡也明說「左下角刻意不量——太空人的西裝與兩隻狗真的在那裡（實測 0.97），要求它透明等於斷言一個關於這張照片的假話」。
+2. **測試的守門條件把真失敗藏在計數不符後面**：S22.07 原本寫 `$pngOk -and …`，於是 S22.06 一紅它就**同時**變成 INCONCLUSIVE（多註冊一條）與 FAIL，真正的失敗被 `registered 14 but promised 13` 蓋掉 ⇒ 改成看「有沒有產物」，不依賴鄰居的判定。
+
+### 一起修掉的既有問題（都不是這一刀新引入的）
+
+1. `WorkerServer.RejectUnknownOp` 的訊息沒有列出第八個 op。
+2. `verify-m3c.ps1` S17.20 在輪盤那一行找 `tools=[…]`，但那一行只有 `layer=tool tools=6`（id 清單在 `ENTER: tool layer ->` 行）⇒ 已改讀真正存在的那一行。
+3. `verify-m1d.ps1` S12.20 的目錄數是**看來源的**：JPEG 看不到 `merge-pdf`，所以是 6 不是 7。
+4. （見上）S22.07 的守門條件。
+5. （見上）`--remove-bg-inspect` 的角落平均。
+
+### 我自己犯的錯（也記下來）
+
+我寫的獨立 PNG 讀取器**第一次跑是壞的**：忘了 `Add-Type -AssemblyName System.Drawing`，`New-Object System.Drawing.Bitmap` 回 `Cannot find type`、`$bmp` 是 null，而我沒加防護 ⇒ 刷了約 **147 萬行錯誤**（輸出檔 68 MB），並且印出「`alpha` 全為 0 ⇒ almost nothing is transparent」。**那是壞掉的量測在說謊，不是產品的問題**——修好之後逐項與產品相同。教訓：**每一條量測都要先自問「這個數字在我儀器壞掉時會長什麼樣」**。
+
+### 照抄、我沒能獨立複核
+
+- 子代理的兩支注入演練（`rembg-nosubject`／`rembg-png`）與其 dll 逐位元還原——我複核的是**套件內建注入**那一組。
+- 它另外加測的兩類非人像（乾淨 QR、無 QR 圖）與模型取得腳本的三次實測。
+- 真實照片的去背品質（主觀）與輪盤扇形在畫面上的外觀（只斷言了 `drawn=7/7` 結構計數）。
+
+### 尚未驗證（子代理自列，我照收）
+
+非 PNG 來源格式走 remove-bg；來源本身已帶透明；風景／截圖類別未個別走過；EXIF 旋轉來源的 end-to-end（bake 路徑與 crop 共用，未對 remove-bg 走過）；速度未量。
+
+### 需要「人」才能決定或判斷的兩件事（留給使用者）
+
+1. **人像去背的視覺邊緣品質**（頭髮、狗的毛）：產物在 `%TEMP%\rembgwork\indep\portrait\real-512 (1).png`，或直接跑一次輪盤的 CUTOUT。這是唯一只有人眼能判的事。
+2. **模型要不要隨產品出貨**：`model_fp16.onnx` **12,984,781 bytes（≈12.4 MiB）不進版控**，放在執行檔旁邊的 `models\`。體積差就是這 12.4 MiB；要出貨還得決定放哪、怎麼簽章、離線安裝怎麼帶。**這個決定權在使用者，不由 agent 代決。**
+
+### 一件要向使用者報告的事
+
+去背的子代理為量測跑過一次 S21 的診斷（`--wheel-payload … --wheel-tool merge-pdf --merge-ui-autoconfirm`），它在 `fixtures\pdf\` 留下一個未追蹤的 `fx-a (1).pdf`（**已刪除**）。那條診斷會把產物寫進來源資料夾；正式套件用 `-Work` 隔離所以不受影響，而切片 B 已為此加了 S21.09「fixtures 夾不得被寫入」的斷言 ⇒ 以後會自動抓到。已確認該資料夾乾淨。
+
+### M3 現況
+
+**三個工具全部到齊並經我方獨立驗收**：讀 QR（`e54844b`／`c48c0b9`／`8ff518a`）、合併 PDF（`e1ef7b1` 核心＋`4f8ace0` 排序視窗＋`93bc701` 輪盤可達）、去背（`a720084`）。日誌與 Obsidian 同步於本節之後執行。
+
+---
