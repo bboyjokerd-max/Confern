@@ -197,6 +197,39 @@ internal static class Program
             return App.RunConvert(opt, convertEvidence);
         }
 
+        // M3 第五顆扇形（2026-10-07 切片 2）：`--qr-worker` 走**真的 worker 行程**。
+        //
+        // 它補的是前一個切片誠實留下的缺口：`--read-qr` 是同一個行程內直接呼叫引擎，
+        // 所以 `op=read-qr` 的分派臂與 `WorkerMessage.text` 這個**跨行程的欄位**
+        // 當時沒有任何執行時斷言走過，只能用原始碼斷言代替。這一條起真的 worker、
+        // 走真的管道，而且斷言 client 收到的文字逐字元等於已知 payload。
+        // 位置同樣在單一實例守衛之前（理由與 `--crop` 一字不差）。
+        if (!string.IsNullOrEmpty(opt.QrWorker))
+        {
+            Native.AttachParentConsole();
+            using var qrWorkerEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return QrDiagnostic.RunWorker(qrWorkerEvidence, opt.QrWorker!);
+        }
+
+        // M3 第五顆扇形（2026-10-07 切片 2）：分類自測——**完全不碰 WPF**。
+        // 分類決定了一件有副作用的事（開外部程式），所以它必須能在任何環境下被驗到。
+        if (opt.QrClassifySelfTest)
+        {
+            Native.AttachParentConsole();
+            using var qrClassifyEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return QrDiagnostic.RunClassify(qrClassifyEvidence);
+        }
+
+        // M3 第五顆扇形（2026-10-07 切片 2）：`--qr-open-selftest`——文字視窗 ＋ 開瀏覽器的縫。
+        // ⚠ 它會**真的開一張 WPF 視窗**（在螢幕上、關得掉），但**絕不開瀏覽器**
+        // （見 QrBrowserOpener 的兩道鎖；這是這個切片最重要的一條安全斷言）。
+        if (opt.QrOpenSelfTest)
+        {
+            Native.AttachParentConsole();
+            using var qrOpenEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return QrDiagnostic.RunTextWindow(qrOpenEvidence, opt.QrSource ?? opt.ReadQr, opt.QrExtraUrl);
+        }
+
         // M3 第四顆扇形：`--crop`——走**完整的一條路**（worker 行程、op=crop、管道、快照）。
         //
         // ⚠ 位置刻意在單一實例守衛**之前**（與 `--convert` 同一條規矩）：守衛是為了擋下第二個
@@ -336,6 +369,21 @@ internal sealed class Options
                                     ever written (this tool's product is text, not a file) and the
                                     source file is never touched; a picture without a QR code is
                                     refused by name (QrNotFound), not with an exception
+          --qr-worker <path>        the same tool through the real WORKER process (op=read-qr over
+                                    the pipe): proves the decoded text survives the cross-process
+                                    field, which an in-process call cannot show; still writes nothing
+          --qr-classify-selftest    print the http/https classification of 18 known inputs (and
+                                    whether the browser target agrees) and exit; touches no window
+                                    and never starts a process
+          --qr-open-selftest        decode --qr-source, then exercise BOTH outcomes of read-qr: a
+                                    non-url really opens the text window (character-for-character
+                                    checked, copy button pressed, single instance, reopen) and the
+                                    url path goes through the browser seam instead of a real browser
+                                    (so the suite never pops a browser on this machine)
+          --qr-source <path>        the image with a QR code used by --qr-open-selftest (default: the
+                                    --read-qr path)
+          --qr-extra-url <url>      with --qr-open-selftest: the url routed through the seam to prove
+                                    the url arm is really taken (default https://example.com/...)
           --crop <p1;p2>            run tool crop on these files through the real WORKER process
                                     (op=crop over the pipe) and report; one normalized rectangle is
                                     applied to every file, each according to its own size;
@@ -512,6 +560,37 @@ internal sealed class Options
     /// 「解出來的文字」必須能從產品的輸出**重新推導**出來，而不是只相信它印的 `ok=True`。
     /// </summary>
     public string? ReadQr;
+    /// <summary>
+    /// M3 診斷（2026-10-07 切片 2）：`--qr-worker &lt;path&gt;` 對這個檔案跑工具 `read-qr`，
+    /// 但**走真的 worker 行程**（`op=read-qr`、管道、快照）——形狀與 <see cref="Crop"/> 一字不差。
+    ///
+    /// 為什麼非有它不可（前一個切片誠實留下的缺口）：`--read-qr` 走的是**同一個行程內的引擎**，
+    /// 它驗不到 `op` 欄位，也驗不到 `WorkerMessage.text` 這個**跨行程的序列化欄位**。
+    /// 「worker 裡面解對了」與「UI 那一端收到同一串字」是兩件不同的事，而後者才是產品真正走的路。
+    /// </summary>
+    public string? QrWorker;
+    /// <summary>
+    /// M3 診斷（2026-10-07 切片 2）：`--qr-classify-selftest`——只驗分類（**完全不碰 WPF**）。
+    ///
+    /// 分開一條的理由：分類決定了一件有副作用的事（開外部程式），而它可以、也應該在
+    /// **任何**環境下被驗到——包含沒有互動式工作階段的機器。視窗那一條（<see cref="QrOpenSelfTest"/>）
+    /// 需要一個真的 WPF 視窗，這兩者失敗的原因完全不同，合成一條會讓診斷的訊息說不出是哪一種壞。
+    /// </summary>
+    public bool QrClassifySelfTest;
+    /// <summary>
+    /// M3 診斷（2026-10-07 切片 2）：`--qr-open-selftest`——讀 QR 的**兩條出路**自測。
+    ///
+    /// 它驗的是這一刀最貴的兩個承諾：
+    ///   ①非網址 → 文字視窗真的開得起來、裡面的字**逐字元**等於解出來的內容；
+    ///   ②⚠ **開瀏覽器那條路徑在自測模式下沒有真的開瀏覽器**（見 <see cref="QrBrowserOpener"/>）——
+    ///     否則套件一跑就會在使用者的桌面上彈出瀏覽器，那是對使用者環境的副作用。
+    /// 搭配 <see cref="QrSource"/> 指定有 QR 的圖（不給就用 <c>--read-qr</c> 那一張）。
+    /// </summary>
+    public bool QrOpenSelfTest;
+    /// <summary>`--qr-open-selftest` 要解的那張有 QR 的圖（預設沿用 `--read-qr` 的路徑）。</summary>
+    public string? QrSource;
+    /// <summary>`--qr-open-selftest` 額外走一次路由的網址（預設一個例子），證明 url 那一條也真的被走過。</summary>
+    public string QrExtraUrl = "https://example.com/confern-qr-selftest";
     /// <summary>
     /// M3 診斷（2026-10-06）：`--crop &lt;p1;p2&gt;` 走**完整的一條路**（worker 行程、`op=crop`、
     /// 管道、快照）對這幾個檔案跑工具 `crop`（第四顆扇形）。分號分隔＝一次批次，
@@ -812,6 +891,11 @@ internal sealed class Options
                 case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
                 case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
                 case "--read-qr": if (i + 1 < args.Length) o.ReadQr = args[++i]; break;
+                case "--qr-worker": if (i + 1 < args.Length) o.QrWorker = args[++i]; break;
+                case "--qr-classify-selftest": o.QrClassifySelfTest = true; break;
+                case "--qr-open-selftest": o.QrOpenSelfTest = true; break;
+                case "--qr-source": if (i + 1 < args.Length) o.QrSource = args[++i]; break;
+                case "--qr-extra-url": if (i + 1 < args.Length) o.QrExtraUrl = args[++i]; break;
                 case "--crop":
                     if (i + 1 < args.Length) { o.Crop = args[i + 1]; o.CropUiSource ??= args[i + 1].Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(); i++; }
                     break;
@@ -1172,6 +1256,10 @@ internal static class App
         // 裁切視窗的確認要在**主執行緒**上接手（它要起 worker，而視覺層與進度藥丸是主執行緒的）：
         // 接在同一個週期回呼上，不新增第二個計時器。這條回呼在診斷路徑上通常沒有東西可抽。
         visual.TickRequested += () => DrainPendingCrops(evidence, runner);
+        // 讀 QR 的結果同樣接在這裡（2026-10-07 切片 2）：它要做的判定與副作用
+        // （開瀏覽器／開文字視窗）都必須在主執行緒上發生，而這一顆工具**沒有進度藥丸**
+        // 可以掛（見 ConversionRunner.Start）——週期回呼是唯一不必新增計時器擁有者的落點。
+        visual.TickRequested += () => DrainQrResult(evidence, runner);
         visual.StartTick(SettingsUiLogDrainIntervalMs);
         // 這一行刻意**不**以 `settings ui:` 開頭：那個前綴的意思是「設定頁那條執行緒排過來的行」，
         // 而這一行是主執行緒自己說的（而且驗收要用 `settings ui:` 的行數來判斷抽乾有沒有生效）。
@@ -1689,6 +1777,13 @@ internal static class App
         evidence.Line($"visual demo shown at ({x},{y}) " +
                       $"size={WheelGeometry.BitmapWidthPx}x{WheelGeometry.BitmapHeightPx} " +
                       $"in {sw.Elapsed.TotalMilliseconds:F1} ms (budget 100 ms)");
+
+        // 工具輪盤：**每一個扇區都必須真的畫出一個圖示**（2026-10-07 切片 2）。
+        // 這一條的來源是繪製自己（DrawToolIcon 的返回值），不是幾何推算——
+        // 理由與量測見 WheelPresenter.DrawnToolIcons（實測：對 PNG 量墨水分不出圖示與標籤字）。
+        if (toolsMode)
+            evidence.Line($"visual demo tool icons: drawn={presenter.DrawnToolIcons}/{targets.Length} " +
+                          $"icons=[{string.Join(",", presenter.DrawnToolIconLabels)}]");
 
         if (opt.WheelDump != null)
         {
@@ -2450,6 +2545,43 @@ internal static class App
 
         guard.OnUserResolved("enter");      // 收起輪盤（收層是幂等的）
 
+        // M3 第五顆扇形（讀 QR，2026-10-07 切片 2）：**它與另外四顆在結構上不同**——
+        // 產物是一段文字而不是檔案，而且那一段文字要再走一條有副作用的判定
+        // （http／https → 開瀏覽器；其餘 → 顯示在可複製的視窗裡）。
+        //
+        // 所以它：①照樣走 worker（`op=read-qr`，與另外四顆同一條路、同一份協議）；
+        // ②不顯示進度藥丸（藥丸說的是「N 個檔案、成功幾個」，而這裡沒有檔案，
+        //    見 ConversionRunner.Start）；③起完之後由**既有的**週期回呼抽乾
+        //    （見 DrainQrResult），在那裡才做判定與副作用——那一刻已經在主執行緒上。
+        if (toolOp == WorkerProtocol.OpReadQr)
+        {
+            if (runner == null)
+            {
+                evidence.Line("ENTER: no conversion runner in this mode (diagnostic path)");
+                return true;
+            }
+            if (paths.Length == 0)
+            {
+                evidence.Line("ENTER: no payload paths recorded -> nothing to read");
+                return true;
+            }
+            if (paths.Length > 1)
+            {
+                // 一次只讀一張：產物是「一個文字」，兩張圖會有兩個答案而畫面上只有一個視窗。
+                // 明講並只做第一張，而不是靜默地挑一張（猜哪一張才是使用者要的，那是猜）。
+                evidence.Line($"ENTER: read-qr takes one image at a time; using {Path.GetFileName(paths[0])} " +
+                              $"of {paths.Length} (the rest are left alone)");
+            }
+            evidence.Line("ENTER: read-qr goes to the worker (op=read-qr); no file will be written");
+            QrJobRunning = true;
+            _qrSourceName = Path.GetFileName(paths[0]);
+            runner.Start(new[] { paths[0] }, "", 100, centerX, centerY,
+                         toolOp: WorkerProtocol.OpReadQr, outputDir: null);
+            PendingPaths = Array.Empty<string>();
+            PendingTools = Array.Empty<ToolDescriptor>();
+            return true;
+        }
+
         if (runner == null)
         {
             evidence.Line("ENTER: no conversion runner in this mode (diagnostic path)");
@@ -2554,6 +2686,58 @@ internal static class App
 
     /// <summary>最近一次拖曳／注入的檔案清單——Enter 要靠它才知道要轉哪些檔。</summary>
     private static string[] PendingPaths = Array.Empty<string>();
+
+    /// <summary>
+    /// 有一件讀 QR 的工作正在 worker 上跑（2026-10-07 切片 2）。
+    ///
+    /// 為什麼是一個旗標而不是「每次都去問 <see cref="ConversionRunner.Snapshot"/>」：
+    /// 那一個快照屬於**上一次**工作（Idle 是「已完成」），拿它判斷「有沒有新結果」
+    /// 會讓上一輪的結果被重複處理一次。這個旗標由提交處設起、由抽乾處在消費完之後放掉，
+    /// 與 <see cref="PendingPaths"/> 同一種作法（顯示／提交時寫、消費後清）。
+    /// </summary>
+    private static volatile bool QrJobRunning;
+
+    /// <summary>
+    /// 把「讀 QR 的結果」在主執行緒上接手（見 <see cref="CommitWheel"/> 的 read-qr 那一條）。
+    /// 由**既有**的視覺層週期回呼呼叫，與裁切、設定頁日誌抽乾同一條路——不新增第二個計時器。
+    ///
+    /// 為什麼判定與副作用都必須在這裡：①判定要開瀏覽器（在別條執行緒上叫 <c>Process.Start</c>
+    /// 沒有理由，而且這一條路徑的其餘部分都已經在主執行緒）；②顯示文字要走
+    /// <see cref="QrTextUi"/>，而那一個自己會把工作排到共用的 WPF 執行緒上。
+    ///
+    /// ⚠ worker 起不來時**一定要說出來**：那一條不顯示進度藥丸（見 ConversionRunner.Start），
+    /// 所以這裡的日誌行是使用者唯一會看到的痕跡。
+    /// </summary>
+    private static void DrainQrResult(Evidence evidence, ConversionRunner? runner)
+    {
+        if (!QrJobRunning || runner == null) return;
+        ConversionSnapshot snapshot = runner.Snapshot;
+        if (!snapshot.Finished) return;
+
+        QrJobRunning = false;
+        string? text = snapshot.QrText;
+        if (text == null)
+        {
+            // 兩種可能，都講清楚：worker 真的失敗（QrNotFound 之類），或 worker 根本沒起來。
+            evidence.Line($"read-qr: no text came back (error='{snapshot.Error ?? "-"}' " +
+                          $"failed={snapshot.Failed} line='{snapshot.Line}') -- nothing is shown and " +
+                          "no browser is opened");
+            return;
+        }
+
+        string sourceName = _qrSourceName.Length > 0 ? _qrSourceName : "?";
+        var routed = QrTextRouter.Route(text, sourceName, evidence.Line);
+        evidence.Line($"read-qr: routed kind={QrTextClassifier.KindLabel(routed.Kind)} " +
+                      $"chars={text.Length} opened={routed.Opened} note='{routed.Note}'");
+        _qrSourceName = "";
+    }
+
+    /// <summary>
+    /// 這一輪讀 QR 的來源檔名（文字視窗的標題列要它）。與 <see cref="PendingPaths"/> 同一種作法：
+    /// 提交時寫、抽乾時清。刻意不從快照反推——快照上的 <c>Current</c> 是進度訊息的一部分，
+    /// 拿排版欄位當資料用正是本專案一直在防的那件事。
+    /// </summary>
+    private static string _qrSourceName = "";
 
     /// <summary>
     /// 顯示第二層時那一份工具清單（Enter 要靠它把「選中的索引」換成工具 id）。

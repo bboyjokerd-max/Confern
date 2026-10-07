@@ -63,7 +63,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S18',
   [string]$LogDir = "$env:TEMP\sidecar-verify",
-  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio')][string]$FaultInjection = ''
+  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text')][string]$FaultInjection = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -343,11 +343,19 @@ function Invoke-Crop([string]$name, [string]$fixture, [string]$rect, [string]$ra
 #                which is the single most likely way to get the user's stated rule wrong.
 #   ignore-ratio expect the free rectangle for a 1:1 request. Catches "cropRatio was lost on
 #                the way over the pipe" (the field is absent and the engine falls back to free).
+#   qr-classify  expect EVERY read-qr input to be classified as a url (https://example.com). That
+#                is the "the classifier says everything is a url" bug - the one that would hand a
+#                file:// or javascript: string to ShellExecute. Catches the negative cases (S19.12)
+#                AND the dangerous-scheme check (S19.14).
+#   qr-text      expect the text window to hold a different string than the decoded one. Catches
+#                "the window shows something other than what the decoder produced" (S19.13).
 function Get-FaultNote() {
   switch ($FaultInjection) {
     'swap' { return 'FAULT INJECTION swap: expectations transposed on purpose' }
     'ignore-size' { return 'FAULT INJECTION ignore-size: expectations use the first image size for all' }
     'ignore-ratio' { return 'FAULT INJECTION ignore-ratio: 1:1 expectations replaced by the free rectangle' }
+    'qr-classify' { return 'FAULT INJECTION qr-classify: every read-qr input is expected to be a url' }
+    'qr-text' { return 'FAULT INJECTION qr-text: the text window is expected to hold a different string' }
     default { return 'no fault injection: expectations are the documented ones' }
   }
 }
@@ -1299,14 +1307,16 @@ function Invoke-S18 {
 #      the DECODE PATH, and it does NOT license any claim about real-world photographs.
 #
 #  NOT covered here:
-#   - the wheel sector / the text window / "open in browser" are NOT wired yet (the UI cut is a
-#     separate slice). What is checked is the catalog entry (S19.07) and the engine + headless
-#     path.
-#   - the worker dispatch arm for op=read-qr is NOT exercised at runtime by this suite: nothing
-#     on the command line can ask the WORKER for a read-qr job today, and this suite refuses to
-#     invent one (see S19.06, which checks the dispatcher and the unknown-op message against the
-#     source instead).
 #   - recognition of photographed / printed / perspective-distorted codes: UNMEASURED.
+#
+#  !! 2026-10-07 (UI cut): S19.10-S19.16 were added and two entries of the list above are no longer
+#  true, so they are corrected here rather than left to mislead a reader of a green run:
+#   - the wheel sector / the text window / "open in browser" ARE wired now. S19.12-S19.16 assert the
+#     classification, the text window (character for character) and the browser seam; the wheel
+#     ICON for the fifth sector is a drawing (see --wheel-dump) and is NOT asserted here.
+#   - the worker dispatch arm for op=read-qr IS exercised at runtime now: --qr-worker starts a real
+#     worker process and the text is re-derived from the client's own output line (S19.10), and the
+#     WORKER's log is read as a second, independent witness that the process really ran (S19.11).
 # =============================================================================
 
 # The output of one `--read-qr` run.
@@ -1521,6 +1531,261 @@ function Invoke-S19 {
     ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr') -and
      (($opsInWorkerProtocol -join '/') -eq ($dispatchOps -join '/'))) `
     "declared=($($opsInWorkerProtocol -join '/')) dispatch=($($dispatchOps -join '/'))"
+
+  # ============================================================================
+  #  S19.10-S19.16: THE UI CUT (2026-10-07). What the user ruled:
+  #    1. reading a QR produces NO file;
+  #    2. a url opens in the default browser;
+  #    3. anything else is shown on screen and can be copied;
+  #    4. ONLY http and https may reach ShellExecute (a QR can carry any string, and file://,
+  #       javascript:, ms-msdt:, search-ms: through ShellExecute means a PICTURE can start a local
+  #       program). Everything else takes the "show the text" road.
+  #  Every check below re-derives its answer from the product's OWN output lines. None of them
+  #  trusts an ok=True, an opened=True or a count the product prints about itself.
+  # ============================================================================
+
+  # ---------------------------------------------------------------- S19.10 the worker RUNTIME path
+  # THE GAP THE PREVIOUS SLICE HONESTLY RECORDED: the dispatch arm for op=read-qr had no runtime
+  # assertion behind it (nothing on the command line could ask the worker for a read-qr job), so it
+  # was covered by reading the source instead. --qr-worker closes it: a real worker process, the
+  # real pipe, and the assertion is that the text the CLIENT received is character for character
+  # the known 42-char payload. The fixture is copied into a fresh folder first, so "no file was
+  # written" is measured on a whole-directory snapshot.
+  $qrWdir = Join-Path $Work 'qr-worker'
+  New-Item -ItemType Directory -Force -Path $qrWdir | Out-Null
+  $qrWsrc = Join-Path $qrWdir 'qr-clean-512x512.png'
+  Copy-Item -LiteralPath $fClean -Destination $qrWsrc -Force
+  $qrWBefore = @(Get-ChildItem -LiteralPath $qrWdir -File | Sort-Object Name |
+                 ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" })
+  $qrWSha = Get-Sha $qrWsrc
+  # The wall clock right before the run: a worker writes its log at the END of its life, so every
+  # log that belongs to THIS invocation was written after this instant (a stale one from an earlier
+  # suite run is older). Measured 2026-10-07: an earlier draft looked back 120 s and picked up a
+  # worker log from a run six minutes earlier - it happened to be a read-qr log, so the check stayed
+  # green, but it was green for the wrong reason.
+  $qrWStart = Get-Date
+  $qrW = Invoke-Confern 'qr-worker' @('--qr-worker', $qrWsrc)
+  $qrWAfter = @(Get-ChildItem -LiteralPath $qrWdir -File | Sort-Object Name |
+                ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" })
+  $qrWLine = Get-LogLine $qrW.Lines 'tool qr-worker: text='
+  $qrWText = ''
+  $qrWChars = -1
+  if ($qrWLine -match 'tool qr-worker: text=(.*) chars=(\d+)$') {
+    $qrWText = $Matches[1]; $qrWChars = [int]$Matches[2]
+  }
+  $qrWSent = Test-Log $qrW.Lines 'worker: job 1 sent .*op=read-qr'
+  Check 'S19.10 op=read-qr really runs in the WORKER process: the client receives the known 42-char payload (re-derived from its own output line), and nothing is written' `
+    (($qrW.Exit -eq 0) -and $qrWSent -and ($qrWText -ceq $payload) -and ($qrWChars -eq 42) -and
+     (($qrWBefore -join "`n") -eq ($qrWAfter -join "`n")) -and ((Get-Sha $qrWsrc) -eq $qrWSha)) `
+    "exit=$($qrW.Exit) opSent=$qrWSent chars=$qrWChars identical=$($qrWText -ceq $payload) dirUnchanged=$((($qrWBefore -join '|') -eq ($qrWAfter -join '|'))) text='$qrWText'"
+
+  # ---------------------------------------------------------------- S19.11 the worker's OWN log
+  # A SECOND, INDEPENDENT WITNESS that a worker process really ran. One worker = one log file
+  # (WorkerLog.ForJob), and this check reads the logs that appeared DURING the run above - so a
+  # future refactor that quietly made --qr-worker call the engine in-process would leave the
+  # client's line green and this one red. That is the failure mode this check exists for.
+  $wlogDir = Join-Path $env:LOCALAPPDATA 'Confern'
+  $wlogAfter = @()
+  if (Test-Path -LiteralPath $wlogDir) { $wlogAfter = @(Get-ChildItem -LiteralPath $wlogDir -Filter 'worker-*.log' | ForEach-Object { $_.FullName }) }
+  $qrWorkers = @()
+  foreach ($w in $wlogAfter) {
+    if ((Get-Item -LiteralPath $w).LastWriteTimeUtc -ge $qrWStart.ToUniversalTime().AddSeconds(-2)) {
+      $qrWorkers += $w
+    }
+  }
+  # The decisive filter: the worker's own record of the job it was asked to do.
+  $qrWorkerHit = ''
+  foreach ($w in $qrWorkers) {
+    $wl = Get-LogLines $w
+    if ((Test-Log $wl 'worker job \d+: files=1 target= quality=100 op=read-qr') -and
+        (Test-Log $wl 'read-qr: .* decoded in the first-pass, \d+ ms total; NO file is written by this tool') -and
+        (Test-Log $wl 'worker job \d+ done: ok=1 failed=0')) { $qrWorkerHit = $w; break }
+  }
+  Check 'S19.11 a WORKER process really ran op=read-qr (its own log file names the op and says ok=1; no file is written)' `
+    ($qrWorkerHit -ne '') `
+    "workerLogsTouched=$($qrWorkers.Count) match='$qrWorkerHit' line='$(Get-LogLine (Get-LogLines $qrWorkerHit) 'worker job')'"
+
+  # ---------------------------------------------------------------- S19.12 the classification
+  # THE PURE FUNCTION IS THE SAFETY BOUNDARY, so it is enumerated here instead of being inferred
+  # from one happy run. The 18 expectations are listed in this script (NOT derived from the
+  # product): deriving them from the product would assert nothing. The verdicts are re-read from
+  # the product's own `qr classify:` lines.
+  $qrCls = Invoke-Confern 'qr-classify' @('--qr-classify-selftest')
+  $cls = @{}
+  $clsLines = 0
+  foreach ($line in $qrCls.Lines) {
+    if ($line -notmatch "qr classify: input='") { continue }
+    $clsLines++
+    $mi = [regex]::Match([string]$line, "input='((?:\\.|[^'])*)' chars=(\d+) expected=(\w+) got=(\w+) target='((?:\\.|[^'])*)' ok=(\w+)")
+    if ($mi.Success) {
+      $cls[$mi.Groups[1].Value] = [pscustomobject]@{
+        Chars = [int]$mi.Groups[2].Value; Expected = $mi.Groups[3].Value
+        Got = $mi.Groups[4].Value; Target = $mi.Groups[5].Value; Ok = $mi.Groups[6].Value
+      }
+    }
+  }
+  $clsTable = @(
+    @{ Input = 'http://example.com';                          Expect = 'url' },
+    @{ Input = 'https://example.com/a?b=c#d';                 Expect = 'url' },
+    @{ Input = 'HTTPS://EXAMPLE.COM';                         Expect = 'url' },
+    @{ Input = 'http://192.168.1.10:8080/x';                  Expect = 'url' },
+    @{ Input = '  https://example.com/pad  ';                 Expect = 'url' },
+    @{ Input = 'file:///C:/Windows/System32/calc.exe';        Expect = 'text' },
+    @{ Input = 'javascript:alert(1)';                         Expect = 'text' },
+    @{ Input = 'ms-msdt:/id PCWDiagnostic';                   Expect = 'text' },
+    @{ Input = 'search-ms:query=secret';                      Expect = 'text' },
+    @{ Input = 'ftp://example.com/file';                      Expect = 'text' },
+    @{ Input = 'mailto:a@b.c';                                Expect = 'text' },
+    @{ Input = 'Confern QR fixture 2026-10-07 / payload-v1';  Expect = 'text' },
+    @{ Input = 'http';                                        Expect = 'text' },
+    @{ Input = 'http:example.com';                            Expect = 'text' },
+    @{ Input = 'http://';                                     Expect = 'text' },
+    @{ Input = 'https:///path-only';                          Expect = 'text' },
+    @{ Input = '';                                            Expect = 'empty' },
+    @{ Input = '   ';                                         Expect = 'empty' }
+  )
+  $clsBad = @()
+  foreach ($t in $clsTable) {
+    if ($FaultInjection -eq 'qr-classify') { $t.Expect = 'url' }
+    $got = $cls[$t.Input]
+    $wantTarget = ($t.Expect -eq 'url')
+    $hasTarget = ($null -ne $got) -and ($got.Target -ne '(none)') -and ($got.Target -ne '')
+    if (($null -eq $got) -or ($got.Got -ne $t.Expect) -or ($got.Ok -ne 'True') -or ($hasTarget -ne $wantTarget)) {
+      $clsBad += "'$($t.Input)' expected=$($t.Expect) got=$(if ($null -ne $got) { $got.Got } else { '(missing)' })"
+    }
+  }
+  Check 'S19.12 the url classification matches all 18 expectations re-derived from the product (and the browser target agrees with the verdict)' `
+    (($qrCls.Exit -eq 0) -and ($clsLines -eq 18) -and ($clsBad.Count -eq 0) -and
+     (Test-Log $qrCls.Lines 'qr classify selftest done: cases=18 mismatches=0 ok=True') -and
+     (-not (Test-Log $qrCls.Lines 'qr classify selftest done: .*ok=False'))) `
+    "exit=$($qrCls.Exit) parsedLines=$clsLines mismatches=$($clsBad.Count) $(if ($clsBad.Count -gt 0) { $clsBad -join ' ; ' } else { 'all 18 agree' })"
+
+  # ---------------------------------------------------------------- S19.13 the text window
+  # The fixture's payload is NOT a url, so this run takes the "show the text" road. Every answer
+  # below is re-derived from the product's output lines: the decoded length and the window's
+  # length are two independent numbers from two different code paths (the engine and the WPF
+  # TextBox), and they have to be the same number - that is the character-for-character half.
+  # The other half is that the WINDOW's string is the one the decoder produced: the window length
+  # equals the decoded length AND the fixture's known payload is the decoded string.
+  $qrOpen = Invoke-Confern 'qr-open' @('--qr-open-selftest', '--qr-source', $fClean)
+  $decLine = Get-LogLine $qrOpen.Lines 'qr open selftest: fixture='
+  $winLine = Get-LogLine $qrOpen.Lines 'qr open selftest: window text '
+  $routeLine = Get-LogLine $qrOpen.Lines 'qr open selftest: routed kind='
+  $decChars = -1; $winChars = -1
+  if ($decLine -match 'fixture=(\S+) ok=(\w+) error=(\w+) chars=(\d+)$') { $decChars = [int]$Matches[4] }
+  if ($winLine -match 'window text chars=(-?\d+) decoded chars=(\d+) identical=(\w+)') {
+    $winChars = [int]$Matches[1]
+    if ($FaultInjection -eq 'qr-text') { $winChars = $winChars + 1 }   # the injected wrong expectation
+  }
+  $routedText = Test-Log $qrOpen.Lines 'qr open selftest: routed kind=text opened=True'
+  Check 'S19.13 a non-url payload really opens the text window, and the window holds the decoded string character for character' `
+    (($qrOpen.Exit -eq 0) -and $routedText -and ($decChars -eq 42) -and ($winChars -eq $decChars) -and
+     ($payload.Length -eq $decChars) -and (Test-Log $qrOpen.Lines 'window text chars=42 decoded chars=42 identical=True')) `
+    "exit=$($qrOpen.Exit) routedText=$routedText decodedChars=$decChars windowChars=$winChars payloadChars=$($payload.Length) line='$winLine'"
+
+  # ---------------------------------------------------------------- S19.14 the negative cases
+  # The three schemes the user named. If a future edit turns the classifier into "anything that
+  # looks like a scheme is a url", these go red - and they are the reason the browser seam exists.
+  # The expectations here are the user's ruling, written out: these must NOT be opened.
+  $mustNotOpen = @('file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'search-ms:query=secret')
+  $danger = @()
+  foreach ($d in $mustNotOpen) {
+    $got = $cls[$d]
+    if (($null -eq $got) -or ($got.Got -ne 'text') -or (($got.Target -ne '(none)') -and ($got.Target -ne ''))) {
+      $danger += "$d -> $(if ($null -ne $got) { "$($got.Got)/$($got.Target)" } else { '(missing)' })"
+    }
+  }
+  $extraUrlLine = Get-LogLine $qrOpen.Lines 'qr open selftest: extra url'
+  $extraIsUrl = $extraUrlLine -match 'kind=url routed=True'
+  Check 'S19.14 file:// javascript: and search-ms: are NOT urls (they are never handed to the browser), while a real http url IS routed as a url' `
+    (($danger.Count -eq 0) -and $extraIsUrl -and
+     (Test-Log $qrOpen.Lines "qr classify: input='file:///C:/Windows/System32/calc.exe' chars=36 expected=text got=text target='\(none\)' ok=True") -and
+     (Test-Log $qrOpen.Lines "qr classify: input='javascript:alert\(1\)' chars=19 expected=text got=text target='\(none\)' ok=True") -and
+     (Test-Log $qrOpen.Lines "qr classify: input='search-ms:query=secret' chars=22 expected=text got=text target='\(none\)' ok=True")) `
+    "dangerousWrong=$($danger.Count) $(if ($danger.Count -gt 0) { $danger -join ' ; ' } else { 'all three are text with no target' }) extraUrl='$extraUrlLine'"
+
+  # ---------------------------------------------------------------- S19.15 the safety assertion
+  # THE MOST IMPORTANT CHECK OF THIS SLICE. The suite runs on the user's machine, and a browser
+  # popping up is a side effect on their desktop. The browser door is a seam: in selftest mode the
+  # REAL implementation (the one that calls Process.Start with UseShellExecute) is replaced, and it
+  # counts its own attempts. So "no browser was launched" is asserted twice over: the real
+  # implementation was never entered (realLaunchAttempts=0) AND the browser process count before
+  # and after the request is the same (an outside measurement, not the product's own claim).
+  $safeLine = Get-LogLine $qrOpen.Lines 'qr open selftest: safety:'
+  $seamOk = $false; $realAttempts = -1; $browsersBefore = -1; $browsersAfter = -1
+  if ($safeLine -match 'seamOpened=(\w+) seamError=(\S+) realLaunchAttempts=(\d+) browsersBefore=(\d+) browsersAfter=(\d+)') {
+    $realAttempts = [int]$Matches[3]
+    $browsersBefore = [int]$Matches[4]
+    $browsersAfter = [int]$Matches[5]
+    $seamOk = ($Matches[1] -eq 'True') -and ($realAttempts -eq 0) -and ($browsersBefore -eq $browsersAfter)
+  }
+  Check 'S19.15 the browser path was exercised through the seam and NO real browser was started (real implementation never entered, browser process count unchanged)' `
+    ($seamOk -and (Test-Log $qrOpen.Lines 'noRealBrowser=True') -and
+     (Test-Log $qrOpen.Lines 'qr open selftest done: ok=True') -and
+     (Test-Log $qrOpen.Lines 'realBrowserLaunches=0')) `
+    "realLaunchAttempts=$realAttempts browsersBefore=$browsersBefore browsersAfter=$browsersAfter seamOk=$seamOk line='$safeLine'"
+
+  # ---------------------------------------------------------------- S19.16 existing behaviour intact
+  # This cut touched Program.cs, ConversionClient and ConversionRunner - all three are on the paths
+  # the earlier checks (and the earlier suites) depend on. So the entry points those checks use are
+  # re-asserted here, plus the two new switches have to be documented exactly once each.
+  $helpQr = Invoke-ConfernStdout 'help-qr-ui' @('--help')
+  # The usage text is joined into ONE string and searched with [regex]::Matches instead of piping
+  # lines into Select-String: measured 2026-10-07, `Select-String -SimpleMatch '--read-qr <path>'`
+  # did NOT match the real line (angle brackets are not wildcards, so the mismatch is a
+  # line/pipeline artefact, and the reported line had become `--read-qr path)`). Counting on one
+  # joined string is unambiguous.
+  #
+  # The anchor is load-bearing, and it was measured: a plain count of `--qr-open-selftest` is TWO,
+  # because ANOTHER switch's description mentions it (`--qr-extra-url ... with --qr-open-selftest`).
+  # What has to be unique is the DEFINITION - the switch at the start of a line - so that is what
+  # this counts; an anchored count of 1 also catches a switch that was accidentally defined twice.
+  $helpQrText = ($helpQr.Lines -join "`n")
+  $helpQrDoc = 0
+  foreach ($sw in @('--qr-worker <path>', '--qr-classify-selftest', '--qr-open-selftest')) {
+    $n = [regex]::Matches($helpQrText, '(?m)^\s+' + [regex]::Escape($sw)).Count
+    if ($n -eq 1) { $helpQrDoc++ }
+  }
+  $tlQr = Invoke-Confern 'tools-list-qr-ui' @('--tools-list')
+  Check 'S19.16 nothing existing broke: --help still documents the three new switches exactly once, and the tool layer still lists all five sectors' `
+    (($helpQrDoc -eq 3) -and (Test-Log $helpQr.Lines '--read-qr <path>') -and
+     (Test-Log $tlQr.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]')) `
+    "documentedExactlyOnce=$helpQrDoc/3 toolsLine='$(Get-LogLine $tlQr.Lines 'tool list: count=')'"
+
+  # ---------------------------------------------------------------- S19.17 the fifth tool icon
+  # THE FIRST THING THIS SLICE HAD TO FIX: DrawToolIcon's switch had no default, so the fifth tool
+  # was drawn as NOTHING (a blank sector that looks exactly like a busy one at 17 px).
+  #
+  # A missing icon cannot be caught in the PNG, and that was MEASURED rather than assumed: sampling
+  # an annulus over the sector and counting light pixels on the dark backdrop gives
+  # 513/447/613/411/433 with the fifth icon and 513/447/613/411/433 with it removed - the sector
+  # LABEL glyphs dominate the count, so no pixel threshold is defensible here. What is asserted
+  # instead is the DRAWING's own report: DrawToolIcon returns whether it drew anything, the
+  # presenter counts that per sector, and a `default`-less switch now returns false.
+  $iconSrc = Join-Path $repo 'src\Sidecar\Visual\WheelPresenter.cs'
+  $iconLines = @()
+  if (Test-Path -LiteralPath $iconSrc) { $iconLines = @(Get-Content -LiteralPath $iconSrc -Encoding UTF8) }
+  # The presenter must still END with a `return false;` where the old switch ended silently: that is
+  # the line a new ToolIcon value (or a forgotten case) falls through to. The count in the source is
+  # not pinned - only "the guard is still there" - so an unrelated edit to the file is not punished
+  # while deleting the guard is.
+  $iconNoMatchGuard = (@($iconLines | Select-String -Pattern 'return false;' -SimpleMatch).Count -ge 1)
+  $wheel = Invoke-Confern 'wheel-tools-icons' @('--wheel-demo', '600', '400', '--wheel-tools',
+                                               '--wheel-dump', (Join-Path $Work 'wheel-tools.png'),
+                                               '--wheel-backdrop', 'dark')
+  $iconLine = Get-LogLine $wheel.Lines 'visual demo tool icons:'
+  $iconRe = [regex]::Match([string]$iconLine, 'drawn=(\d+)/(\d+) icons=\[([^\]]*)\]')
+  $iconOk = $false
+  if ($iconRe.Success) {
+    $iconOk = ([int]$iconRe.Groups[1].Value -eq 5) -and ([int]$iconRe.Groups[2].Value -eq 5) -and
+              ($iconRe.Groups[3].Value -match '\bReadQr\b')
+  }
+  $dumpSize = 0
+  $dumpPath = Join-Path $Work 'wheel-tools.png'
+  if (Test-Path -LiteralPath $dumpPath) { $dumpSize = (Get-Item -LiteralPath $dumpPath).Length }
+  Check 'S19.17 the fifth tool sector really draws an icon: the drawing reports 5/5 drawn, ReadQr is among them, and the switch no longer ends silently' `
+    ($iconOk -and $iconNoMatchGuard -and ($dumpSize -gt 0)) `
+    "line='$iconLine' dumpBytes=$dumpSize noMatchGuard=$iconNoMatchGuard"
 }
 
 # ------------------------------------------------------------------ main
@@ -1534,7 +1799,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 foreach ($s in $sections) {
   switch ($s) {
     'S18' { Expect 39; Invoke-S18 }
-    'S19' { Expect 10; Invoke-S19 }
+    'S19' { Expect 18; Invoke-S19 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

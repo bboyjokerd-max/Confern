@@ -151,6 +151,10 @@ internal sealed class WheelPresenter
         _caption = caption;
         _icons = icons;
         _mode = mode;
+        // 圖示的計數每一輪從零開始（見 DrawnToolIcons）：留著上一輪的數字會讓「這一輪少畫一個」
+        // 看起來像正常——那正是這個計數要防的那種靜默錯誤。
+        _iconsDrawn = 0;
+        _iconsDrawnLabels.Clear();
         _notice = notice;
         _sourceThumbnail = sourceThumbnail;
 
@@ -546,18 +550,46 @@ internal sealed class WheelPresenter
             float ly = cy + (float)(Math.Sin(mid) * r * ratio);
             var ink = i == _selected ? bright : dim;
             if (_mode == WheelMode.Tool && _icons != null && i < _icons.Count)
-                DrawToolIcon(g, _icons[i], ink, lx, ly - iconLift);
+            {
+                if (DrawToolIcon(g, _icons[i], ink, lx, ly - iconLift))
+                {
+                    _iconsDrawn++;
+                    _iconsDrawnLabels.Add($"{_icons[i]}");
+                }
+            }
             g.DrawString(_targets[i], font, ink,
                          new RectangleF(lx - 40, ly - 12 + iconLift, 80, 24), format);
         }
     }
 
     /// <summary>
+    /// 這一輪真的畫出來的工具圖示數（工具輪盤專用；<see cref="Show"/> 每次都歸零）。
+    ///
+    /// 為什麼要有這個計數：`DrawToolIcon` 的 <c>switch</c> **沒有 default**，所以第五顆工具
+    /// 在 2026-10-07 之前是**空白圖示**——而畫面上「少一個圖示」與「那個扇區本來就沒有圖示」
+    /// 從一張點陣圖上分不出來（實測 2026-10-07：對工具輪盤的 PNG 量每個扇區的墨水，五格是
+    /// 513/447/613/411/433，差了 118 個像素——而**標籤字本身的墨水遠大於圖示**，
+    /// 所以那個差在腳本裡挑不出一個站得住的門檻）。
+    /// 這裡改成讓**真正的那個 switch** 自己回報「我有沒有畫東西」：有 default 時回 false。
+    /// 計數因此與繪製同一個來源，不可能是第二份規則（比在測試裡用幾何猜位置可靠得多）。
+    /// </summary>
+    public int DrawnToolIcons => _iconsDrawn;
+
+    /// <summary>畫出來的那幾個圖示（診斷輸出用，順序＝扇區順序）。</summary>
+    public IReadOnlyList<string> DrawnToolIconLabels => _iconsDrawnLabels;
+
+    private int _iconsDrawn;
+    private readonly List<string> _iconsDrawnLabels = new();
+
+    /// <summary>
     /// 工具扇區的線稿圖示。**全部用程式繪製、用既有的墨水色**（<see cref="WheelDesign.Label"/>）：
     /// 本專案沒有圖示資產，而引進一張 PNG 會同時破壞「配色唯一權威」與離線不變式。
     /// 圖示尺寸取自 <see cref="WheelDesign.ToolIconPx"/>，不在此硬編。
+    ///
+    /// 回傳值＝**這個圖示真的有被畫出來**（每一個 <c>case</c> 都回 true）。這不是額外的邏輯，
+    /// 而是讓「少一個 case」變成當場看得見的事實，見 <see cref="DrawnToolIcons"/>。
     /// </summary>
-    private static void DrawToolIcon(Graphics g, ToolIcon icon, Brush ink, float cx, float cy)
+    private static bool DrawToolIcon(Graphics g, ToolIcon icon, Brush ink, float cx, float cy)
     {
         float s = WheelDesign.ToolIconPx;
         using var pen = new Pen(ink, Math.Max(1.4f, s / 9f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
@@ -573,7 +605,7 @@ internal sealed class WheelPresenter
                 float a = s * 0.22f;
                 g.DrawLine(pen, ax, ay, ax - a, ay - a * 0.2f);
                 g.DrawLine(pen, ax, ay, ax + a * 0.2f, ay + a);
-                break;
+                return true;
 
             case ToolIcon.StripMetadata:
                 // 標籤（tag）＋ 斜線：**被劃掉的標籤**。標籤的尖角朝左、右邊是矩形，
@@ -596,7 +628,7 @@ internal sealed class WheelPresenter
                 g.FillEllipse(ink, cx - s * 0.12f, cy - s * 0.08f, s * 0.16f, s * 0.16f);
                 // 斜線畫在標籤**上面**（同一支筆、同一個墨水色）：這條線就是「去掉」的意思本體。
                 g.DrawLine(pen, cx - s * 0.52f, cy + s * 0.52f, cx + s * 0.52f, cy - s * 0.52f);
-                break;
+                return true;
 
             case ToolIcon.Compress:
                 // 兩個相向的箭頭：上箭頭往下、下箭頭往上，箭尖在圓心相遇（＝往中間壓）。
@@ -617,7 +649,7 @@ internal sealed class WheelPresenter
                 g.DrawLine(pen, cx - wing, cy + wing, cx, cy + tip);
                 g.DrawLine(pen, cx + wing, cy + wing, cx, cy + tip);
                 g.DrawLine(pen, cx, cy + wing, cx, cy + s * 0.48f);
-                break;
+                return true;
 
             case ToolIcon.Crop:
                 // 斜的裁切框 ＋ 兩條對角線（「這是一塊選取範圍」）。全部由 s 推導（與其他三顆同一個規矩）。
@@ -642,8 +674,47 @@ internal sealed class WheelPresenter
                                 cx + halfW - skew - inset, cy + halfH - inset);
                 g.DrawLine(pen, cx + halfW + skew - inset, cy - halfH + inset,
                                 cx - halfW - skew + inset, cy + halfH - inset);
-                break;
+                return true;
+
+            case ToolIcon.ReadQr:
+                // QR 的**三個尋像圖案＋右下角的資料點**（`ToolIcon.ReadQr` 的註解說明為什麼是這三個框）。
+                //
+                // 為什麼不是「一整塊點陣方格」：17px 之下點陣方格會糊成一塊灰，而這個專案的其他四顆
+                // 都是**線稿**（見 DrawToolIcon 的類別說明）——實心塊會比另外四顆重一個級別，
+                // 在同一顆輪盤上一眼就看得出來「這一顆是貼上去的」。三個框則是同一種線稿語言。
+                //
+                // 尺寸全部由 s 推導（與另外四顆同一個規矩）：
+                //   · 三個框＝邊長 0.24s 的正方形，圓心距輪心 0.30s（左上／右上／左下）；
+                //   · 右下角四個小點＝資料區的示意，放在框外圍的對角線上（0.28s 與 0.40s）。
+                //
+                // 實測（17px，筆寬 max(1.4, s/9) ≈ 1.89px）：框與框之間的水平淨空
+                // 2*(0.30s − 0.12s) − 1.89 ≈ 4.2px；最近的那個點與框內緣相距
+                // (0.28s − 0.045s) − (0.30s − 0.12s) ≈ 0.055s ≈ 0.9px，加上點自己的半徑 0.045s
+                // 之後仍留得住約 1.6px——四個記號不會糊成一團（這是 Crop 那一顆同一條紀律：
+                // 相鄰記號的淨空必須大於筆寬的一半）。
+                float qb = s * 0.24f;          // 框的邊長
+                float qd = s * 0.30f;          // 框心到輪心的距離
+                float qr = qb / 2f;
+                g.DrawRectangle(pen, cx - qd - qr, cy - qd - qr, qb, qb);   // 左上
+                g.DrawRectangle(pen, cx + qd - qr, cy - qd - qr, qb, qb);   // 右上
+                g.DrawRectangle(pen, cx - qd - qr, cy + qd - qr, qb, qb);   // 左下
+                // 資料點：**實心**（與 StripMetadata 的穿孔同一種作法——直接用扇區的墨水筆刷，
+                // 選中／未選中的兩段不透明度因此自動跟著走，不會多出一個要同步的顏色）。
+                float dr = Math.Max(1f, s * 0.045f);
+                for (int row = 0; row < 2; row++)
+                {
+                    for (int col = 0; col < 2; col++)
+                    {
+                        float dx = (0.28f + 0.12f * col) * s;
+                        float dy = (0.28f + 0.12f * row) * s;
+                        g.FillEllipse(ink, cx + dx - dr, cy + dy - dr, dr * 2, dr * 2);
+                    }
+                }
+                return true;
         }
+        // 沒有任何 case 命中（＝`ToolIcon` 多了一個值而這裡忘了畫）：**大聲回報「沒畫」**。
+        // 這一行取代了 2026-10-07 之前那個空的 switch 尾巴——它當時讓第五顆工具靜默地變成空白圖示。
+        return false;
     }
 
     private void DrawEmptyWheel(Graphics g, float cx, float cy, float r)

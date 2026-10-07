@@ -14,6 +14,20 @@ internal sealed record ConversionSnapshot(int Done, int Total, string? Current, 
     public static readonly ConversionSnapshot Idle =
         new(0, 0, null, true, 0, 0, Array.Empty<string>(), null, Array.Empty<string>());
 
+    /// <summary>
+    /// 讀 QR 的產物（`op=read-qr` 專用，2026-10-07 切片 2 新增）。
+    ///
+    /// **為什麼要進快照**：<c>QrText</c> 是**唯一一個不是檔案的產物**，所以它沒有
+    /// <c>OutputPath</c> 可以走——而 UI 這邊「拿到結果」的唯一通道就是這份不可變快照
+    /// （見 <see cref="ConversionRunner.Snapshot"/>）。把它放在快照上，等於讓它與
+    /// 「成功／失敗、進度、失敗清單」同一條路徑出去；另外開一條事件或第二個通道
+    /// 就是讓第二個擁有者去回答同一件事（本專案對這種分歧的代價有紀錄）。
+    ///
+    /// <c>null</c> 的缺席語意＝「這個結果沒有文字」：其餘每一個 op 的行為，也與
+    /// worker 端 <c>WorkerMessage.text</c> 的缺席語意一對一（<c>WhenWritingNull</c>）。
+    /// </summary>
+    public string? QrText { get; init; }
+
     public bool Running => !Finished;
 
     /// <summary>輪盤收起處顯示的**那一行**（規格 §4.4／§7.3）。</summary>
@@ -163,7 +177,11 @@ internal sealed class ConversionClient : IDisposable
                 ConversionSnapshot current = _snapshot;
                 _snapshot = new ConversionSnapshot(current.Done, current.Total, null, true,
                                                    current.Ok, current.Failed, current.Failures,
-                                                   "轉檔服務中斷", current.FailureFiles);
+                                                   "轉檔服務中斷", current.FailureFiles)
+                {
+                    // 管道在 summary 之前就斷了也要留住已經收到的產物（理由見 Summary 那一格）。
+                    QrText = current.QrText
+                };
             }
         };
         _link.Start();
@@ -266,15 +284,30 @@ internal sealed class ConversionClient : IDisposable
                     }
                 }
                 _snapshot = new ConversionSnapshot(message.done, message.total, message.current,
-                                                   false, ok, failed, failures, null, failureFiles);
+                                                   false, ok, failed, failures, null, failureFiles)
+                {
+                    // 工具 read-qr 的產物：**原封不動**（不 trim、不截斷）。
+                    // 這個欄位是產物本身而不是排版，呼叫端要斷言的是「worker 解出來的每一個字元」
+                    // 有沒有原樣到達 UI；在這裡加工一次，兩端就不可能逐字元相同了。
+                    QrText = message.text
+                };
                 _log($"worker result: ok={message.ok} output={message.outputPath ?? "-"} " +
                      $"error={message.errorCode} message={message.message}");
                 break;
 
             case WorkerMessageTypes.Summary:
+                // ⚠ `QrText` **一定要帶過來**（2026-10-07 實測踩到）：一個 job 的收尾訊息是
+                //    result 之後的 summary，而 summary 會組一份**新的**快照。少了這一行，
+                //    「worker 解出來的文字」會在結果訊息之後的幾毫秒內被一份沒有文字的快照蓋掉
+                //    ——量到的症狀正是 `worker result: ... textChars=42` 緊接著
+                //    `qr worker snapshot: ... line='✓ 1'` 而 `chars=0`。它與失敗清單同一條規矩：
+                //    這一則訊息不重述那個欄位，但**不可以把它清掉**。
                 _snapshot = new ConversionSnapshot(message.done, message.total, null, true,
                                                    message.okCount, message.failedCount, failures,
-                                                   null, failureFiles);
+                                                   null, failureFiles)
+                {
+                    QrText = current.QrText
+                };
                 _log($"worker summary: ✓ {message.okCount} / ✗ {message.failedCount}");
                 break;
 
@@ -283,7 +316,10 @@ internal sealed class ConversionClient : IDisposable
                 _snapshot = new ConversionSnapshot(done, total, null, true, ok, failed, failures,
                                                    message.code == WorkerErrorCodes.ProtocolMismatch
                                                        ? "轉檔服務版本不符" : "轉檔服務錯誤",
-                                                   failureFiles);
+                                                   failureFiles)
+                {
+                    QrText = current.QrText
+                };
                 break;
         }
     }

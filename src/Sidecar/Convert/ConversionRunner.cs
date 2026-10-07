@@ -35,7 +35,14 @@ internal sealed class ConversionRunner : IDisposable
                       string? toolOp = null, string? outputDir = null,
                       CompressionPolicy? compression = null, CropSpec? crop = null)
     {
-        _progress.Start(x, y);
+        // 工具 read-qr **不顯示進度藥丸**（2026-10-07 切片 2）。藥丸的訊息是「N 個檔案、
+        // 成功幾個、失敗幾個」——那是**產出檔案**的語意，而這一顆工具的產物是一段文字，
+        // 沒有檔案、也沒有「幾個」可言。在畫面上為它顯示一個「✓ 1」的轉檔結果，
+        // 等於對使用者說了一件他沒有做的事（使用者裁定的語意：讀 QR 不產生任何檔案）。
+        // 其餘每一條路徑一個字都沒變。
+        string? op = toolOp;
+        bool showProgress = op != WorkerProtocol.OpReadQr;
+        if (showProgress) _progress.Start(x, y);
 
         // **一次工作一個 client**（實測教訓，2026-10-01）：
         // client 擁有「管道 + worker」，而管道名是一次性的（Guid）。若重用同一個 client，
@@ -43,7 +50,7 @@ internal sealed class ConversionRunner : IDisposable
         // 換一個新 client 同時也保證前一個 worker 被好好收掉，不會累積行程。
         ConversionClient? previous = _client;
         _client = new ConversionClient(_exePath, _log);
-        _progress.Source = () => _client?.Snapshot ?? ConversionSnapshot.Idle;
+        if (showProgress) _progress.Source = () => _client?.Snapshot ?? ConversionSnapshot.Idle;
         previous?.Dispose();
 
         try
@@ -55,7 +62,10 @@ internal sealed class ConversionRunner : IDisposable
                                compression: compression, crop: crop))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
-                ReportStartFailure(sourcePaths.Length);
+                // ⚠ 起不來時**也要**對 read-qr 說得出來：藥丸不顯示（見上面），但快照仍要標成
+                //    「結束＋失敗」，否則這一顆工具會停在「還在跑」的狀態，等待它的抽乾點永遠不動作，
+                //    「按了讀 QR 卻什麼都沒發生」就變成一個安靜的失敗（§7.2 禁止靜默失敗）。
+                ReportStartFailure(sourcePaths.Length, showProgress);
                 return false;
             }
             return true;
@@ -64,14 +74,22 @@ internal sealed class ConversionRunner : IDisposable
         {
             // 輪盤是常駐的，**任何**例外都不可以讓它消失：出錯就回報，程式繼續活著（§7.2）。
             _log($"conversion: start threw {ex.GetType().Name}: {ex.Message} -> reporting failure");
-            ReportStartFailure(sourcePaths.Length);
+            ReportStartFailure(sourcePaths.Length, showProgress);
             return false;
         }
     }
 
-    private void ReportStartFailure(int fileCount) =>
-        _progress.Update(new ConversionSnapshot(0, fileCount, null, true, 0, fileCount,
-                                                Array.Empty<string>(), "轉檔服務無法啟動"));
+    /// <summary>
+    /// 起 worker 失敗時的收尾。<paramref name="showProgress"/>＝false 時**不碰進度藥丸**，
+    /// 只把快照標成「結束＋失敗」（read-qr 那一條要靠它才不會永遠停在「正在跑」）。
+    /// </summary>
+    private void ReportStartFailure(int fileCount, bool showProgress = true)
+    {
+        var failed = new ConversionSnapshot(0, fileCount, null, true, 0, fileCount,
+                                            Array.Empty<string>(), "轉檔服務無法啟動");
+        if (showProgress) _progress.Update(failed);
+        _log($"conversion: reporting the failure in the snapshot (pill={showProgress})");
+    }
 
     /// <summary>等整批結束（診斷與自動驗證用；正常 UI 不呼叫它）。</summary>
     public ConversionSnapshot Wait(int timeoutMs)
