@@ -1,4 +1,4 @@
-# M3c verification: the compression tool (spec 9.4, the THIRD tool sector).
+﻿# M3c verification: the compression tool (spec 9.4, the THIRD tool sector).
 #
 #   -Exe <path to Confern.exe>   -Section S17   -LogDir <dir>
 #
@@ -474,11 +474,12 @@ function Invoke-S17 {
   # ---------------------------------------------------------------- the worker
   # The wheel's tool layer, committed for real: this is the only path that puts the op into
   # a job packet and sends it down the pipe (spec 9.1).
-  # NOTE (2026-10-07): the tool list is still FIVE here, and that is the expected result, not a
-  # stale assertion. `ToolCatalog.ToolsFor` only offers `merge-pdf` for a PDF source, and this
-  # payload is a JPEG, so the sixth tool is correctly absent. It is asserted that way on purpose:
-  # it is the check that catches "the new sector leaked into every format". m3d S20.12 asserts the
-  # other side (a PDF source sees six, a JPEG still sees five).
+  # NOTE (2026-10-08): the tool list for this JPEG payload is SIX, and the assertion below names
+  # every id rather than counting them. `ToolCatalog.ToolsFor` only offers `merge-pdf` for a PDF
+  # source, so that one is correctly absent while `remove-bg` (the seventh tool) IS present: it
+  # applies to any image. Naming the ids is what makes this check catch "a sector leaked into a
+  # format that cannot run it" without becoming a brittle count. m3d S20.12 asserts the other side
+  # (a PDF source sees seven, a JPEG sees six) and S18.03 asserts the union.
   $wd = Join-Path $Work 'worker'
   New-Item -ItemType Directory -Force -Path $wd | Out-Null
   $wOut = Join-Path $wd 'out'
@@ -487,6 +488,16 @@ function Invoke-S17 {
   Copy-Item -LiteralPath $noise -Destination $wSrc -Force
   $wCfg = Write-Cfg 'worker' ('{ "JpgQuality": 85, "WebpQuality": 85, "CompressionMode": "small", "OutputFolder": ' + (ConvertTo-Json $wOut) + ' }')
   $w = Invoke-Confern 'worker' @('--settings-file', $wCfg, '--wheel-payload', $wSrc, '--wheel-tools', '--wheel-tool', 'compress')
+  # !! 2026-10-08: this used to assert `tools=[...]` on the WHEEL line, and that assertion could
+  # never have passed: the product's wheel line ends with `layer=tool tools=6` and carries no id
+  # list at all - the ids are on the `ENTER: tool layer -> ...` line. Measured on this run:
+  #   wheel from OLE payload: files=1 status=Ready source=JPG targets=3 ... layer=tool tools=6
+  #   ENTER: tool layer -> index=2 op=compress tools=[rotate90,strip-metadata,compress,crop,read-qr,remove-bg]
+  # The check was red for that reason alone (every other clause of it passed). It is now asserted
+  # against the line that really exists, and the id list is asserted WHOLE, because what it has to
+  # catch is "a tool appeared in a format that cannot run it".
+  $toolLine = Get-LogLine $w.Lines 'ENTER: tool layer ->'
+  $toolIdsOk = [bool]($toolLine -match 'tools=\[rotate90,strip-metadata,compress,crop,read-qr,remove-bg\]')
   # The wheel diagnostic keeps exercising the layer afterwards, so the LAST job line is the
   # strip-metadata one; the compress job has to be picked out by its own op field.
   $jobLine = Get-LogLine $w.Lines 'worker: job \d+ sent .*op=compress'
@@ -494,11 +505,11 @@ function Invoke-S17 {
   # The worker's output must be byte-for-byte what the in-process engine produced for the
   # same source and the same level: that is what makes "the same engine" a measurement.
   $wLen = Get-FileLength (Join-Path $wOut 'photo.jpg')
-  Check 'S17.20 the wheel tool layer lists every sector, the compress op really travels to the worker process, and it returns the same bytes' `
-    (($w.Exit -eq 0) -and (Test-Log $w.Lines 'tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+  Check 'S17.20 the wheel tool layer lists every sector a JPEG can run, the compress op really travels to the worker process, and it returns the same bytes' `
+    (($w.Exit -eq 0) -and $toolIdsOk -and
      ($jobLine -match 'op=compress') -and ($finLine -match 'finished=True ok=1') -and
      ($wLen -gt 0) -and ($wLen -eq $small.OutLen)) `
-    "job='$jobLine' finished='$finLine' workerOut=${wLen}B inProcess=$($small.OutLen)B"
+    "toolLine='$toolLine' job='$jobLine' finished='$finLine' workerOut=${wLen}B inProcess=$($small.OutLen)B"
 }
 
 # ------------------------------------------------------------------ main

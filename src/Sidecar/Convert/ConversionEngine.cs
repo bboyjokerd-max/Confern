@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;                 // Int32Rect（裁切矩形用；WindowsBase）
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Microsoft.ML.OnnxRuntime;       // 只有工具 remove-bg 會用到（InferenceSession，見 RemoveBgModel）
 using PdfSharp.Pdf;                   // 只有工具 merge-pdf 會用到（PdfDocument／PdfPage）
 using PdfSharp.Pdf.IO;                // PdfReader／PdfDocumentOpenMode（只有工具 merge-pdf）
 using ZXing;                          // 只有工具 read-qr 會用到（BarcodeReaderGeneric／RGBLuminanceSource）
@@ -695,6 +696,276 @@ internal sealed class ConversionEngine
         return new ConversionResult(sourcePath, targetPath, ConversionError.None,
             $"{inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
             $"({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
+    }
+
+    /// <summary>
+    /// 工具：去背（工具 id `remove-bg`，M3 的第七顆扇形；規格 §9.4）。
+    ///
+    /// **輸出格式永遠是 PNG**，而且與來源**同尺寸**：這個工具的產物是「原圖減掉背景」，
+    /// 所以尺寸不可以變（變了就是另一個工具）。**一定要 PNG**——JPEG 沒有透明通道，
+    /// 存成 JPEG 會把 alpha 直接丟掉，使用者拿到一張看起來沒去背的圖。
+    ///
+    /// **管線**（每一段都與一個已量測的事實對應）：
+    /// <list type="number">
+    /// <item>解碼第一張畫格（WIC），**把 EXIF 方向先烤進像素**——矩形／模型都要看正立的人像，
+    /// 而且 PNG 的檢視器不讀方向標籤（與 <see cref="Crop"/> 同一條既有裁定）。</item>
+    /// <item>模型：解析路徑 → 檢查狀態 → 取（快取的）session，見 <see cref="RemoveBgModel"/>。
+    /// **三種狀態各有自己的錯誤碼**（缺檔／損壞／找不到主體），而且**都不寫任何檔案**。</item>
+    /// <item>前處理：短邊縮到 512、尺寸取整到 32 的倍數、**不補成正方形**（保持長寬比）。
+    /// ⚠ 這一條是量出來的裁定：直接拉伸成 512×512 的遮罩平均差 **0.26140**，而且人像被壓扁的
+    /// 變形**無法事後補救**（見 <see cref="RemoveBgModel"/> 的常數註解）。</item>
+    /// <item>推論（fp16，實測 72–115 ms／張；session 只建一次，139–190 ms）。</item>
+    /// <item>遮罩 → Bgra32 灰階 → **用實際張量尺寸當來源**放大回原尺寸 → 取 R 當 alpha。
+    /// ⚠ 放大**不可以**用理想比例回推：取整到 32 會讓張量長寬比與原圖微微不同
+    /// （實測 3000×2250 → 672×512，理想值是 682.67×512），用原尺寸回推會讓遮罩整體位移。</item>
+    /// <item>寫 **Bgra32 PNG**，走既有的命名（<see cref="NamingPolicy"/>，永不覆寫）與
+    /// 原子寫入（<see cref="AtomicWriter"/>），失敗重試由 <see cref="WriteWithCollisionRetry"/> 擁有。</item>
+    /// </list>
+    ///
+    /// <para>
+    /// <b>「找不到人像主體」的判準（這一刀最重要的一條產品語意）</b>：
+    /// 模型的輸出是**人像**遮罩，而它對非人像的圖會回一個近乎全空的遮罩。實測：
+    /// <code>
+    /// fixtures/qr/qr-small-in-scene-160.png  3000x2250  max=0.0165  mean=0.0001   &lt;- 非人像
+    /// NASA Leland Melvin 與兩隻狗（512x410 縮圖）        max=1.0000  mean=0.5241   &lt;- 人像
+    /// </code>
+    /// 門檻取 <see cref="EmptyMaskMax"/>／<see cref="EmptyMaskMean"/>（0.30／0.02）：
+    /// 兩個測資都離門檻很遠（非人像差 0.284／0.020，人像差 0.70／0.50），
+    /// 所以這不是一個在臨界值上跳舞的判定。判準是**聯集**（任一條成立就算找不到主體）——
+    /// 「整張幾乎全透明」與「只有零星幾個亮點」都是使用者拿不到主體的形狀。
+    ///
+    /// ⚠ **不做「全不透明」的第二種狀態**（規格 §9.4 的第三種失敗那一句的後半）：
+    /// 遮罩全亮時的產物是一張**與原圖一樣的 PNG**，那是「我沒切到東西」而不是「我切錯了」，
+    /// 所以它照樣輸出，而統計數字（min/max/mean）就在日誌那一行裡——使用者與驗收都看得到。
+    /// 不讓它變成第三個錯誤碼的理由是**不要發明一個產品沒有做決定的狀態**：規格沒有說
+    /// 「遮罩全亮時該拒絕還是輸出」，而拒絕一個內容正確的請求是更糟的預設。
+    /// </para>
+    ///
+    /// <param name="modelPath">
+    /// 模型檔路徑；null／空白＝預設位置（執行檔旁邊的 <c>models\model_fp16.onnx</c>）。
+    /// 這個參數存在的唯一理由是**診斷要能指向一個不存在的檔與一個被截斷的檔**，
+    /// 好讓「缺模型」與「模型損壞」這兩種狀態可以在驗收裡真的被走過。
+    /// </param>
+    /// <returns>
+    /// 成功＝<see cref="ConversionError.None"/> 且 <see cref="ConversionResult.OutputPath"/> 有值；
+    /// 三種失敗各自帶自己的錯誤碼，而且**輸出目錄裡不會有任何新檔案**。
+    /// </returns>
+    public ConversionResult RemoveBg(string sourcePath, string? modelPath = null,
+                                     TempJournal? journal = null, string? targetDirectory = null)
+    {
+        string? sourceFormat = _codecs.FormatOfPath(sourcePath);
+        if (sourceFormat == null)
+            return Fail(sourcePath, ConversionError.Unsupported, "extension is not in the format table");
+        if (_codecs.Capability(sourceFormat) is { Decode: DecodeSupport.No })
+            return Fail(sourcePath, ConversionError.Unsupported, $"no decoder for {sourceFormat}");
+        if (!AtomicWriter.Exists(sourcePath))
+            return Fail(sourcePath, ConversionError.SourceMissing, "source disappeared before remove-bg");
+
+        DecodeOutcome probe = _codecs.ProbeDecode(sourcePath);
+        if (probe.Status != DecodeStatus.Ok)
+            return Fail(sourcePath, MapDecodeStatus(probe.Status), probe.Detail);
+
+        // 輸出的容器與副檔名都是固定的，而且**由格式表提供**（這裡不自己寫 ".png" 這個字面值：
+        // 「PNG 的副檔名是什麼」是 CodecRegistry 的知識，第二份會走鐘）。
+        string? extension = _codecs.PrimaryExtension("PNG");
+        if (extension == null || CodecRegistry.CreateEncoder("PNG", 100) == null)
+            return Fail(sourcePath, ConversionError.TargetUnavailable,
+                "PNG is not an offered output in this build; remove-bg always writes PNG " +
+                "(JPEG has no alpha channel, so it cannot be the output here)");
+
+        // ---- 模型：三種狀態的第一種與第二種在這裡就結束（兩者都不寫檔）----
+        string resolvedModel = RemoveBgModel.ResolvePath(modelPath);
+        RemoveBgModel.ModelLoad load = RemoveBgModel.Check(resolvedModel, _log);
+        // 同一顆模型在一批裡只說一次（session 已經快取，逐檔重講只是洗版）；
+        // 但**換一顆模型一定要說**，否則「剛剛驗的是哪一顆」在日誌裡會說謊。
+        if (!string.Equals(_lastModelReported, resolvedModel, StringComparison.OrdinalIgnoreCase)
+            || load != RemoveBgModel.ModelLoad.Ready)
+        {
+            _lastModelReported = resolvedModel;
+            _log($"remove-bg: model state={load} path='{resolvedModel}' " +
+                 $"exists={AtomicWriter.Exists(resolvedModel)}");
+        }
+        if (load == RemoveBgModel.ModelLoad.Missing)
+            return Fail(sourcePath, ConversionError.ModelUnavailable,
+                $"no model file at '{resolvedModel}' (File.Exists=false); " +
+                $"the file has to be fetched first -- tools\\get-rembg-model.ps1 puts it at " +
+                $"{RemoveBgModel.DefaultFolderName}\\{RemoveBgModel.DefaultFileName} next to the executable");
+        if (load != RemoveBgModel.ModelLoad.Ready)
+            return Fail(sourcePath, ConversionError.ModelCorrupt,
+                $"the model at '{resolvedModel}' exists but could not be loaded " +
+                "(truncated download or not an ONNX file; measured: [ErrorCode:InvalidProtobuf] " +
+                "Protobuf parsing failed)");
+
+        string targetPath;
+        try
+        {
+            targetPath = NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory);
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(sourcePath)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        BitmapSource frame;
+        int frameCount;
+        try
+        {
+            (frame, frameCount) = DecodeFirstFrame(sourcePath);
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath,
+                MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, sourceFormat, sourcePath)),
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+        if (frameCount > 1)
+            _log($"note: {Path.GetFileName(sourcePath)} has {frameCount} frames; only the first is " +
+                 "cut out (the output is a single still PNG)");
+
+        int orientation = ReadOrientation(frame);
+        if (orientation >= 2)
+        {
+            frame = ApplyOrientation(frame, orientation);
+            _log($"remove-bg: EXIF={orientation} baked into pixels BEFORE the model runs " +
+                 $"({frame.PixelWidth}x{frame.PixelHeight}) -- PNG viewers do not read the tag, " +
+                 "and the output PNG carries no metadata at all");
+        }
+        int inW = frame.PixelWidth, inH = frame.PixelHeight;
+
+        // ---- 推論 ----
+        InferenceSession session = RemoveBgModel.TryGetSession(resolvedModel, _log, out _)!;
+        byte[] rgba;
+        int outW, outH;
+        RemoveBgModel.MaskStats stats;
+        try
+        {
+            RemoveBgModel.MaskResult mask = RemoveBgModel.Infer(session, frame, _log);
+            stats = RemoveBgModel.MaskStats.Of(mask.Mask);
+
+            // ---- 第三種狀態：找不到人像主體（**絕不靜默輸出一張全透明的 PNG**）----
+            if (stats.Max < EmptyMaskMax || stats.Mean < EmptyMaskMean)
+            {
+                _log($"remove-bg: {Path.GetFileName(sourcePath)} {inW}x{inH}: the mask is empty " +
+                     $"(min={stats.Min:F4} max={stats.Max:F4} mean={stats.Mean:F4}, " +
+                     $"thresholds max<{EmptyMaskMax} || mean<{EmptyMaskMean}) -> reporting " +
+                     "NoSubjectFound and writing NOTHING (a fully transparent PNG would look like " +
+                     "a broken tool, and the model is a PORTRAIT model -- spec 9.4)");
+                return Fail(sourcePath, ConversionError.NoSubjectFound,
+                    $"the portrait mask is empty (max={stats.Max:F4} mean={stats.Mean:F4}) -- " +
+                    "MODNet is a portrait model, so a QR code / landscape / screenshot has no subject");
+            }
+
+            BitmapSource gray = RemoveBgModel.MaskToGrayFrame(mask.Mask, mask.TensorWidth, mask.TensorHeight);
+            (rgba, outW, outH) = ExpandMaskToAlpha(gray, inW, inH);
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.Unknown,
+                $"inference failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        long written = 0;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
+        {
+            EncodeBgraPng(rgba, outW, outH, stream);
+            written = stream.Length;
+        }, CollisionCrop(sourcePath, extension, targetDirectory), out targetPath);
+        timer.Stop();
+        if (!done.Ok) return Fail(sourcePath, done.Error, done.Detail);
+
+        // ⚠ 這一行的格式是**驗收斷言的一部分**（張量尺寸、遮罩統計、輸出尺寸）。
+        // 統計數字必須印出來：它是「有沒有真的切到東西」唯一當場看得見的事實。
+        _log($"remove-bg: {Path.GetFileName(sourcePath)} {inW}x{inH} -> {outW}x{outH} " +
+             $"(mask min={stats.Min:F4} max={stats.Max:F4} mean={stats.Mean:F4}, png, alpha) " +
+             $"-> {Path.GetFileName(targetPath)} ({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"{inW}x{inH} -> {outW}x{outH} (alpha from the mask, max={stats.Max:F4} mean={stats.Mean:F4}; " +
+            $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
+    }
+
+    /// <summary>
+    /// 「找不到人像主體」的門檻（見 <see cref="RemoveBg"/> 的判準說明）。
+    /// 兩個都是**聯集**：任一條成立就拒絕。實測的兩個測資離這兩個數字都很遠。
+    /// </summary>
+    private const float EmptyMaskMax = 0.30f;
+
+    /// <summary>見 <see cref="EmptyMaskMax"/>。（平均遮罩值）</summary>
+    private const double EmptyMaskMean = 0.02;
+
+    /// <summary>
+    /// 這一輪已經在日誌裡報告過的模型路徑（同一顆模型只說一次；換一顆一定說）。
+    /// 與 <c>_qrSourceName</c> 同一種作法：寫在引擎實例上，不進任何共享狀態。
+    /// </summary>
+    private string? _lastModelReported;
+
+    /// <summary>
+    /// 遮罩畫格 → **Bgra32 的 RGBA 位元組**：把遮罩放大回原尺寸，並把**灰階的 R 通道**
+    /// 當成 alpha。
+    ///
+    /// ⚠ **放大一定要用遮罩自己的張量尺寸**當來源（<paramref name="gray"/> 的 PixelWidth／Height
+    /// 就是它），**不可以**用「原圖尺寸 × 理想比例」回推——取整到 32 之後兩者不同
+    /// （實測 3000×2250 → 張量 672×512，而理想值是 682.67×512），用理想值回推會讓整張遮罩位移。
+    ///
+    /// 輸出尺寸＝**來源畫格的尺寸**（不是拿縮放後的實際值）：這一顆工具的定義就是「同尺寸、
+    /// 換掉背景」，所以尺寸是契約而不是計算結果；<c>TransformedBitmap</c> 的捨入必須與它一致
+    /// （不一致就當場丟例外，而不是靜靜地交出一張尺寸不同的圖）。
+    /// </summary>
+    private static (byte[] Rgba, int Width, int Height) ExpandMaskToAlpha(
+        BitmapSource gray, int sourceWidth, int sourceHeight)
+    {
+        BitmapSource up = gray;
+        if (gray.PixelWidth != sourceWidth || gray.PixelHeight != sourceHeight)
+        {
+            var scaled = new TransformedBitmap(gray, new ScaleTransform(
+                (double)sourceWidth / gray.PixelWidth, (double)sourceHeight / gray.PixelHeight));
+            scaled.Freeze();
+            if (scaled.PixelWidth != sourceWidth || scaled.PixelHeight != sourceHeight)
+            {
+                throw new InvalidOperationException(
+                    $"the mask scaled to {scaled.PixelWidth}x{scaled.PixelHeight} but the output must be " +
+                    $"{sourceWidth}x{sourceHeight} (the tool's contract is a same-size PNG)");
+            }
+            up = scaled;
+        }
+
+        BitmapSource bgra = up.Format == PixelFormats.Bgra32
+            ? up
+            : new FormatConvertedBitmap(up, PixelFormats.Bgra32, null, 0);
+        int stride = bgra.PixelWidth * 4;
+        var pixels = new byte[(long)stride * bgra.PixelHeight];
+        bgra.CopyPixels(pixels, stride, 0);
+        // 取 R 當 alpha。灰階畫格的 B／G／R 是同一個值（見 RemoveBgModel.MaskToGrayFrame），
+        // 所以取哪一個通道都一樣——**取 R** 只因為它與「遮罩值」在既有程式碼裡的說法一致。
+        for (int p = 0; p + 3 < pixels.Length; p += 4) pixels[p + 3] = pixels[p + 2];
+        return (pixels, bgra.PixelWidth, bgra.PixelHeight);
+    }
+
+    /// <summary>
+    /// 寫出一個 Bgra32 的 PNG。
+    ///
+    /// ⚠ **刻意不走 <see cref="EncodeWithMetadataFallback"/>**：那一條會把來源的 metadata
+    /// 搬過去（規格 §5 的原則），但這一顆工具**改了像素**——把 EXIF 方向帶進一張已經烤過方向的
+    /// PNG，檢視器會**再轉一次**；而且 PNG 的 EXIF 支援本來就不一致（那正是 fallback 存在的理由）。
+    /// 所以這裡明確「不夾帶 metadata」，並把這件事寫在日誌那一行（`png, alpha`）。
+    /// 輸出格式固定 PNG，所以「品質」對它沒有意義（PNG 是無損容器）。
+    /// </summary>
+    private static void EncodeBgraPng(byte[] bgra, int width, int height, Stream output)
+    {
+        BitmapEncoder encoder = CodecRegistry.CreateEncoder("PNG", 100)
+            ?? throw new NotSupportedException("no encoder for PNG");
+        BitmapSource frame = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null,
+                                                 bgra, width * 4);
+        frame.Freeze();
+        encoder.Frames.Add(BitmapFrame.Create(frame, null, null, null));
+        encoder.Save(output);
     }
 
     /// <summary>

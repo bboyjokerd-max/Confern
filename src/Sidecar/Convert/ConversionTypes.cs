@@ -123,7 +123,50 @@ internal enum ConversionError
     /// 猜錯的代價只是「少說一句密碼」或「多說一句密碼」，**行為不變**（一樣 fail-fast、
     /// 一樣不寫檔），所以這個判定不需要更強的手段。
     /// </summary>
-    MergeNeedsPassword
+    MergeNeedsPassword,
+
+    /// <summary>
+    /// 工具 `remove-bg`（去背，M3 第七顆扇形）專用：**這張圖裡找不到人像主體**。
+    ///
+    /// **為什麼既有分類沒有一個合用**（逐個對過，與 <see cref="QrNotFound"/> 同一種形狀）：
+    ///   • <see cref="DecodeFailed"/>——它的訊息是「**檔名** 無法解碼」，說的是「這個檔案壞了」。
+    ///     這裡的檔案一點都沒壞、也真的解碼了、模型也跑完了；只是結果是「沒有東西可以切」。
+    ///     說那句話會把使用者送去檢查一個完好的檔案（<see cref="WriteConflict"/> 記下的同一種錯）。
+    ///   • <see cref="QrNotFound"/>——它說的是「圖片中找不到 QR 碼」，是**另一顆扇形**的事。
+    ///     共用同一句會讓使用者以為他按的是讀 QR。
+    ///   • <see cref="CropNothingToDo"/>／<see cref="CropRectEmpty"/>——那是「你的要求本身沒有
+    ///     東西可以做」；這裡的要求完全可以做，只是這張圖裡沒有模型認得的主體。
+    ///
+    /// **為什麼這一條非有不可**（這一刀最重要的一條產品語意）：去背模型是**人像**模型
+    /// （MODNet）。實測：非人像場景得到近乎全空的遮罩（`fixtures/qr/qr-small-in-scene-160.png`
+    /// 3000×2250 ⇒ max=0.0165、mean=0.0001）。若那時**靜默輸出一張全透明的 PNG**，
+    /// 使用者拿到的是「一張什麼都沒有的圖」，而畫面上顯示成功——他會以為工具壞了、
+    /// 或者以為自己那張圖本來就沒有主體。所以它必須是一個**具名的回報，而且不產生任何檔案**。
+    /// </summary>
+    NoSubjectFound,
+
+    /// <summary>
+    /// 工具 `remove-bg` 專用：**去背用的模型檔還沒取得**（那個路徑上沒有檔案）。
+    ///
+    /// **為什麼不是 <see cref="Unsupported"/>／<see cref="TargetUnavailable"/>**：
+    /// 這兩個說的是「這個格式做不到」（能力問題，重試也沒用）。這裡是**這個安裝少了
+    /// 一個可以補上的檔案**——使用者做得到的那一步是「跑取得腳本把模型放進去」，
+    /// 所以訊息必須指向那個腳本。訊息與 <see cref="ModelCorrupt"/> **刻意不同一句**：
+    /// 「檔案不在」與「檔案在但是壞的」是兩個不同的下一步（下載 vs 重新下載）。
+    /// </summary>
+    ModelUnavailable,
+
+    /// <summary>
+    /// 工具 `remove-bg` 專用：**模型檔在，但是壞的／下載不完整**。
+    ///
+    /// 實測的形狀：下載到 1/3（4,328,260 bytes）與一個 39 bytes 的 HTML 錯誤頁，兩者都讓
+    /// `new InferenceSession` 丟 `OnnxRuntimeException [ErrorCode:InvalidProtobuf]`。
+    ///
+    /// ⚠ 這一條與 <see cref="ModelUnavailable"/> 的差別是**這一刀的一條驗收**：
+    /// 說成「檔案不存在」會讓使用者去下載一個他硬碟上已經有的檔案（而且下載完還是同一個壞檔，
+    /// 因為他拿的是同一個來源），所以兩句話必須不同，而且各自說得出下一步。
+    /// </summary>
+    ModelCorrupt
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
@@ -204,6 +247,15 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 訊息刻意**不含密碼輸入的暗示**：本工具沒有取得密碼的介面，說「請輸入密碼」
         // 會把使用者指向一個不存在的功能。
         ConversionError.MergeNeedsPassword => "這個 PDF 需要密碼才能開啟，請先解除密碼再合併",
+        // 工具 remove-bg 專用（規格 §9.4）。這是**人像**模型的正常否定答案，不是壞掉
+        // （見 NoSubjectFound 的逐條比較）。訊息刻意說出「人像」：使用者拿風景或截圖來按
+        // 這一顆扇形時，那兩個字就是他需要知道的全部。
+        ConversionError.NoSubjectFound => "這張圖找不到人像主體，無法去背",
+        // 工具 remove-bg 專用：模型檔還沒取得。訊息必須**指向取得腳本**，否則使用者只知道
+        // 「失敗了」而不知道要放什麼檔案、放在哪裡。
+        ConversionError.ModelUnavailable => "去背模型尚未取得，請執行 tools\\get-rembg-model.ps1",
+        // 工具 remove-bg 專用：模型檔在但是壞的（與上一句刻意不同，見 ModelCorrupt 的說明）。
+        ConversionError.ModelCorrupt => "去背模型檔損壞或下載不完整，請重新取得",
         _ => "轉檔失敗"
     };
 

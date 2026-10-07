@@ -138,6 +138,25 @@ internal static class WorkerProtocol
     /// </summary>
     public const string OpMergePdf = "merge-pdf";
 
+    /// <summary>
+    /// 工具 `remove-bg`（去背，M3 **第七顆**扇形，也是 M3 的最後一顆）。輸出是**與來源同尺寸**的
+    /// PNG（背景變透明），見 <see cref="ConversionEngine.RemoveBg"/> 與規格 §9.4。
+    ///
+    /// ⚠ 它是**唯一一個需要外部資源檔的 op**：人像模型
+    /// （<c>models\model_fp16.onnx</c>，apache-2.0、不進版控）不在出貨檔裡，
+    /// 由 <c>tools/get-rembg-model.ps1</c> 取得。所以它帶來**一個新的請求欄位**
+    /// （<see cref="WorkerMessage.removeBgModel"/>：「要去哪裡找那顆模型」）。
+    ///
+    /// ⚠ **新增這個 op 仍然不升 <see cref="Version"/>**，理由與前六顆逐條相同：
+    /// 一個不認識 `remove-bg` 的舊 worker 走 <see cref="WorkerServer.RejectUnknownOp"/>
+    /// （回一個具名的失敗，而不是默默做別的事），而且它**根本走不到**讀
+    /// <c>removeBgModel</c> 的那一行；該欄位是 <c>string?</c> 且 <c>WhenWritingNull</c>，
+    /// 所以既有 op 的封包**逐位元不變**。最後檢查過一次它有沒有「缺席語意與意圖相反」的問題：
+    /// 欄位缺席＝用預設位置（執行檔旁邊的 `models\`），那**正是**不指定時該有的行為，
+    /// 而不是「使用者設定了卻默默沒生效」（那才是 outputDir 當年非升版本不可的形狀）。
+    /// </summary>
+    public const string OpRemoveBg = "remove-bg";
+
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
     public static readonly JsonSerializerOptions Json = new()
@@ -262,6 +281,26 @@ internal sealed class WorkerMessage
     /// 那是「這個欄位還不存在的年代」的封包該有的意思，也正是**不做比例修飾**的那條路。
     /// </summary>
     public string? cropRatio { get; set; }
+
+    /// <summary>
+    /// 去背要用的**人像模型檔路徑**（2026-10-08 M3 第七顆扇形，<see cref="WorkerProtocol.OpRemoveBg"/>
+    /// 專用）。
+    ///
+    /// **為什麼這個欄位非有不可**：這個 op 是唯一一個需要**外部資源檔**的 op，而那顆模型
+    /// （12.98 MB）不進版控。解析「模型在哪裡」只有一份規則
+    /// （<see cref="RemoveBgModel.ResolvePath"/>，預設＝執行檔旁邊的 `models\`），
+    /// 但**診斷必須能指向一個不存在／被截斷的檔**，好讓「缺模型」與「模型損壞」這兩種狀態
+    /// 在驗收裡真的被走過；同一顆模型也要能被使用者的設定或未來的 `--remove-bg-model` 指到別處。
+    /// 少了這個欄位，worker 那一側只能自己重讀命令列——那會變成第二個擁有者（而且 worker 的
+    /// 命令列上什麼都沒有）。
+    ///
+    /// ⚠ **缺席語意（<c>null</c>）＝預設位置**，也就是不指定時該有的行為——所以它對既有 op
+    /// 的封包影響是**零**（<c>WhenWritingNull</c>），而且它與 `outputDir` 那種
+    /// 「缺席語意與新功能意圖相反」的形狀不同（見 <see cref="WorkerProtocol.Version"/>）。
+    /// 呼叫端一定送**絕對路徑**（<see cref="RemoveBgModel.ResolvePath"/> 負責轉）：
+    /// 相對路徑會對上 worker 的工作目錄而不是 UI 的，那會變成兩邊各說各話。
+    /// </summary>
+    public string? removeBgModel { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -415,7 +454,14 @@ internal static class WorkerServer
                       // 在另一端完全看不出來——一個「順序被弄丟」的實作會產生一個
                       // 頁序全錯但每一個數字都對的檔（頁數對、尺寸集合對），
                       // 所以那一行必須把送出的順序原封不動寫下來，讓驗收有東西可比。
-                      (op == WorkerProtocol.OpMergePdf ? $" order=[{string.Join(",", paths.Select(Path.GetFileName))}]" : ""));
+                      (op == WorkerProtocol.OpMergePdf
+                          ? $" order=[{string.Join(",", paths.Select(Path.GetFileName))}]" : "") +
+                      // 去背同理：**模型路徑是這一顆扇形唯一跨管道的新事實**，不放進日誌就只剩
+                      // 「UI 說它送出去了」可以相信（而「UI 找到模型、worker 找不到」是這一條
+                      // 最現實的失效——兩邊的工作目錄不一樣）。null 印成 `(default beside exe)`
+                      // 而不是空字串：那是「沒有指定」與「指定成空字串」的分別。
+                      (op == WorkerProtocol.OpRemoveBg
+                          ? $" model={job.removeBgModel ?? "(default beside exe)"}" : ""));
         link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Progress, jobId = job.jobId, done = 0, total = paths.Length,
@@ -493,6 +539,11 @@ internal static class WorkerServer
                 // 檔案數（見 totalForResult：總數必須說出「這一輪處理了幾個檔」）。
                 WorkerProtocol.OpMergePdf => MergePdfBatch(paths, i, engine, journal, job.outputDir,
                                                            evidence.Line),
+                // 去背：模型路徑**原封不動**傳下去（null＝執行檔旁邊的預設位置）。
+                // 解析規則只有 RemoveBgModel.ResolvePath 那一份，worker 不是第二個擁有者
+                // （與 outputDir 交給 Settings／NamingPolicy 同一條規矩）。
+                WorkerProtocol.OpRemoveBg => engine.RemoveBg(paths[i], job.removeBgModel, journal,
+                                                             job.outputDir),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
@@ -640,7 +691,7 @@ internal static class WorkerServer
             $"unknown op '{op}' (this worker speaks " +
             $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata}/" +
             $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop}/{WorkerProtocol.OpReadQr}/" +
-            $"{WorkerProtocol.OpMergePdf})");
+            $"{WorkerProtocol.OpMergePdf}/{WorkerProtocol.OpRemoveBg})");
 
     /// <summary>
     /// `op=merge-pdf` 的**整批**執行：這一個 op 只有一個工作，而它吃**整份路徑清單**。

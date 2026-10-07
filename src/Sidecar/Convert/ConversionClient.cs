@@ -132,10 +132,15 @@ internal sealed class ConversionClient : IDisposable
     /// **其餘 op 一律傳 null**——null 時那四個欄位不會進訊息（<c>WhenWritingNull</c>），
     /// 所以既有的封包一個位元組都沒變。政策的擁有者是 <see cref="Settings.ToCompressionPolicy"/>，
     /// 這裡只搬運，不在 UI 端先算品質：真正要知道「每個檔是什麼格式」的是 worker。
+    ///
+    /// <paramref name="removeBgModel"/>（2026-10-08 M3 第七顆扇形）：`op=remove-bg` 的**模型檔
+    /// 路徑**，**其餘 op 一律傳 null**（同一條規矩：null 不進訊息，既有封包逐位元不變）。
+    /// ⚠ 呼叫端要送**絕對路徑**：相對路徑在 worker 那一側會對上**它自己的**工作目錄，
+    /// 那不是 UI 解析出來的那一個（症狀是「UI 找到模型、worker 找不到」）。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
                       string? toolOp, out string? error, CompressionPolicy? compression = null,
-                      CropSpec? crop = null)
+                      CropSpec? crop = null, string? removeBgModel = null)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -227,7 +232,10 @@ internal sealed class ConversionClient : IDisposable
             cropY = crop?.Y,
             cropW = crop?.Width,
             cropH = crop?.Height,
-            cropRatio = crop?.RatioId
+            cropRatio = crop?.RatioId,
+            // 去背的模型路徑（只有 op=remove-bg 會填）。null＝執行檔旁邊的預設位置，
+            // 也就是「沒有指定」時該有的行為——所以其餘 op 的封包一個位元組都沒變。
+            removeBgModel = removeBgModel
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
         // 裁切矩形也只在行尾、而且只有 op=crop 時才出現（既有那一行的其餘部分逐字元不變）。

@@ -1,7 +1,8 @@
-# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
+﻿# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
 #
 #   -Exe <path to Confern.exe>   -Section S18   -LogDir <dir>
-#   [-FaultInjection swap|ignore-size|ignore-ratio]
+#   [-FaultInjection <name>]   the full set is documented at the switch below; S22 adds
+#                              rembg-nosubject and rembg-png
 #
 # WHAT THIS PROVES, AND WHAT IT DOES NOT
 #   1. The crop op really travels to the WORKER process (spec 9.1). Five new protocol fields
@@ -56,14 +57,21 @@
 #     here: it needs the resident path, and therefore the single-instance guard. --tools-list
 #     covers the same catalog query without it.
 #
-# ASCII ONLY. This script must stay parseable by Windows PowerShell 5.1, whose BOM-less
-# CJK handling corrupts non-ASCII literals.
+# ENCODING (measured 2026-10-08, when S22 was added). This script used to be ASCII-only because
+# Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI and mangles CJK literals. S22 asserts the
+# three user-facing refusal messages, which ARE Chinese, so the rule is now:
+#   - the file carries a UTF-8 BOM (that is what makes 5.1 read it as UTF-8), and
+#   - every line still ends in CRLF: in this interpreter a bare LF is NOT a statement terminator,
+#     and an LF-only block gets swallowed by the '#' comment above it (the symptom appeared as a
+#     missing '}' some 400 lines away).
+# A new line containing Chinese must be added by an editor that writes UTF-8 WITH a BOM, never by
+# a tool that reads the file as ANSI and writes back what it thinks it read.
 
 param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S18',
   [string]$LogDir = "$env:TEMP\sidecar-verify",
-  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text', 'merge-order', 'merge-drop', 'merge-nosort', 'merge-cancelqueues')][string]$FaultInjection = ''
+  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text', 'merge-order', 'merge-drop', 'merge-nosort', 'merge-cancelqueues', 'rembg-nosubject', 'rembg-png')][string]$FaultInjection = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -346,6 +354,16 @@ function Invoke-Crop([string]$name, [string]$fixture, [string]$rect, [string]$ra
   }
 }
 
+# The id list out of a `--tools-list` run, as an array: `tool list: count=N tools=[a,b,c]`. The list
+# is source-dependent (merge-pdf only applies to a PDF), so checks that mean "every tool exists"
+# compare against the UNION of an image query and a PDF query instead of against one hard string.
+function Get-ToolIds([string[]]$lines) {
+  $line = Get-LogLine $lines 'tool list: count='
+  $m = [regex]::Match([string]$line, 'tools=\[([^\]]*)\]')
+  if (-not $m.Success) { return @() }
+  return @($m.Groups[1].Value -split ',' | Where-Object { $_ -ne '' })
+}
+
 # ---------------------------------------------------------------- fault injection
 # -FaultInjection <name> runs the SAME checks but with one deliberately wrong expectation, so
 # the raw output shows exactly which check catches which bug. It is the answer to "how do I
@@ -364,6 +382,16 @@ function Invoke-Crop([string]$name, [string]$fixture, [string]$rect, [string]$ra
 #                AND the dangerous-scheme check (S19.14).
 #   qr-text      expect the text window to hold a different string than the decoded one. Catches
 #                "the window shows something other than what the decoder produced" (S19.13).
+#   merge-order / merge-drop / merge-nosort / merge-cancelqueues
+#                the merge-pdf expectations, each wrong in one specific way (S20/S21).
+#   rembg-nosubject
+#                expect remove-bg to WRITE A FILE for a QR scene - i.e. silently emit a fully
+#                transparent PNG, which is the exact failure S22.04 exists to catch. S22.04 and
+#                ONLY S22.04 must go red (measured 2026-10-08). An earlier, broader version of this
+#                injection also repointed the truncated-model run at the real model; it turned
+#                S22.11 and S22.12 red as well, which is why it was narrowed.
+#   rembg-png    expect the decoded output frame to have NO alpha channel - the assertion S22.06
+#                makes about the pixel format the product itself reports.
 function Get-FaultNote() {
   switch ($FaultInjection) {
     'swap' { return 'FAULT INJECTION swap: expectations transposed on purpose' }
@@ -375,6 +403,8 @@ function Get-FaultNote() {
     'merge-drop' { return 'FAULT INJECTION merge-drop: the expected PDF page count is one too low' }
     'merge-nosort' { return 'FAULT INJECTION merge-nosort: the expected merge order is the SOURCE order, not the order the window showed' }
     'merge-cancelqueues' { return 'FAULT INJECTION merge-cancelqueues: cancel is expected to still hand the order back' }
+    'rembg-nosubject' { return 'FAULT INJECTION rembg-nosubject: a QR scene is expected to produce a written PNG (S22.04 only)' }
+    'rembg-png' { return 'FAULT INJECTION rembg-png: the output frame is expected NOT to carry an alpha channel' }
     default { return 'no fault injection: expectations are the documented ones' }
   }
 }
@@ -428,12 +458,20 @@ function Invoke-S18 {
   # (the FIFTH sector; its own checks are S19.07 onwards). The id list is asserted whole on
   # purpose: a tool appearing or disappearing changes this line, and that has to be a conscious
   # edit here and not a silent drift.
+  #
+  # !! 2026-10-08: this plain query counts SIX with `remove-bg` added (measured), because the id
+  # list is SOURCE-DEPENDENT and the default source is an image: `merge-pdf` only applies to a PDF,
+  # so an image sees six. The whole catalog is therefore asserted as the UNION of two queries, so
+  # that a genuinely missing or extra tool still turns this red no matter which source it hides in.
   $tl = Invoke-Confern 'tools-list' @('--tools-list')
+  $tlPdfHere = Invoke-Confern 'tools-list-u-pdf' @('--tools-list', '--wheel-source', 'pdf')
   Check 'S18.03 the tool layer lists every sector in order, and crop is the fourth' `
-    (($tl.Exit -eq 0) -and
-     (Test-Log $tl.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+    (($tl.Exit -eq 0) -and ($tlPdfHere.Exit -eq 0) -and
+     ((Get-ToolIds $tl.Lines) -join ',') -eq 'rotate90,strip-metadata,compress,crop,read-qr,remove-bg' -and
+     ((Get-ToolIds $tlPdfHere.Lines) -join ',') -eq 'rotate90,strip-metadata,compress,crop,read-qr,merge-pdf,remove-bg' -and
      (Test-Log $tl.Lines 'tool list: 3 id=crop ')) `
-    "exit=$($tl.Exit) line='$(Get-LogLine $tl.Lines 'tool list: count=')' crop='$(Get-LogLine $tl.Lines 'tool list: 3 ')'"
+    "exit=$($tl.Exit) line='$(Get-LogLine $tl.Lines 'tool list: count=')' crop='$(Get-LogLine $tl.Lines 'tool list: 3 ')' " +
+    "pdf='$(Get-LogLine $tlPdfHere.Lines 'tool list: count=')'"
 
   # ---------------------------------------------------------------- S18.04 the op crosses the pipe
   $one = Invoke-Crop 'one' $f512 '0.125,0,0.75,1' '1:1'
@@ -1669,18 +1707,23 @@ function Invoke-S19 {
     }
   }
   $sameList = (($dispatchOps -join '/') -eq ($rejectOps -join '/'))
+  # !! 2026-10-08: `remove-bg` (the SEVENTH constant) joined the switch, so the two lists are
+  # EIGHT and the check now requires it by name. The count is `-ge 8` on purpose rather than `-eq 8`:
+  # what this check exists to catch is a list that stopped being complete, and a hard count here
+  # would make the next tool fail the wrong check first.
   Check 'S19.06 the unknown-op rejection still names exactly the ops the dispatch switch handles, in order (nothing broke)' `
-    (($dispatchOps.Count -ge 7) -and ($rejectOps.Count -eq $dispatchOps.Count) -and $sameList -and
-     ($rejectOps -contains 'OpReadQr') -and ($rejectOps -contains 'OpMergePdf') -and (Test-Log $workerLines 'RejectUnknownOp')) `
+    (($dispatchOps.Count -ge 8) -and ($rejectOps.Count -eq $dispatchOps.Count) -and $sameList -and
+     ($rejectOps -contains 'OpReadQr') -and ($rejectOps -contains 'OpMergePdf') -and
+     ($rejectOps -contains 'OpRemoveBg') -and (Test-Log $workerLines 'RejectUnknownOp')) `
     "dispatch=($($dispatchOps -join '/')) reject=($($rejectOps -join '/')) same=$sameList"
 
   # ---------------------------------------------------------------- S19.07 the catalog entry
   # The catalog is the only owner of "which tools exist" (the wheel draws whatever it says). This
   # slice adds the entry only: the sector, the browser and the text window are a later cut.
   $tl = Invoke-Confern 'tools-list-qr' @('--tools-list')
-  Check 'S19.07 the tool catalog now lists five tools and read-qr is the fifth, labelled READ QR' `
+  Check 'S19.07 the tool catalog now lists six tools and read-qr is the fifth, labelled READ QR' `
     (($tl.Exit -eq 0) -and
-     (Test-Log $tl.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+     ((Get-ToolIds $tl.Lines) -join ',') -eq 'rotate90,strip-metadata,compress,crop,read-qr,remove-bg' -and
      (Test-Log $tl.Lines "tool list: 4 id=read-qr label='READ QR'")) `
     "exit=$($tl.Exit) line='$(Get-LogLine $tl.Lines 'tool list: count=')' fifth='$(Get-LogLine $tl.Lines 'tool list: 4 ')'"
 
@@ -1707,8 +1750,8 @@ function Invoke-S19 {
     $m = [regex]::Match($t, '^(?:public|internal|private)?\s*(?:const|static readonly)\s+string\s+(Op[A-Za-z0-9]+)\s*=')
     if ($m.Success) { $opsInWorkerProtocol += $m.Groups[1].Value }
   }
-  Check 'S19.09 WorkerProtocol declares the seven ops in the same order the dispatcher and the reject message use' `
-    ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf') -and
+  Check 'S19.09 WorkerProtocol declares the eight ops in the same order the dispatcher and the reject message use' `
+    ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf/OpRemoveBg') -and
      (($opsInWorkerProtocol -join '/') -eq ($dispatchOps -join '/'))) `
     "declared=($($opsInWorkerProtocol -join '/')) dispatch=($($dispatchOps -join '/'))"
 
@@ -1937,9 +1980,9 @@ function Invoke-S19 {
     if ($n -eq 1) { $helpQrDoc++ }
   }
   $tlQr = Invoke-Confern 'tools-list-qr-ui' @('--tools-list')
-  Check 'S19.16 nothing existing broke: --help still documents the three new switches exactly once, and the tool layer still lists all five sectors' `
+  Check 'S19.16 nothing existing broke: --help still documents the three new switches exactly once, and the tool layer still lists all six sectors an image can see' `
     (($helpQrDoc -eq 3) -and (Test-Log $helpQr.Lines '--read-qr <path>') -and
-     (Test-Log $tlQr.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]')) `
+     (((Get-ToolIds $tlQr.Lines) -join ',') -eq 'rotate90,strip-metadata,compress,crop,read-qr,remove-bg')) `
     "documentedExactlyOnce=$helpQrDoc/3 toolsLine='$(Get-LogLine $tlQr.Lines 'tool list: count=')'"
 
   # ---------------------------------------------------------------- S19.17 the fifth tool icon
@@ -1967,13 +2010,13 @@ function Invoke-S19 {
   $iconRe = [regex]::Match([string]$iconLine, 'drawn=(\d+)/(\d+) icons=\[([^\]]*)\]')
   $iconOk = $false
   if ($iconRe.Success) {
-    $iconOk = ([int]$iconRe.Groups[1].Value -eq 5) -and ([int]$iconRe.Groups[2].Value -eq 5) -and
+    $iconOk = ([int]$iconRe.Groups[1].Value -eq 6) -and ([int]$iconRe.Groups[2].Value -eq 6) -and
               ($iconRe.Groups[3].Value -match '\bReadQr\b')
   }
   $dumpSize = 0
   $dumpPath = Join-Path $Work 'wheel-tools.png'
   if (Test-Path -LiteralPath $dumpPath) { $dumpSize = (Get-Item -LiteralPath $dumpPath).Length }
-  Check 'S19.17 the fifth tool sector really draws an icon: the drawing reports 5/5 drawn, ReadQr is among them, and the switch no longer ends silently' `
+  Check 'S19.17 the fifth tool sector really draws an icon: the drawing reports 6/6 drawn (every tool an image can see), ReadQr is among them, and the switch no longer ends silently' `
     ($iconOk -and $iconNoMatchGuard -and ($dumpSize -gt 0)) `
     "line='$iconLine' dumpBytes=$dumpSize noMatchGuard=$iconNoMatchGuard"
 }
@@ -2402,11 +2445,14 @@ function Invoke-S20 {
   # FormatCatalog.Classify and says nothing about whether the wheel can offer these tools. It was
   # green while merge-pdf was unreachable from the wheel (see the S20 header block, added
   # 2026-10-07). The runtime path is S21.10..S21.13.
-  Check 'S20.12 the catalog and --help: a PDF source now sees SIX tools including merge-pdf, a JPEG still sees five, and both new switches are documented exactly once (CATALOG QUERY, not the runtime path - see S21.10..S21.13)' `
+  # !! 2026-10-08: with `remove-bg` added, the PDF catalog is SEVEN (it was six) and the JPEG one is
+  # SIX (it was five). Both numbers moved, and BOTH are asserted by id rather than by count alone:
+  # "a JPEG does not see merge-pdf" is the actual rule.
+  Check 'S20.12 the catalog and --help: a PDF source now sees SEVEN tools including merge-pdf, a JPEG now sees SIX, and both new switches are documented exactly once (CATALOG QUERY, not the runtime path - see S21.10..S21.13)' `
     (($tlPdf.Exit -eq 0) -and ($tlJpg.Exit -eq 0) -and
-     (Test-Log $tlPdf.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\]') -and
+     (Test-Log $tlPdf.Lines 'tool list: count=7 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf,remove-bg\]') -and
      (Test-Log $tlPdf.Lines "tool list: 5 id=merge-pdf label='MERGE PDF'") -and
-     (Test-Log $tlJpg.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+     (Test-Log $tlJpg.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,remove-bg\]') -and
      ($helpDefs -eq 2)) `
     ("pdf='$(Get-LogLine $tlPdf.Lines 'tool list: count=')' jpg='$(Get-LogLine $tlJpg.Lines 'tool list: count=')' " +
      "documentedExactlyOnce=$helpDefs/2 sixth='$(Get-LogLine $tlPdf.Lines 'tool list: 5 ')")
@@ -2424,7 +2470,7 @@ function Invoke-S20 {
   $iconMergeRe = [regex]::Match([string]$iconMergeLine, 'drawn=(\d+)/(\d+) icons=\[([^\]]*)\]')
   $iconMergeOk = $false
   if ($iconMergeRe.Success) {
-    $iconMergeOk = ([int]$iconMergeRe.Groups[1].Value -eq 6) -and ([int]$iconMergeRe.Groups[2].Value -eq 6) -and
+    $iconMergeOk = ([int]$iconMergeRe.Groups[1].Value -eq 7) -and ([int]$iconMergeRe.Groups[2].Value -eq 7) -and
                    ($iconMergeRe.Groups[3].Value -match '\bMergePdf\b')
   }
   $mergeDump = Join-Path $Work 'wheel-merge.png'
@@ -2449,7 +2495,7 @@ function Invoke-S20 {
     $dm2 = [regex]::Match($t, '^(?:public|internal|private)?\s*(?:const|static readonly)\s+string\s+(Op[A-Za-z0-9]+)\s*=')
     if ($dm2.Success) { $declaredOps += $dm2.Groups[1].Value }
   }
-  $wantOps = 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf'
+  $wantOps = 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf/OpRemoveBg'
   # A source that is not a PDF. It must be REFUSED BY NAME and produce NOTHING - never handed to
   # PDFsharp to find out. Note the exit code is 3 and NOT 2: this travels the fail-fast road like
   # any other unmergeable file (the product's own line says `--merge-pdf: the batch was REFUSED
@@ -2589,6 +2635,430 @@ function Test-MergeOrderMatches([object[]]$merged, [string[]]$wantSizes, [string
   return $true
 }
 
+function Invoke-S22([string]$fault) {
+  # A helper that belongs to this section. It is defined FIRST because PowerShell resolves a plain
+  # function call at CALL time: the first version of this section defined it 120 lines below its
+  # first use, and the whole section died with CommandNotFoundException before the first check.
+  # Every file under a folder, RECURSIVELY, with size and mtime. "no new file anywhere in the
+  # checkout" has to include the subfolders, because that is where the fixtures live: a top-level
+  # listing sees zero files here, so it could never notice a new one at all.
+  function Get-FixtureTreeState([string]$dir) {
+    return @(Get-ChildItem -LiteralPath $dir -File -Recurse | Sort-Object FullName |
+             ForEach-Object { ($_.FullName.Substring($dir.Length)) + "|" + $_.Length + "|" + $_.LastWriteTimeUtc.Ticks })
+  }
+
+  Write-Host "=== S22 remove-bg: the portrait model, the empty-mask refusal, and the PNG that comes out ==="
+
+  # WHAT THIS SECTION IS FOR (2026-10-08, the seventh and last M3 sector)
+  #   remove-bg is the only tool whose answer can be "there is nothing here for me": the model is
+  #   a PORTRAIT model (MODNet), so a QR code, a landscape or a screenshot produces an almost
+  #   empty mask. Two outcomes are equally unacceptable and both are asserted below:
+  #     - silently writing a fully transparent PNG (the user gets a blank picture and a success
+  #       message), and
+  #     - reporting it as some other failure (the user cannot tell the two apart and the message
+  #       has no next step).
+  #   It is also the only tool that needs an EXTERNAL FILE (the 12.98 MB model), so "the model is
+  #   missing" and "the model is corrupt" are two product states with two different messages, and
+  #   both are walked here for real - by pointing the tool at a truncated file and at a path that
+  #   does not exist - not by reading the source.
+  #
+  #   Every assertion below reads the PRODUCT'S OWN ARTEFACTS: the exit code, the evidence log
+  #   lines, the folder contents, and the pixels of the PNG it wrote.
+
+  # ---------------------------------------------------------------- the fixtures (committed)
+  # fixtures\rembg\real-512.png is a 512x410 downscale of a PUBLIC DOMAIN NASA photograph
+  # (Leland D. Melvin with his two dogs); provenance and the measured numbers are in
+  # fixtures\rembg\README.md. It is committed because a real portrait cannot be synthesised by a
+  # script, and these assertions are about WHERE the mask lands - a property of a real face in a
+  # real frame.
+  #
+  # The non-portrait fixture is fixtures\qr\qr-small-in-scene-160.png, already committed for
+  # read-qr: a QR code on a plain backdrop, i.e. exactly the kind of picture a user would really
+  # try remove-bg on. Its measured mask is max=0.1057 mean=0.0001 (native) and max=0.0165
+  # mean=0.0001 (at 512 px), far below the product's thresholds (0.30 / 0.02).
+  $repo = Split-Path -Parent $PSScriptRoot
+  $fPortrait = Join-Path $repo 'fixtures\rembg\real-512.png'
+  $fNoSubject = Join-Path $repo 'fixtures\qr\qr-small-in-scene-160.png'
+  $portraitFixtureOk = Test-Path -LiteralPath $fPortrait
+  $noSubjectFixtureOk = Test-Path -LiteralPath $fNoSubject
+  $fixturesOk = $portraitFixtureOk -and $noSubjectFixtureOk
+  if (-not $portraitFixtureOk) {
+    Inconclusive "portrait fixture missing: $fPortrait (it is committed, so a missing one means the checkout is broken)"
+  }
+  if (-not $noSubjectFixtureOk) {
+    Inconclusive "non-portrait fixture missing: $fNoSubject (it is committed, so a missing one means the checkout is broken)"
+  }
+
+  # ---------------------------------------------------------------- the model (deliberately NOT committed)
+  # 12.98 MB of binary does not belong in version control, so tools/get-rembg-model.ps1 fetches it
+  # into models\model_fp16.onnx BESIDE THE EXE - which is exactly the product's own default
+  # resolution (RemoveBgModel.ResolvePath). The check below reports which path answered instead of
+  # assuming it; when there is no model anywhere, every check that needs one is INCONCLUSIVE (and
+  # this section then exits 3), never silently green.
+  $exeDir = Split-Path -Parent $Exe
+  $modelBesideExe = Join-Path $exeDir 'models\model_fp16.onnx'
+  $modelInRepo = Join-Path $repo 'models\model_fp16.onnx'
+  $model = ''
+  if (Test-Path -LiteralPath $modelBesideExe) { $model = $modelBesideExe }
+  elseif (Test-Path -LiteralPath $modelInRepo) { $model = $modelInRepo }
+  $haveModel = $model -ne ''
+  if (-not $haveModel) {
+    Inconclusive "no portrait model: looked for '$modelBesideExe' and '$modelInRepo' (tools/get-rembg-model.ps1 fetches it)"
+  }
+
+  # The checkout is read BEFORE anything runs, so "this section wrote nothing into the committed
+  # fixtures" is a comparison and not a promise.
+  $fxDir = Join-Path $repo 'fixtures'
+  $fxStateBefore = Get-FixtureTreeState $fxDir
+  $fxShaBefore = @{}
+  foreach ($p in @($fPortrait, $fNoSubject)) { $fxShaBefore[$p] = (Get-Sha $p) }
+
+  # A file name, or 'none'. The detail strings must never be the thing that breaks a check, so
+  # every place that reports "did it write anything" goes through here.
+
+  function Get-OutName([string]$p) {
+    if ($null -eq $p -or $p -eq '') { return 'none' }
+    return (Split-Path -Leaf $p)
+  }
+
+  # One remove-bg run on a fresh copy of a fixture, through the REAL worker process. The OUTPUT
+  # FILE - not the request - is the only source of truth about the output.
+  function Invoke-RemoveBg([string]$name, [string]$fixture, [string]$modelPath) {
+    $d = Join-Path $Work "rembg-$name"
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    $src = Join-Path $d (Split-Path -Leaf $fixture)
+    Copy-Item -LiteralPath $fixture -Destination $src -Force
+    $sha = Get-Sha $src
+    $len = (Get-Item -LiteralPath $src).Length
+    $mtime = (Get-Item -LiteralPath $src).LastWriteTimeUtc
+
+    $argv = @('--remove-bg', $src)
+    if ($modelPath -ne '') { $argv += @('--remove-bg-model', $modelPath) }
+    $r = Invoke-Confern $name $argv
+
+    $outFile = Get-NewestOutput $d $src
+    $outSize = 'MISSING'
+    if ($null -ne $outFile) { $outSize = Get-ImageSize $outFile }
+    $untouched = ((Get-Sha $src) -eq $sha) -and
+                 ((Get-Item -LiteralPath $src).Length -eq $len) -and
+                 ((Get-Item -LiteralPath $src).LastWriteTimeUtc -eq $mtime)
+    return [pscustomobject]@{
+      Name       = $name
+      Exit       = $r.Exit
+      Lines      = $r.Lines
+      Dir        = $d
+      Src        = $src
+      Out        = $outFile
+      OutSize    = $outSize
+      Untouched  = $untouched
+      OutputLine = (Get-LogLine $r.Lines 'remove-bg output: ')
+      WroteLine  = (Get-LogLine $r.Lines 'remove-bg wrote: ')
+      Failure    = (Get-LogLine $r.Lines 'remove-bg failure: ')
+      Why        = (Get-LogLine $r.Lines 'remove-bg why: ')
+      JobLine    = (Get-LogLine $r.Lines 'worker: job \d+ sent .*op=remove-bg')
+      ModelState = (Get-LogLine $r.Lines 'remove-bg: model state=')
+      ModelLen   = (Get-LogLine $r.Lines 'tool remove-bg: model length=')
+      # The engine writes its own "model state=Ready" line, but the ENGINE's log does not reach the
+      # parent process log at all (measured 2026-10-08: no engine line ever appears there), so the
+      # observable facts about the model are the ones the diagnostic itself prints.
+      ModelPathLine = (Get-LogLine $r.Lines 'tool remove-bg: model path=')
+    }
+  }
+
+  # The product's own inspector turns the written PNG's alpha channel into numbers, so the mask
+  # assertions are properties of the ARTEFACT. Every field defaults to a value that FAILS.
+  function Get-RemoveBgInspect([string]$name, [string]$png) {
+    $r = Invoke-Confern "rembg-inspect-$name" @('--remove-bg-inspect', $png)
+    $alphaLine = Get-LogLine $r.Lines 'remove-bg inspect: alpha '
+    $bandLine = Get-LogLine $r.Lines 'remove-bg inspect: band '
+    $cornersLine = Get-LogLine $r.Lines 'remove-bg inspect: corners '
+    $headLine = Get-LogLine $r.Lines 'remove-bg inspect: file='
+    $min = 9.0; $max = -1.0; $mean = -1.0; $opaque = -1.0; $clear = -1.0
+    $centre = -1.0; $corner = -1.0; $top = -1.0
+    $cornerTL = -1.0; $cornerTR = -1.0; $cornerBL = -1.0; $cornerBR = -1.0
+    $m = [regex]::Match([string]$alphaLine, 'min=([\d.]+) max=([\d.]+) mean=([\d.]+) opaque=([\d.]+) clear=([\d.]+)')
+    if ($m.Success) {
+      $min = [double]$m.Groups[1].Value
+      $max = [double]$m.Groups[2].Value
+      $mean = [double]$m.Groups[3].Value
+      $opaque = [double]$m.Groups[4].Value
+      $clear = [double]$m.Groups[5].Value
+    }
+    $m2 = [regex]::Match([string]$bandLine, 'centre=([\d.]+) \([\d.]+\) corner=([\d.]+) \([\d.]+\) top=([\d.]+) ')
+    if ($m2.Success) {
+      $centre = [double]$m2.Groups[1].Value
+      $corner = [double]$m2.Groups[2].Value
+      $top = [double]$m2.Groups[3].Value
+    }
+    $m3 = [regex]::Match([string]$cornersLine, 'TL=([\d.]+) TR=([\d.]+) BL=([\d.]+) BR=([\d.]+)')
+    if ($m3.Success) {
+      $cornerTL = [double]$m3.Groups[1].Value
+      $cornerTR = [double]$m3.Groups[2].Value
+      $cornerBL = [double]$m3.Groups[3].Value
+      $cornerBR = [double]$m3.Groups[4].Value
+    }
+    return [pscustomobject]@{
+      Exit = $r.Exit; Head = $headLine; Alpha = $alphaLine; Band = $bandLine
+      Min = $min; Max = $max; Mean = $mean; Opaque = $opaque; Clear = $clear
+      Centre = $centre; Corner = $corner; Top = $top; Corners = $cornersLine
+      CornerTL = $cornerTL; CornerTR = $cornerTR; CornerBL = $cornerBL; CornerBR = $cornerBR
+    }
+  }
+
+  # ---------------------------------------------------------------- S22.01 the model resolves
+  # The default path must be models\model_fp16.onnx BESIDE THE EXE, not against the working
+  # directory: the worker is started as Process.Start(exe, "--worker", ...) and its working
+  # directory is NOT the exe folder, so a working-directory-relative model would be found in one
+  # launch mode and not in the other.
+  $probe = Invoke-RemoveBg 'modelprobe' $fPortrait $model
+  $modelStateLine = $probe.ModelState
+  $modelLenLine = $probe.ModelLen
+  $modelPathLine = $probe.ModelPathLine
+  $modelLineOk = $false
+  if ($haveModel) {
+    $modelLineOk = ($modelPathLine -match 'model path=') -and ($modelPathLine -match 'exists=True') -and
+                   ($modelPathLine -match [regex]::Escape($modelBesideExe)) -and
+                   ($modelLenLine -match 'length=12984781B \(expected 12984781B\)') -and
+                   ($modelLenLine -match 'sha256=25F165DA9BFD30830A575F1F0490F1ACD995975CB349BC02F3D79332E1FE5CF6')
+  } else {
+    Inconclusive 'S22.01 cannot report Ready: there is no model on this machine'
+  }
+  $modelDetail = "resolved='$model' existsLine='$modelPathLine' lengthLine='$modelLenLine'"
+  Check 'S22.01 the model path resolves beside the EXE (not against the working directory), exists=True, with the measured length and sha256' $modelLineOk $modelDetail
+
+  # ---------------------------------------------------------------- S22.02 the corrupt model
+  # Two shapes of "the file exists but is not a model": a TRUNCATED download (the first 4,328,260
+  # bytes of the real model) and a 40-byte HTML error page (what a proxy or a 404 page looks like
+  # when it is saved as .onnx). Both must be ModelCorrupt - a different state from
+  # ModelUnavailable - and neither may leave an output file.
+  $halfBytes = 4328260
+  $bytes = $null
+  if (Test-Path -LiteralPath $modelBesideExe) { $bytes = [System.IO.File]::ReadAllBytes($modelBesideExe) }
+  elseif (Test-Path -LiteralPath $modelInRepo) { $bytes = [System.IO.File]::ReadAllBytes($modelInRepo) }
+  if ($null -eq $bytes) { $bytes = New-Object byte[] $halfBytes }
+  $halfPath = Join-Path $Work 'rembg-model-half.onnx'
+  $half = New-Object byte[] $halfBytes
+  [Array]::Copy($bytes, $half, $halfBytes)
+  [System.IO.File]::WriteAllBytes($halfPath, $half)
+  $junkPath = Join-Path $Work 'rembg-model-junk.onnx'
+  [System.IO.File]::WriteAllBytes($junkPath, [System.Text.Encoding]::ASCII.GetBytes('<html><body>404 Not Found</body></html>'))
+  $halfLen = (Get-Item -LiteralPath $halfPath).Length
+  $junkLen = (Get-Item -LiteralPath $junkPath).Length
+
+  # Measured 2026-10-08: the first version of the `rembg-nosubject` injection ALSO swapped this path
+  # for the real model, which turned S22.11 and S22.12 red as a side effect - the drill could no
+  # longer say which assertion had caught the bug. The injection was narrowed to S22.04 alone.
+  # What keeps THIS check falsifiable is that it asserts a sentence that only exists for a corrupt
+  # file (璅∪?瑼?憯? AND that neither run produced an output file.
+  $corruptHalf = Invoke-RemoveBg 'corrupthalf' $fPortrait $halfPath
+  $corrupt2 = Invoke-RemoveBg 'corruptjunk' $fPortrait $junkPath
+  $corruptMsg = '模型檔損壞'
+  $corruptOk = ($corruptHalf.Exit -eq 3) -and ($corruptHalf.Failure -match $corruptMsg) -and
+               ($corrupt2.Exit -eq 3) -and ($corrupt2.Failure -match $corruptMsg) -and
+               ($null -eq $corruptHalf.Out) -and ($null -eq $corrupt2.Out)
+  $corruptDetail = "half(exit=$($corruptHalf.Exit) len=$halfLen out=$(Get-OutName $corruptHalf.Out) msg='$($corruptHalf.Failure)')"
+  $corruptDetail += " junk(exit=$($corrupt2.Exit) len=$junkLen out=$(Get-OutName $corrupt2.Out) msg='$($corrupt2.Failure)')"
+  Check 'S22.02 a model file that exists but is unusable is reported as ModelCorrupt: the truncated file and a 40-byte HTML page both, with no output written' $corruptOk $corruptDetail
+
+  # ---------------------------------------------------------------- S22.03 the missing model
+  $absent = Join-Path $Work 'rembg-no-such-model.onnx'
+  $missing = Invoke-RemoveBg 'modelmissing' $fPortrait $absent
+  $missingMsg = '尚未取得'
+  $missingOk = ($missing.Exit -eq 3) -and ($missing.Failure -match $missingMsg) -and
+               ($missing.Why -match 'File\.Exists=false') -and ($null -eq $missing.Out) -and
+               ($missing.ModelPathLine -match 'exists=False')
+  $missingDetail = "path='$absent' existsAfter=$(Test-Path -LiteralPath $absent) exit=$($missing.Exit) out=$(Get-OutName $missing.Out) msg='$($missing.Failure)' existsLine='$($missing.ModelPathLine)'"
+  Check 'S22.03 a path with no file is reported as ModelUnavailable (not as corrupt), the reason says File.Exists=false, and no output written' $missingOk $missingDetail
+
+  # ---------------------------------------------------------------- S22.04 the non-portrait picture
+  # THE CHECK THIS WHOLE SECTOR EXISTS FOR. The model is a portrait model; on a QR scene the mask
+  # is empty. Writing a fully transparent PNG would hand the user a blank file with a success
+  # message, so the product must refuse BY NAME and write NOTHING.
+  $noSubject = Invoke-RemoveBg 'nosubject' $fNoSubject $model
+  $noSubjectMsg = '找不到人像主體'
+  $noSubjectOk = ($noSubject.Exit -eq 3) -and ($noSubject.Failure -match $noSubjectMsg) -and
+                 ($noSubject.WroteLine -match 'count=0') -and ($null -eq $noSubject.Out) -and
+                 ($noSubject.Why -match 'max=0\.1057') -and
+                 (Test-Log $noSubject.Lines 'NoSubjectFound')
+  # The injection: with the fault the EXPECTED outcome becomes "it wrote a file", so the check goes
+  # red for exactly that reason - which is what proves it is not a tautology.
+  if ($fault -eq 'rembg-nosubject') {
+    $noSubjectOk = ($noSubject.Exit -eq 0) -and ($null -ne $noSubject.Out)
+  }
+  $noSubjectDetail = "exit=$($noSubject.Exit) out=$(Get-OutName $noSubject.Out) wrote='$($noSubject.WroteLine)' msg='$($noSubject.Failure)' why='$($noSubject.Why)'"
+  Check 'S22.04 a non-portrait picture is REFUSED by name (NoSubjectFound, exit 3, zero files written) instead of silently producing a fully transparent PNG' $noSubjectOk $noSubjectDetail
+
+  # ---------------------------------------------------------------- S22.05 the portrait fixture
+  $portrait = Invoke-RemoveBg 'portrait' $fPortrait $model
+  $portraitOk = $haveModel -and ($portrait.Exit -eq 0) -and ($null -ne $portrait.Out) -and
+                (Test-Log $portrait.Lines 'worker result: ok=True') -and
+                (Test-Log $portrait.Lines 'remove-bg summary: . 1 png from 1 source')
+  if (-not $haveModel) {
+    Inconclusive 'S22.05 needs a model (the portrait fixture was still run, and the result is reported below)'
+  }
+  $portraitDetail = "exit=$($portrait.Exit) out=$(Get-OutName $portrait.Out) size=$($portrait.OutSize) outputLine='$($portrait.OutputLine)'"
+  Check 'S22.05 a portrait fixture really goes through the worker and comes back as one written PNG next to the source' $portraitOk $portraitDetail
+
+  # ---------------------------------------------------------------- S22.06 the output is a real PNG
+  # Three independent facts about the artefact: its bytes start with the PNG signature, the file
+  # really decodes, and it decodes with an ALPHA channel (a JPEG could not carry the mask at all,
+  # which is why this tool's format is fixed).
+  $pngOk = $false
+  $pngDetail = 'no output file'
+  if ($null -ne $portrait.Out) {
+    $magic = [System.IO.File]::ReadAllBytes($portrait.Out)[0..7]
+    $sig = ($magic -join ',') -eq '137,80,78,71,13,10,26,10'
+    $frame = $null
+    $f = [System.IO.File]::OpenRead($portrait.Out)
+    try {
+      $frame = [System.Windows.Media.Imaging.BitmapFrame]::Create($f,
+        [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+        [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    } catch { $frame = $null } finally { $f.Dispose() }
+    $fmt = ''
+    $hasAlpha = $false
+    if ($null -ne $frame) {
+      $fmt = [string]$frame.Format
+      $hasAlpha = ($fmt -eq 'Bgra32') -or ($fmt -eq 'Pbgra32')
+    }
+    $pngOk = $sig -and ($null -ne $frame) -and $hasAlpha
+    # The injected wrong expectation: pretend the decoded frame must NOT carry alpha.
+    if ($fault -eq 'rembg-png') { $pngOk = $sig -and ($null -ne $frame) -and (-not $hasAlpha) }
+    $pngDetail = "signature=$sig decoded=$($null -ne $frame) format='$fmt' hasAlpha=$hasAlpha bytes=$((Get-Item -LiteralPath $portrait.Out).Length)"
+  } else {
+    Inconclusive 'S22.06 needs a written PNG from S22.05'
+  }
+  Check 'S22.06 the artefact really is a PNG that decodes with an alpha channel (signature bytes, decoded frame and its pixel format, read from the file)' $pngOk $pngDetail
+
+  # ---------------------------------------------------------------- S22.07 the mask, measured
+  # THE MASK IS MEASURED FROM THE FILE, NOT FROM THE PRODUCT'S SUMMARY. The numbers come from
+  # --remove-bg-inspect reading the PNG the product wrote; the same channels were measured
+  # independently earlier (both sets are in fixtures\rembg\README.md).
+  #
+  # Each region can genuinely fail:
+  #   centre (middle 40 percent) measured 0.89 -> needs >= 0.80 (head and chest are here)
+  #   top band (top 10 percent)  measured 0.02 -> needs <= 0.10 (only hair is up there)
+  #   top-right corner           measured 0.00 -> needs <= 0.05 (studio backdrop)
+  #   clear fraction             measured 0.46 -> needs >= 0.20 (a real cutout has real background)
+  # The BOTTOM-LEFT corner is deliberately NOT asserted: the astronaut's suit and the dogs really
+  # do occupy it (measured 0.9662), so demanding transparency there would assert a falsehood about
+  # this photograph.
+  $inspect = $null
+  $maskOk = $false
+  $maskDetail = 'no inspect run'
+  # !! The condition is "a file was written", NOT "$pngOk" (fixed 2026-10-08). It used to be
+  # `$pngOk -and ...`, which meant that ANY failure of S22.06 sent this check down the
+  # Inconclusive branch as well - and Inconclusive REGISTERS AN EXTRA ITEM, so the run ended with
+  # `registered 14 checks but the selected sections promise 13` and a FATAL that hid the real
+  # failure. Measured while drilling the `rembg-png` fault: S22.07 went INCONCLUSIVE *and* FAIL in
+  # the same run. A guard must depend on what this check needs (the artefact), never on the
+  # neighbouring check's verdict.
+  if ($null -ne $portrait.Out) {
+    $inspect = Get-RemoveBgInspect 'portrait' $portrait.Out
+    $maskOk = ($inspect.Centre -ge 0.80) -and ($inspect.Top -le 0.10) -and
+              ($inspect.CornerTR -le 0.05) -and ($inspect.Clear -ge 0.20)
+    $maskDetail = "centre=$($inspect.Centre) need>=0.80 ; top=$($inspect.Top) need<=0.10 ; "
+    $maskDetail += "cornerTR=$($inspect.CornerTR) need<=0.05 ; clear=$($inspect.Clear) need>=0.20 ; "
+    $maskDetail += "min=$($inspect.Min) max=$($inspect.Max) mean=$($inspect.Mean) ; $($inspect.Band) | $($inspect.Corners)"
+  } else {
+    Inconclusive 'S22.07 needs the written PNG from S22.05'
+  }
+  Check 'S22.07 the written PNG keeps the SUBJECT opaque and drops the BACKGROUND: centre band >= 0.80, top band <= 0.10, top-right corner <= 0.05, and at least 20 percent of pixels fully transparent' $maskOk $maskDetail
+
+  # ---------------------------------------------------------------- S22.08 the PNG is the same size
+  # A cutout resizes nothing: the output is the source minus its background. This also pins the
+  # upscale: the mask comes back at 640x512 (512-edge, 32-divisible) and is scaled using THAT
+  # tensor size as the source, so a "round the ideal ratio" upscale would show up here or as a
+  # shifted mask above.
+  $sizeOk = $false
+  $sizeDetail = 'no output file'
+  if ($null -ne $portrait.Out) {
+    $srcSize = Get-ImageSize $portrait.Src
+    $outSize = $portrait.OutSize
+    $sizeOk = ($outSize -eq $srcSize) -and ($outSize -eq '512x410')
+    $sizeDetail = "source=$srcSize output=$outSize outputLine='$($portrait.OutputLine)'"
+  } else {
+    Inconclusive 'S22.08 needs the written PNG from S22.05'
+  }
+  Check 'S22.08 the output PNG has exactly the source pixel size (512x410): remove-bg resizes nothing, and the mask upscale itself is pinned by S22.07' $sizeOk $sizeDetail
+
+  # ---------------------------------------------------------------- S22.09 the sources are untouched
+  $touched = @()
+  $runs = @($noSubject, $missing, $corruptHalf, $corrupt2, $portrait)
+  foreach ($r in $runs) {
+    if ($null -eq $r) { continue }
+    if (-not $r.Untouched) { $touched += $r.Name }
+  }
+  $untouchedOk = $touched.Count -eq 0
+  $untouchedDetail = "changed=($($touched -join ',')) runs=$($runs.Count) shaPortrait=$((Get-Sha $fPortrait).Substring(0,12)) expected=$($fxShaBefore[$fPortrait].Substring(0,12))"
+  Check 'S22.09 every source file this section used still has the same sha256, length and mtime: remove-bg never modifies, moves or deletes a source (spec 5)' $untouchedOk $untouchedDetail
+
+  # ---------------------------------------------------------------- S22.10 the model path crosses the pipe
+  # The model path is the ONLY new fact this op puts on the protocol (WorkerMessage.removeBgModel).
+  # A path that is valid in the UI process can arrive as null on the other side, and the worker's
+  # working directory is not the UI's - so the worker's OWN job line has to name the path it was
+  # given. That line is the only place the crossing is observable.
+  # A Windows path is not a regex: Get-LogLine runs its pattern through Select-String, where '.onnx'
+  # matches anything and a stray '\' can make the pattern invalid and silence the search. Escaping
+  # the path first is what turns "the log contains this string" into a real question about the log.
+  $sentInWorker = (Get-LogLine $corrupt2.Lines ([regex]::Escape($junkPath))) -ne ''
+  $pipeOk = ($corrupt2.JobLine -match 'op=remove-bg') -and $sentInWorker
+  $pipeDetail = "jobLine='$($corrupt2.JobLine)' workerNamedThePath=$sentInWorker sent='$junkPath' workerMsg='$($corrupt2.Failure)'"
+  Check 'S22.10 the model path really travels to the worker process: the worker ran op=remove-bg and the sentence IT wrote names the exact absolute --remove-bg-model path the UI sent' $pipeOk $pipeDetail
+
+  # ---------------------------------------------------------------- S22.11 a refusal writes nothing
+  # All refusal states together: the corrupt model (both shapes), the missing model and the empty
+  # mask. None may leave anything in its run folder - the source copy is not counted, and the
+  # product may not add a file or a temp file either.
+  $refusalClean = $true
+  $refusalDetail = @()
+  foreach ($r in @($noSubject, $missing, $corruptHalf, $corrupt2)) {
+    $files = @(Get-ChildItem -LiteralPath $r.Dir -File)
+    $extra = @($files | Where-Object { $_.FullName -ne $r.Src })
+    $refusalDetail += "$($r.Name)=$($extra.Count)"
+    if ($extra.Count -ne 0) { $refusalClean = $false }
+  }
+  Check 'S22.11 every refusal state leaves its folder with the source copy alone: no PNG, no leftover temp file, nothing' $refusalClean ("extraFilesPerRun=($($refusalDetail -join ' '))")
+
+  # ---------------------------------------------------------------- S22.12 three states, three messages
+  # The product semantics, asserted as data: "there is no model yet", "the model file is damaged"
+  # and "this picture has no portrait subject" are three different causes with three different next
+  # steps, so they cannot share one sentence.
+  $msgs = @($noSubject.Failure, $missing.Failure, $corruptHalf.Failure)
+  $distinctOk = (($msgs | Select-Object -Unique).Count -eq 3) -and
+                ($msgs[0] -match $noSubjectMsg) -and ($msgs[1] -match $missingMsg) -and
+                ($msgs[2] -match $corruptMsg)
+  $distinctDetail = "distinct=$(($msgs | Select-Object -Unique).Count) m1='$($msgs[0])' m2='$($msgs[1])' m3='$($msgs[2])'"
+  Check 'S22.12 the three refusal states produce three DIFFERENT user messages (no portrait subject / model never fetched / model file damaged)' $distinctOk $distinctDetail
+
+  # ---------------------------------------------------------------- S22.13 the committed fixtures are untouched
+  $fxStateAfter = Get-FixtureTreeState $fxDir
+  $fxNew = @()
+  foreach ($line in $fxStateAfter) {
+    if ($fxStateBefore -notcontains $line) { $fxNew += $line }
+  }
+  $fxChanged = @()
+  foreach ($p in @($fPortrait, $fNoSubject)) {
+    if ($fxShaBefore[$p] -ne (Get-Sha $p)) { $fxChanged += (Split-Path -Leaf $p) }
+  }
+  $fxCleanOk = ($fxNew.Count -eq 0) -and ($fxChanged.Count -eq 0)
+  $fxDetail = "newInFixtures=($($fxNew -join ' | ')) changedFixtures=($($fxChanged -join ',')) fixtureTreeFiles=$($fxStateBefore.Count)"
+  Check 'S22.13 the committed fixtures folder is left untouched: this section never writes next to a fixture and every fixture keeps its sha256' $fxCleanOk $fxDetail
+
+  # ---- the two injections of this section, stated where a red run is read ----
+  if ($fault -eq 'rembg-nosubject') {
+    Write-Host 'INJECTION rembg-nosubject: S22.04 now expects a WRITTEN file for a QR scene. That ONE check must'
+    Write-Host '                    go red (it did, measured 2026-10-08), which is what proves the empty-mask'
+    Write-Host '                    refusal is load-bearing rather than a tautology. It is deliberately surgical:'
+    Write-Host '                    a broader injection turned S22.11/S22.12 red too and destroyed the signal.'
+    Write-Host '                    S22.02 is kept falsifiable from the other side - it asserts a sentence that'
+    Write-Host '                    only a corrupt file can produce, plus "no output file" for both runs.'
+  }
+  if ($fault -eq 'rembg-png') {
+    Write-Host 'INJECTION rembg-png: S22.06 now expects the decoded frame to have NO alpha channel. It must go'
+    Write-Host '                    red, which proves that assertion reads the real pixel format.'
+  }
+}
 function Invoke-S21 {
   Write-Host "=== S21 merge-pdf sorting window: the shown order becomes the output page order ==="
 
@@ -2674,8 +3144,12 @@ function Invoke-S21 {
     $tm = [regex]::Match([string]$line, 'tool list: \d+ id=(\S+)')
     if ($tm.Success) { $jpgIds += $tm.Groups[1].Value }
   }
-  $pdfCountOk = (Test-Log $tlPdf.Lines 'count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\]')
-  $jpgCountOk = (Test-Log $tlJpg.Lines 'count=5 tools=')
+  # !! 2026-10-08: the PDF list is SEVEN now (remove-bg joined it) and the JPEG list is SIX. The
+  # JPEG side is asserted WHOLE rather than by a count, because the question this check asks is
+  # "does a non-PDF see merge-pdf" - and a bare count would go green if merge-pdf appeared while
+  # some other tool silently vanished.
+  $pdfCountOk = (Test-Log $tlPdf.Lines 'count=7 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf,remove-bg\]')
+  $jpgCountOk = (Test-Log $tlJpg.Lines 'count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,remove-bg\]')
   $mergeOnlyForPdf = ($pdfIds -contains 'merge-pdf') -and (-not ($jpgIds -contains 'merge-pdf'))
   Check 'S21.01 merge-pdf is offered for a PDF source and NOT for any other source, so the sorting window can belong to that one sector only' `
     ($pdfCountOk -and $jpgCountOk -and $mergeOnlyForPdf) `
@@ -2862,7 +3336,7 @@ function Invoke-S21 {
   # NOTE: every literal [ ] in these patterns is escaped. Select-String takes a REGEX, and an
   # unescaped `[...]` becomes a character class - measured 2026-10-07: the first version threw
   # "range in reverse order" on `[rotate90,...,read-qr]` and killed the run at S21.10.
-  $rtClassified = Test-Log $rtTools.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\] \(source=PDF, status=Ready'
+  $rtClassified = Test-Log $rtTools.Lines 'tool list: count=7 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf,remove-bg\] \(source=PDF, status=Ready'
   $rtHow = Test-Log $rtTools.Lines 'runtime classification of 3 payload file\(s\) \(FormatCatalog\.Classify\)'
   Check 'S21.10 a payload of PDFs is accepted by the RUNTIME classifier (FormatCatalog.Classify), not merely by a catalog query: status=Ready with merge-pdf in the list, where before option (b) the same payload answered status=Unsupported with zero tools' `
     ($rtClassified -and $rtHow) `
@@ -2930,7 +3404,10 @@ function Invoke-S21 {
   # The wheel's own line: this is where `targets=0` (no format sector) and `layer=tool` are
   # measured for a PDF payload.
   $realNoFormatLayer = Test-Log $real.Lines 'wheel from OLE payload: files=3 status=Ready source=PDF targets=0'
-  $realToolLayer = Test-Log $real.Lines 'layer=tool tools=6'
+  # Measured 2026-10-08, with the seventh tool in the catalog: layer=tool tools=7. The ENTER line
+  # asserted above names index=5 op=merge-pdf, so the sector that was selected really is the merge
+  # one - the count only says "the tool layer is what offered it".
+  $realToolLayer = Test-Log $real.Lines 'layer=tool tools=7'
   # The order the merge actually ran with, as the product logged it when it started the job.
   $realOrderLine = Get-LogLine $real.Lines 'merge: start files=3 order='
   $realOrderOk = [bool]($realOrderLine -match 'order=\[fx-a\.pdf,fx-b\.pdf,fx-c\.pdf\]')
@@ -3006,6 +3483,7 @@ foreach ($s in $sections) {
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
     'S21' { Expect 13; Invoke-S21 }
+    'S22' { Expect 13; Invoke-S22 $FaultInjection }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

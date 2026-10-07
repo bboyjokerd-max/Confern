@@ -16,3 +16,14 @@ packages/
 *.pfx
 *.snk
 secrets.json
+
+# 去背（工具 `remove-bg`）的人像模型：12,984,781 bytes 的二進位檔，**刻意不進版控**。
+# 它不是建置產物而是外部資源，所以放在**執行檔旁邊的 `models\`**（預設解析位置：
+# RemoveBgModel.ResolvePath），由 `tools/get-rembg-model.ps1` 下載並驗 sha256
+# （25F165DA9BFD30830A575F1F0490F1ACD995975CB349BC02F3D79332E1FE5CF6）取得。
+# 缺這個檔是**一個具名的產品狀態**（ConversionError.ModelUnavailable），不是崩潰：
+# 輪盤上的扇形照樣出現，按下去會說出下一步（跑那支腳本）。
+#
+# ⚠ `models/` 只比對得出**這個路徑**；原始碼樹裡沒有第二個地方放模型，
+#    所以不需要更寬的規則（例如 `*.onnx`）——那會連未來的測試用小模型一起擋掉。
+models/

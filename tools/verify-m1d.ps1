@@ -850,9 +850,15 @@ if ($payloadLine) {
   if ($tm.Success) { $layerTools = [int]$tm.Groups[1].Value }
 }
 $dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $layerDump).Length } else { -1 }
-Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=5 tools) and dumps that frame' `
-  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 5) -and ($dumpLen -gt 8000)) `
-  "exit=$($layerRun.Exit) tools=$layerTools (expected 5: rotate90+strip-metadata+compress+crop+read-qr; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+# !! 2026-10-08: the number here is SIX, not seven, and the difference is the point. `remove-bg` was
+# added (the seventh tool), so the id list grew from six to seven - but this payload is a JPEG, and
+# `ToolCatalog.ToolsFor` only offers `merge-pdf` for a PDF. Measured on this run: layer=format
+# tools=6 with the tool list [rotate90,strip-metadata,compress,crop,read-qr,remove-bg]. The count is
+# a plain number because the FRAME is what this check is about; verify-m3d S18.03 asserts the whole
+# id list of both sources, which is where "a tool leaked into a format that cannot run it" is caught.
+Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (an image sees 6 tools) and dumps that frame' `
+  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 6) -and ($dumpLen -gt 8000)) `
+  "exit=$($layerRun.Exit) tools=$layerTools (expected 6 for a JPEG: rotate90+strip-metadata+compress+crop+read-qr+remove-bg, and merge-pdf is correctly absent; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
 
 # =============================================================================
 #  S12.21 CONCURRENCY (2026-10-06): two conversions running AT THE SAME TIME must

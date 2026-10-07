@@ -742,6 +742,48 @@ internal sealed class WheelPresenter
                 g.DrawLine(pen, mGapX, cy - mSmallH, mRight0, cy - mLargeH);
                 g.DrawLine(pen, mGapX, cy + mSmallH, mRight0, cy + mLargeH);
                 return true;
+
+            case ToolIcon.RemoveBg:
+                // 去背：**四個角標 ＋ 一個人的剪影**（圓頭 ＋ 梯形身）。
+                // 形狀為什麼是這個、以及刻意不用哪些畫法（剪刀／棋盤格／完整外框）寫在
+                // ToolIcon.RemoveBg 的註解裡，這裡只記尺寸。
+                //
+                // 版面（以 17px 為例）：整張圖 16.15 x 16.15 px，筆寬 max(1.4, s/9) = 1.89px。
+                //   角標：四個 0.16s 的 L 形，圍出 0.82s 的方框（x,y ∈ ±0.41s）
+                //   頭：   圓心 (cx, cy − 0.17s)、半徑 0.115s ⇒ 頭頂在 −0.285s
+                //   身：   上緣 ±0.16s（在 cy + 0.02s）、下緣 ±0.30s（在 cy + 0.41s ＝ 角標的下緣線）
+                //
+                // ⚠ 兩個淨空是量出來的（17px、筆寬 1.89px）：
+                //   · 頭頂（−0.285s）到角標上緣線（−0.41s）：0.125s ≈ 2.1px ⇒ 兩者分得開；
+                //   · 身的左右緣（下緣 ±0.30s）到角標左右線（±0.41s）：0.11s ≈ 1.9px ⇒ 剛好等於
+                //     一個筆寬。**再寬一點的身就會與角標黏在一起**，所以 0.30s 是這個尺寸的上限
+                //     （與 Crop／ReadQr 同一條紀律：相鄰記號的淨空必須大於筆寬的一半）。
+                float rbCorner = s * 0.41f;    // 角標圍出的半寬／半高
+                float rbArm = s * 0.16f;       // 每一支 L 形手臂的長度
+                g.DrawLine(pen, cx - rbCorner, cy - rbCorner, cx - rbCorner + rbArm, cy - rbCorner);
+                g.DrawLine(pen, cx - rbCorner, cy - rbCorner, cx - rbCorner, cy - rbCorner + rbArm);
+                g.DrawLine(pen, cx + rbCorner, cy - rbCorner, cx + rbCorner - rbArm, cy - rbCorner);
+                g.DrawLine(pen, cx + rbCorner, cy - rbCorner, cx + rbCorner, cy - rbCorner + rbArm);
+                g.DrawLine(pen, cx - rbCorner, cy + rbCorner, cx - rbCorner + rbArm, cy + rbCorner);
+                g.DrawLine(pen, cx - rbCorner, cy + rbCorner, cx - rbCorner, cy + rbCorner - rbArm);
+                g.DrawLine(pen, cx + rbCorner, cy + rbCorner, cx + rbCorner - rbArm, cy + rbCorner);
+                g.DrawLine(pen, cx + rbCorner, cy + rbCorner, cx + rbCorner, cy + rbCorner - rbArm);
+                // 頭（圓）
+                float headR = s * 0.115f;
+                g.DrawEllipse(pen, cx - headR, cy - s * 0.17f - headR, headR * 2f, headR * 2f);
+                // 身（梯形：肩窄、底寬——反過來會讀成「一個箱子」而不是「一個人」）
+                var shoulders = new[]
+                {
+                    new PointF(cx - s * 0.16f, cy + s * 0.02f),
+                    new PointF(cx + s * 0.16f, cy + s * 0.02f),
+                    new PointF(cx + s * 0.30f, cy + s * 0.41f),
+                    new PointF(cx - s * 0.30f, cy + s * 0.41f),
+                };
+                g.DrawLine(pen, shoulders[0], shoulders[1]);
+                g.DrawLine(pen, shoulders[1], shoulders[2]);
+                g.DrawLine(pen, shoulders[2], shoulders[3]);
+                g.DrawLine(pen, shoulders[3], shoulders[0]);
+                return true;
         }
         // 沒有任何 case 命中（＝`ToolIcon` 多了一個值而這裡忘了畫）：**大聲回報「沒畫」**。
         // 這一行取代了 2026-10-07 之前那個空的 switch 尾巴——它當時讓第五顆工具靜默地變成空白圖示。

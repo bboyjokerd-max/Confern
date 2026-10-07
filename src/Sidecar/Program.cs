@@ -249,6 +249,29 @@ internal static class Program
             return App.MergePdfInspectPdf(inspectEvidence, opt.MergePdfInspect!);
         }
 
+        // M3 第七顆扇形（2026-10-08）：`--remove-bg`——走**完整的一條路**（worker 行程、
+        // op=remove-bg、管道、快照）。位置同樣在單一實例守衛之前（理由與 `--crop` 一字不差）。
+        //
+        // ⚠ 它**刻意走真的 worker**而不是同一個行程內的引擎：模型路徑是這個 op 唯一跨管道的
+        // 新事實（WorkerMessage.removeBgModel），而「UI 找到模型、worker 找不到」正是同一個
+        // 行程內的呼叫**永遠驗不到**的那件事（兩邊的工作目錄不同）。
+        if (!string.IsNullOrEmpty(opt.RemoveBg))
+        {
+            Native.AttachParentConsole();
+            using var removeBgEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RemoveBgDiagnostic(removeBgEvidence, opt);
+        }
+
+        // M3 第七顆扇形（2026-10-08）：`--remove-bg-inspect <png>`——**只讀**量一張圖的 alpha
+        // 統計。它是套件唯一能從**產品自己的產物**回答「主體留下了、背景不見了」的縫
+        // （見 <see cref="Options.RemoveBgInspect"/>）。同樣在守衛之前。
+        if (!string.IsNullOrEmpty(opt.RemoveBgInspect))
+        {
+            Native.AttachParentConsole();
+            using var inspectEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RemoveBgInspectPng(inspectEvidence, opt.RemoveBgInspect!);
+        }
+
         // M3 第四顆扇形：`--crop`——走**完整的一條路**（worker 行程、op=crop、管道、快照）。
         //
         // ⚠ 位置刻意在單一實例守衛**之前**（與 `--convert` 同一條規矩）：守衛是為了擋下第二個
@@ -415,6 +438,25 @@ internal sealed class Options
                                     ORDER: merge-pdf's product is a binary, so "is page 3 really
                                     fx-c's second page" can only be answered from each page's own
                                     geometry and content
+          --remove-bg <path>        run tool remove-bg on <path> through the real WORKER process
+                                    (op=remove-bg over the pipe) and report; the output is a PNG of
+                                    the SAME SIZE as the source with the background made
+                                    transparent. Three states are named and write NOTHING: the
+                                    portrait model is missing (ModelUnavailable), the model file is
+                                    corrupt or half-downloaded (ModelCorrupt - a DIFFERENT message),
+                                    and "no portrait subject in this picture" (NoSubjectFound: the
+                                    model is a PORTRAIT model, so a QR code or a landscape gives an
+                                    almost empty mask); the source is never touched
+          --remove-bg-model <file>  with --remove-bg: which model file to use (default: models\
+                                    model_fp16.onnx beside the executable). This is the seam that
+                                    lets the suite walk the missing and the corrupt state for real;
+                                    the product path always uses the default location
+          --remove-bg-inspect <png> READ ONLY: print one PNG's size, its alpha statistics (alpha
+                                    present, min/max/mean over the whole alpha channel, the fraction
+                                    of fully opaque and fully transparent pixels) and the alpha mean
+                                    of the centre band against the four corner bands. This is what
+                                    makes "the subject is opaque and the background is not" a
+                                    measurement instead of a claim; it writes nothing
           --qr-classify-selftest    print the http/https classification of 18 known inputs (and
                                     whether the browser target agrees) and exit; touches no window
                                     and never starts a process
@@ -648,6 +690,56 @@ internal sealed class Options
     /// 而 0.1 pt 的解析度對「這是不是原來那一頁」完全足夠（fixture 之間差 10 pt 以上）。
     /// </summary>
     public string? MergePdfInspect;
+
+    /// <summary>
+    /// M3 診斷（2026-10-08）：`--remove-bg &lt;path&gt;` 對這個檔案跑工具 `remove-bg`
+    /// （**第七顆扇形，M3 的最後一顆**），走**完整的一條路**（worker 行程、`op=remove-bg`、
+    /// 管道、快照）——形狀與 <see cref="Crop"/> 一字不差。
+    ///
+    /// ⚠ 這一條**走真的 worker**而不是同一個行程內的引擎：模型路徑是這個 op **唯一**
+    /// 跨管道的新事實（<c>WorkerMessage.removeBgModel</c>），而「UI 找到模型、worker 找不到」
+    /// 是同一個行程內的呼叫**永遠驗不到**的那件事（兩邊的工作目錄不同）。
+    ///
+    /// ⚠ 它把三種狀態都當成**正常結果**印出來（回傳碼 3），而不是讓它們變成例外：
+    /// 缺模型、模型損壞、找不到人像主體，三者的共同點是**一個檔案都不寫**。
+    /// 回傳碼：0 成功產出 PNG、1 來源被動到（規格 §5 紅線）、2 參數或來源檔本身的問題、
+    /// 3 引擎拒絕（三種狀態之一）——「正確的拒絕」與「這條診斷壞了」必須分得開。
+    /// </summary>
+    public string? RemoveBg;
+
+    /// <summary>
+    /// M3 診斷（2026-10-08）：`--remove-bg-model &lt;file&gt;` 指定去背要用哪一顆模型
+    /// （預設＝執行檔旁邊的 `models\model_fp16.onnx`）。
+    ///
+    /// **為什麼這條接縫非有不可**：這顆模型不進版控，所以「檔案不在」是一個使用者真的會遇到的
+    /// 狀態；而「檔案在但是壞的」是另一個（下載中斷）。兩個狀態的訊息**刻意不同**
+    /// （見 <see cref="ConversionError.ModelUnavailable"/>／<see cref="ConversionError.ModelCorrupt"/>），
+    /// 而要有辦法斷言那件事，就必須能把引擎指向一個不存在的檔與一個被截斷的檔。
+    /// 正式路徑（輪盤 → commit → worker）**一律用預設位置**，不讀這個旗標。
+    /// </summary>
+    public string? RemoveBgModel;
+
+    /// <summary>
+    /// M3 診斷（2026-10-08）：`--remove-bg-inspect &lt;png&gt;`——**只讀**印出一張 PNG 的
+    /// 尺寸、alpha 統計（有沒有 alpha 通道、min/max/mean、全不透明與全透明的像素比例）
+    /// 以及「中央帶 vs 四角帶」的平均 alpha。
+    ///
+    /// **為什麼這是整個切片的關鍵**：去背的產物是一個二進位檔，而「主體留下來了、背景不見了」
+    /// 不可以靠產品的 `ok=True` 回答——那只證明它自己覺得成功了。這一條把**成品自己的像素**
+    /// 變成可斷言的數字，所以套件是拿**產品寫出來的檔**在比對，不是拿產品的報告在比對。
+    ///
+    /// 輸出格式（固定、可被 regex 反解，改它要先改 <c>tools/verify-m3d.ps1</c> 的 S22）：
+    /// <code>
+    /// remove-bg inspect: file=&lt;name&gt; size=&lt;w&gt;x&lt;h&gt; format=&lt;pf&gt; hasAlpha=&lt;True|False&gt;
+    /// remove-bg inspect: alpha min=&lt;f4&gt; max=&lt;f4&gt; mean=&lt;f4&gt; opaque=&lt;f4&gt; clear=&lt;f4&gt;
+    /// remove-bg inspect: band centre=&lt;f4&gt; corner=&lt;f4&gt; top=&lt;f4&gt; bottom=&lt;f4&gt; left=&lt;f4&gt; right=&lt;f4&gt;
+    /// remove-bg inspect done: file=&lt;name&gt; ok=True
+    /// </code>
+    /// ⚠ <c>corner=</c> 是**四個角帶的平均**（每一個角帶是各邊 10 %），所以它是「背景」最粗的
+    /// 代理指標；中央帶是中間 40 %（0.30–0.70）。
+    /// </summary>
+    public string? RemoveBgInspect;
+
     /// <summary>
     /// M3 診斷（2026-10-07 切片 2）：`--qr-worker &lt;path&gt;` 對這個檔案跑工具 `read-qr`，
     /// 但**走真的 worker 行程**（`op=read-qr`、管道、快照）——形狀與 <see cref="Crop"/> 一字不差。
@@ -1003,6 +1095,9 @@ internal sealed class Options
                 // （排序視窗是下一個切片），所以這裡沒有對應的 ??= 那一行。
                 case "--merge-pdf": if (i + 1 < args.Length) o.MergePdf = args[++i]; break;
                 case "--merge-pdf-inspect": if (i + 1 < args.Length) o.MergePdfInspect = args[++i]; break;
+                case "--remove-bg": if (i + 1 < args.Length) o.RemoveBg = args[++i]; break;
+                case "--remove-bg-model": if (i + 1 < args.Length) o.RemoveBgModel = args[++i]; break;
+                case "--remove-bg-inspect": if (i + 1 < args.Length) o.RemoveBgInspect = args[++i]; break;
                 case "--qr-worker": if (i + 1 < args.Length) o.QrWorker = args[++i]; break;
                 case "--qr-classify-selftest": o.QrClassifySelfTest = true; break;
                 case "--qr-open-selftest": o.QrOpenSelfTest = true; break;
@@ -2705,8 +2800,334 @@ internal static class App
     }
 
     /// <summary>
-    /// 引擎這一輪寫出來的裁切輸出檔（在來源檔旁邊找）。回 null＝找不到，由呼叫端說出來。
+    /// M3 診斷（2026-10-08）：`--remove-bg &lt;path&gt;`——工具 `remove-bg`（第七顆扇形）走
+    /// **完整的一條路**（worker 行程、`op=remove-bg`、管道、快照），形狀與
+    /// <see cref="MergePdfDiagnostic"/> 一字不差。
     ///
+    /// 這一條要能斷言四件事，所以它印的東西比別的診斷多：
+    /// <list type="number">
+    /// <item><b>三種狀態各自有名字</b>：<c>remove-bg snapshot:</c> 之後的
+    /// <c>remove-bg failure:</c> 行會帶 <see cref="ConversionError"/> 的名字
+    /// （`ModelUnavailable`／`ModelCorrupt`／`NoSubjectFound`），而回傳碼是 **3**
+    /// ——「引擎正確地拒絕」與「這條診斷壞了」必須分得開。</item>
+    /// <item><b>拒絕時一個檔都沒寫</b>：跑之前與跑之後各掃一次來源資料夾裡
+    /// <b>所有以來源主檔名開頭的檔案</b>（<c>dir state:</c> 兩行 ＋ <c>remove-bg wrote:</c> 一行）。
+    /// 掃整個前綴而不是只掃那一個預期檔名，是為了讓「寫到一半的殘檔」也算進去——
+    /// 那正是這一條要防的東西。</item>
+    /// <item><b>來源檔沒被動到</b>（規格 §5 紅線）：sha256／長度／mtime 三項逐檔比對。</item>
+    /// <item><b>產物真的存在且與來源同尺寸</b>：成功時印出那一個新檔的名字與從**它自己的像素**
+    /// 量到的尺寸（套件再拿它去跑 <c>--remove-bg-inspect</c> 量 alpha）。</item>
+    /// </list>
+    ///
+    /// <param name="evidence">證據通道（＝斷言對象）。</param>
+    /// <param name="opt">命令列。</param>
+    /// <returns>
+    /// 0 ＝真的寫出了一張 PNG；1 ＝來源檔被動到（規格 §5）；2 ＝參數或來源檔本身的問題；
+    /// 3 ＝引擎拒絕（缺模型／模型損壞／找不到人像主體，三者都不寫檔）。
+    /// </returns>
+    /// </summary>
+    internal static int RemoveBgDiagnostic(Evidence evidence, Options opt)
+    {
+        string source = opt.RemoveBg!;
+        if (!File.Exists(LongPath.Prepare(source)))
+        {
+            evidence.Line($"--remove-bg: source not found: {source}");
+            return 2;
+        }
+
+        string hash = Sha256Of(source);
+        long length = new FileInfo(source).Length;
+        DateTime mtime = File.GetLastWriteTimeUtc(source);
+        string modelPath = RemoveBgModel.ResolvePath(opt.RemoveBgModel);
+        bool modelExists = File.Exists(LongPath.Prepare(modelPath));
+
+        evidence.Line($"tool remove-bg: source={Path.GetFileName(source)} {length}B sha256={hash.Substring(0, 16)}");
+        // 模型的三件事**逐項**印出來：它是這一顆扇形唯一的外部資源，而「檔案不在」與
+        // 「檔案在但是壞的」的分界就在下面這兩行（`exists=` 與 `sha256=`／`length=`）。
+        // 有 sha256 才驗得動「這一輪用的是哪一顆模型」——不然「模型換了但結果一樣」看不出來。
+        evidence.Line($"tool remove-bg: model path='{modelPath}' exists={modelExists}" +
+                      (opt.RemoveBgModel == null ? " (default beside the exe)" : " (--remove-bg-model)"));
+        if (modelExists)
+        {
+            var info = new FileInfo(modelPath);
+            evidence.Line($"tool remove-bg: model length={info.Length}B (expected {RemoveBgModel.ExpectedBytes}B) " +
+                          $"sha256={Sha256Of(modelPath)}");
+        }
+
+        Settings settings = _settings ?? new Settings();
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"tool remove-bg: outputDir={outputDir ?? "(source folder)"}");
+
+        int journalRecovered = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
+        evidence.Line($"temp journal: recovered {journalRecovered} stale temp file(s)");
+
+        // 跑之前：來源資料夾裡所有「以來源主檔名開頭」的檔案（含殘檔）。
+        var beforeFiles = FilesWithStem(source);
+        evidence.Line($"remove-bg dir state before: {DescribeDirState(beforeFiles)}");
+
+        string exePath = Environment.ProcessPath ?? $"{ProductInfo.Name}.exe";
+        var client = new ConversionClient(exePath, evidence.Line);
+        try
+        {
+            // ⚠ 模型路徑**送絕對路徑**（ResolvePath 已經轉過）：相對路徑在 worker 那一側
+            // 會對上它自己的工作目錄，那不是這一端解析出來的那一個。
+            if (!client.Start(new[] { source }, "", 100, outputDir: outputDir,
+                              toolOp: WorkerProtocol.OpRemoveBg, out string? startError,
+                              removeBgModel: modelPath))
+            {
+                evidence.Line($"--remove-bg FAILED: the worker did not start ({startError})");
+                return 3;
+            }
+
+            var sw = Stopwatch.StartNew();
+            // 上限比合併寬：session 第一次建要 139–190 ms，加上 512 邊的前處理與推論，
+            // 實測單張 ~1.5 s（含 worker 起停）。30 s 是「這條路真的活著」與「它卡住了」的分界。
+            while (!client.Snapshot.Finished && sw.ElapsedMilliseconds < 30000) Thread.Sleep(20);
+            ConversionSnapshot snapshot = client.Snapshot;
+
+            evidence.Line($"remove-bg snapshot: finished={snapshot.Finished} done={snapshot.Done}/{snapshot.Total} " +
+                          $"ok={snapshot.Ok} failed={snapshot.Failed} error={snapshot.Error ?? "-"} " +
+                          $"line='{snapshot.Line}'");
+            foreach (string failure in snapshot.Failures)
+                evidence.Line($"remove-bg failure: {failure}");
+            // 「為什麼」＝引擎的 Detail。⚠ 只在失敗時印（與 merge-pdf 同一條規矩：成功的
+            // Detail 是一句摘要，「為什麼失敗」與它無關——印出來會讓套件拿一個假的事實去比對）。
+            if (snapshot.Failed > 0 && snapshot.LastDetail != null)
+                evidence.Line($"remove-bg why: {snapshot.LastDetail}");
+
+            var afterFiles = FilesWithStem(source);
+            evidence.Line($"remove-bg dir state after: {DescribeDirState(afterFiles)}");
+            var newFiles = afterFiles.Keys.Where(k => !beforeFiles.ContainsKey(k)).OrderBy(k => k).ToList();
+            evidence.Line($"remove-bg wrote: count={newFiles.Count}" +
+                          (newFiles.Count == 0 ? " (none)" : $" [{string.Join(",", newFiles.Select(Path.GetFileName))}]"));
+
+            string? output = null;
+            if (snapshot.Ok > 0 && newFiles.Count > 0)
+            {
+                output = newFiles[0];
+                (int w, int h) = MeasureImage(output);
+                evidence.Line($"remove-bg output: {Path.GetFileName(output)} " +
+                              $"exists={File.Exists(LongPath.Prepare(output))} size={w}x{h}");
+            }
+            else if (snapshot.Ok > 0)
+            {
+                evidence.Line("remove-bg output: the run reported success but no new file is in that folder");
+            }
+
+            bool untouched = true;
+            {
+                string nowHash = Sha256Of(source);
+                bool same = nowHash == hash && new FileInfo(source).Length == length
+                            && File.GetLastWriteTimeUtc(source) == mtime;
+                untouched = same;
+                evidence.Line($"tool remove-bg: source-untouched[{Path.GetFileName(source)}]={same} " +
+                              $"(sha256 {hash.Substring(0, 12)} -> {nowHash.Substring(0, 12)}, " +
+                              $"len {length}, mtime {(mtime == File.GetLastWriteTimeUtc(source) ? "same" : "CHANGED")})");
+            }
+
+            if (!untouched)
+            {
+                evidence.Line("--remove-bg FAILED: the source file was modified (spec 5 violation)");
+                return 1;
+            }
+            if (!snapshot.Finished)
+            {
+                evidence.Line("--remove-bg FAILED: the worker never finished");
+                return 3;
+            }
+            if (snapshot.Failed > 0 || snapshot.Ok == 0)
+            {
+                // ⚠ 這一條**不是**「診斷壞了」：缺模型、模型損壞、找不到人像主體，三者都是
+                // **正確的拒絕**（而且都不寫檔）。上面那幾行 `remove-bg failure:` 已經指名是哪一種，
+                // 套件要斷言的是「錯誤碼是哪一個」＋「`remove-bg wrote: count=0`」。
+                evidence.Line($"--remove-bg: REFUSED by the engine: ok={snapshot.Ok} " +
+                              $"failed={snapshot.Failed}; nothing was written");
+                return 3;
+            }
+            evidence.Line($"remove-bg summary: ✓ 1 png from 1 source, source untouched");
+            return 0;
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 來源資料夾裡**所有以「來源主檔名」開頭的檔案**（完整路徑 → 長度）。
+    ///
+    /// ⚠ 刻意用**前綴**掃而不是只掃那一個預期檔名：去背的輸出是「同主檔名 ＋ `.png`」，
+    /// 而撞名時產品會寫 `name (1).png`（<see cref="NamingPolicy"/>）。只掃一個候選名字的話，
+    /// 一個「寫了 `name (1).png`」的實作會被判成「什麼都沒寫」——那正是這一條要防的假綠燈。
+    /// 前綴掃法同時涵蓋殘檔（`name.tmp-…`），而殘檔正是「拒絕時一個檔都不該有」的重點。
+    /// </summary>
+    private static Dictionary<string, long> FilesWithStem(string source)
+    {
+        var found = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        string full = Path.GetFullPath(source);
+        string folder = Path.GetDirectoryName(full) ?? ".";
+        string stem = Path.GetFileNameWithoutExtension(full);
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(folder))
+            {
+                string name = Path.GetFileName(file);
+                // 來源自己不算輸出（`photo.jpg` 也以 `photo` 開頭）。
+                if (string.Equals(file, full, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!name.StartsWith(stem, StringComparison.OrdinalIgnoreCase)) continue;
+                try { found[file] = new FileInfo(file).Length; } catch (Exception) { }
+            }
+        }
+        catch (Exception ex)
+        {
+            found[$"(unreadable: {ex.GetType().Name})"] = -1;
+        }
+        return found;
+    }
+
+    /// <summary>上一個方法那一份字典的一行摘要（排序後，所以兩次呼叫可以直接比對）。</summary>
+    private static string DescribeDirState(Dictionary<string, long> state) =>
+        state.Count == 0
+            ? "count=0"
+            : $"count={state.Count} [{string.Join(",", state.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+                                                          .Select(k => $"{Path.GetFileName(k.Key)}:{k.Value}B"))}]";
+
+    /// <summary>
+    /// M3 診斷（2026-10-08）：`--remove-bg-inspect &lt;png&gt;`——**只讀**量一張圖的 alpha。
+    ///
+    /// **為什麼這一條是整個切片的關鍵**：去背的產物是一個二進位檔，而產品的 `ok=True`
+    /// 只證明「它自己覺得成功了」（一個「只把 alpha 全部寫成 0」的實作照樣會回 ok）。
+    /// 這一條從**成品自己的像素**把遮罩變成數字，所以套件是拿產品寫出來的檔在比對。
+    ///
+    /// 量的是五個區域的平均與最大 alpha：中央帶（中間 40 %）、四個角帶（各邊 10 %）、
+    /// 以及上下左右四條邊帶（各 10 %）。**角帶是「背景」最粗的代理指標**，而中央帶是
+    /// 「主體」的——人像構圖下主體的頭在畫面中上偏中，所以中央帶一定落在主體上。
+    ///
+    /// ⚠ 這**不是**在猜「哪裡是人」：它是一組**幾何固定**的區域統計，而選哪幾個區域、
+    /// 拿哪一條當斷言，是驗收那一側的判斷（見 <c>tools/verify-m3d.ps1</c> 的 S22）。
+    /// </summary>
+    internal static int RemoveBgInspectPng(Evidence evidence, string path)
+    {
+        if (!File.Exists(LongPath.Prepare(path)))
+        {
+            evidence.Line($"--remove-bg-inspect: file not found: {path}");
+            return 2;
+        }
+
+        // ⚠ WIC 的型別一律**寫全名**（System.Windows.Media.Imaging.…）：這個檔案已經有
+        // `using System.Drawing.Imaging;`，而 WPF 的 `PixelFormats` 與 GDI+ 的 `PixelFormat`
+        // 只差一個 s。加一行 `using System.Windows.Media.Imaging;` 不會撞名，但下一個在這裡
+        // 寫 `PixelFormats` 的人會以為它是那個 GDI+ 型別——全名讓這一格沒有歧義。
+        System.Windows.Media.Imaging.BitmapSource frame;
+        try
+        {
+            (frame, _) = ConversionEngine.DecodeFirstFrame(path);
+        }
+        catch (Exception ex)
+        {
+            evidence.Line($"--remove-bg-inspect: could not decode {Path.GetFileName(path)}: " +
+                          $"{ex.GetType().Name}: {ex.Message}");
+            return 2;
+        }
+
+        string pixelFormat = frame.Format.ToString();
+        // 「這張圖有沒有 alpha 通道」——**只有兩個位元組是真的帶 alpha 的來源格式**：
+        // Bgra32（非預乘）與 Pbgra32（預乘）。刻意**不用 `pixelFormat.Contains("A")` 這種寫法**：
+        // 那是對字串的猜測，而它會把一堆沒有 alpha 的格式判成有 alpha。
+        // 這一格是「JPEG 沒有透明通道，所以去背一定要寫 PNG」那一條斷言的依據，猜錯會讓它失去意義。
+        // 其餘格式（含 PNG 的 24 位元組）＝**沒有 alpha**，那是誠實的答案。
+        bool hasAlpha = frame.Format == System.Windows.Media.PixelFormats.Bgra32
+                        || frame.Format == System.Windows.Media.PixelFormats.Pbgra32;
+
+        var bgra = new System.Windows.Media.Imaging.FormatConvertedBitmap(
+            frame, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+        int w = bgra.PixelWidth, h = bgra.PixelHeight;
+        int stride = w * 4;
+        var pixels = new byte[(long)stride * h];
+        bgra.CopyPixels(pixels, stride, 0);
+
+        // 全圖 alpha 統計。
+        byte minA = 255, maxA = 0;
+        double sum = 0;
+        long opaque = 0, clear = 0;
+        for (int p = 0; p < pixels.Length; p += 4)
+        {
+            byte a = pixels[p + 3];
+            if (a < minA) minA = a;
+            if (a > maxA) maxA = a;
+            sum += a;
+            if (a == 255) opaque++;
+            else if (a == 0) clear++;
+        }
+        long total = (long)w * h;
+        if (total == 0)
+        {
+            evidence.Line($"--remove-bg-inspect: {Path.GetFileName(path)} has no pixels");
+            return 2;
+        }
+
+        evidence.Line($"remove-bg inspect: file={Path.GetFileName(path)} size={w}x{h} " +
+                      $"format={pixelFormat} hasAlpha={hasAlpha}");
+        evidence.Line($"remove-bg inspect: alpha min={minA / 255.0:F4} max={maxA / 255.0:F4} " +
+                      $"mean={sum / total / 255.0:F4} opaque={opaque / (double)total:F4} " +
+                      $"clear={clear / (double)total:F4}");
+
+        (double cm, double cx) = BandStats(pixels, w, h, 0.30, 0.70, 0.30, 0.70);
+        (double c1m, double c1x) = BandStats(pixels, w, h, 0.00, 0.10, 0.00, 0.10);
+        (double c2m, double c2x) = BandStats(pixels, w, h, 0.90, 1.00, 0.00, 0.10);
+        (double c3m, double c3x) = BandStats(pixels, w, h, 0.00, 0.10, 0.90, 1.00);
+        (double c4m, double c4x) = BandStats(pixels, w, h, 0.90, 1.00, 0.90, 1.00);
+        double cornerMean = (c1m + c2m + c3m + c4m) / 4;
+        double cornerMax = Math.Max(Math.Max(c1x, c2x), Math.Max(c3x, c4x));
+        (double topM, _) = BandStats(pixels, w, h, 0.00, 1.00, 0.00, 0.10);
+        (double botM, _) = BandStats(pixels, w, h, 0.00, 1.00, 0.90, 1.00);
+        (double leftM, _) = BandStats(pixels, w, h, 0.00, 0.10, 0.00, 1.00);
+        (double rightM, _) = BandStats(pixels, w, h, 0.90, 1.00, 0.00, 1.00);
+
+        // 兩個小數位：套件的門檻（0.80／0.10／0.05）離實測值很遠，所以這一級解析度足夠，
+        // 而少一位就少一個「因為四捨五入而在邊界上翻面」的機會。
+        evidence.Line($"remove-bg inspect: band centre={cm:F2} ({cx:F2}) corner={cornerMean:F2} ({cornerMax:F2}) " +
+                      $"top={topM:F2} bottom={botM:F2} left={leftM:F2} right={rightM:F2}");
+        // 四個角**各自**一列（2026-10-08 加入）。原本只有它們的平均，而平均會把「一個乾淨的角」
+        // 藏在其他三個角後面：這張人像照的左下角真的有東西（西裝與兩隻狗，實測 0.9662），
+        // 所以平均值 0.30 既不是「四角都乾淨」也不是「四角都有東西」——那個數字不能拿來斷言
+        // 任何一角。分開列之後，「右上角是乾淨的背景」才是一句可以被推翻的話。
+        evidence.Line($"remove-bg inspect: corners TL={c1m:F2} TR={c2m:F2} BL={c3m:F2} BR={c4m:F2} " +
+                      $"(fraction of the full frame each)");
+        evidence.Line($"remove-bg inspect done: file={Path.GetFileName(path)} ok=True");
+        return 0;
+    }
+
+    /// <summary>
+    /// 一個矩形區域（座標是**比例** 0..1，右／下界不含）的平均與最大 alpha。
+    /// 空區域回 (0,0)——呼叫端只會拿固定比例去問，所以空區域是一種「這張圖太小」的症狀，
+    /// 而 0 在那時正是誠實的答案（沒有任何像素是全不透明的）。
+    /// </summary>
+    private static (double Mean, double Max) BandStats(byte[] pixels, int width, int height,
+                                                       double x0, double x1, double y0, double y1)
+    {
+        int px0 = Math.Clamp((int)Math.Round(x0 * width), 0, width);
+        int px1 = Math.Clamp((int)Math.Round(x1 * width), 0, width);
+        int py0 = Math.Clamp((int)Math.Round(y0 * height), 0, height);
+        int py1 = Math.Clamp((int)Math.Round(y1 * height), 0, height);
+        long n = 0, sum = 0;
+        byte max = 0;
+        for (int y = py0; y < py1; y++)
+        {
+            int row = y * width * 4;
+            for (int x = px0; x < px1; x++)
+            {
+                byte a = pixels[row + x * 4 + 3];
+                sum += a;
+                if (a > max) max = a;
+                n++;
+            }
+        }
+        return n == 0 ? (0, 0) : (sum / (double)n / 255.0, max / 255.0);
+    }
+
+    /// <summary>
+    /// 引擎這一輪寫出來的裁切輸出檔（在來源檔旁邊找）。回 null＝找不到，由呼叫端說出來。    ///
     /// ⚠ 這**不是**第二份命名規則：命名規則仍然只有 <see cref="NamingPolicy"/> 一份，這裡只是
     /// 「跑完之後在資料夾裡找那一個新檔案」。之所以不自己組：「組出正確的名字」正是會與產品
     /// 不一致的那種第二份實作（撞名加「 (1)」、輸出資料夾回退…）；而**這裡若找錯檔案，
@@ -3214,11 +3635,21 @@ internal static class App
             : null;
         if (compression != null)
             evidence.Line($"ENTER: compress {compression.Describe()}");
+        // 去背（第七顆扇形）：**它需要一個外部模型檔**，而「模型在哪裡」的解析只有一份規則
+        // （RemoveBgModel.ResolvePath）。⚠ 正式路徑一律傳 **null**＝執行檔旁邊的 `models\`
+        // （與取得腳本下載的位置相同）：`--remove-bg-model` 是**診斷接縫**，存在的理由是讓
+        // 「缺模型」與「模型損壞」兩個狀態在驗收裡真的被走過，不是一個使用者設定。
+        string? removeBgModel = null;
+        if (toolOp == WorkerProtocol.OpRemoveBg)
+            evidence.Line($"ENTER: remove-bg model resolves to " +
+                          $"'{RemoveBgModel.ResolvePath(removeBgModel)}' (default beside the exe; " +
+                          "PNG out, and no file at all when the mask is empty)");
         runner.Start(paths,
                      toolOp == null ? target : "",
                      toolOp == null ? settings.QualityFor(target) : 100,
                      centerX, centerY,
-                     toolOp: toolOp, outputDir: outputDir, compression: compression);
+                     toolOp: toolOp, outputDir: outputDir, compression: compression,
+                     removeBgModel: removeBgModel);
         PendingPaths = Array.Empty<string>();
         PendingTools = Array.Empty<ToolDescriptor>();
         return true;

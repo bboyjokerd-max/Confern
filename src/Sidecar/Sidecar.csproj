@@ -115,4 +115,34 @@
     -->
     <PackageReference Include="PDFsharp-WPF" Version="6.2.4" />
   </ItemGroup>
+  <ItemGroup>
+    <!--
+      M3 工具「去背」（`remove-bg`，第七顆扇形）。選它的理由與界線（2026-10-08）：
+        - **推論引擎**：`Microsoft.ML.OnnxRuntime` **1.30.0**，授權 **MIT**（Copyright (c)
+          Microsoft Corporation，讀自套件內的 LICENSE）。出貨的原生檔只有 win-x64 那一組：
+          `runtimes\win-x64\native\onnxruntime.dll` 16,462,648 B ＋
+          `onnxruntime_providers_shared.dll` 21,816 B，managed
+          `lib\net8.0\Microsoft.ML.OnnxRuntime.dll` 241,976 B ⇒ 約 16.7 MB（實測輸出目錄）。
+          ⚠ `System.Numerics.Tensors.dll`（442,680 B）也進輸出目錄，它是 ORT 的遞移相依。
+        - **為什麼不是自己寫**：去背要跑一個 CNN（MODNet）。自己寫等於拿使用者的照片冒險，
+          這條規矩在本專案已經有先例（讀 QR 的 ZXing、合併 PDF 的 PDFsharp）。
+        - **模型不進版控**（12.98 MB 的二進位檔）。取得腳本是 `tools/get-rembg-model.ps1`，
+          它下載 `Xenova/modnet` 的 `onnx/model_fp16.onnx`（**apache-2.0**）到
+          **執行檔旁邊的 `models\`**，並驗 sha256。缺檔與損壞是兩個不同的狀態
+          （見 `ConversionError.ModelUnavailable` 與 `ModelCorrupt`）。
+        - ⚠ **`RuntimeIdentifier` 必須與 `AppendRuntimeIdentifierToOutputPath`＝false 成對出現**
+          （這一行是實測教訓）：只加 `RuntimeIdentifier` 會把 exe 搬到
+          `bin\Release\net8.0-windows\win-x64\`，**害死所有套件寫死的 exe 路徑**
+          （驗收腳本、worker 的自我啟動路徑、托盤）。加了那一行之後原生 dll 仍會複製到
+          exe 旁邊（已實測可跑）。
+        - ⚠ 這個資料夾裡的專案**只支援 win-x64**（`<Platforms>x64</Platforms>`），所以指定 RID
+          不會排除任何目前支援的組態。
+    -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+  </ItemGroup>
+  <PropertyGroup>
+    <!-- 這兩行是上面那一段註解說的成對設定（放在 PropertyGroup：它們是屬性，不是項目）。 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+  </PropertyGroup>
 </Project>
