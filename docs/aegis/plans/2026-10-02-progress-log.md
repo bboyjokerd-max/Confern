@@ -1575,3 +1575,84 @@ merge-pdf failure: fx-broken.pdf（第 2 個檔） 無法合併這個 PDF
 7. 這一輪**尚未**更新 Obsidian 同步（`tools\obsidian\sync.ps1`）——留待 M3 全部收尾時一併執行。
 
 ---
+
+## 2026-10-07 M3：合併 PDF 的拖拉排序視窗（切片 B）＋「輪盤到不了 merge-pdf」的結構性修正
+
+### 這一刀交付了什麼
+
+- **`4f8ace0`**（切片 B，5 檔、git numstat +2148／−2）：`MergeWindow.cs`（新，+852／−0）、`MergeUi.cs`（新，+447／−0）、`Program.cs`（+432／−1）、`ConversionEngine.cs`（+29／−0，`TryReadPdfPageCount`）、`verify-m3d.ps1`（+388／−1，S21 九條＋兩個注入）。
+- **`93bc701`**（(b) 語意修正）：`FormatCatalog.cs`、`Program.cs`、`MergeUi.cs`、`verify-m3d.ps1`（S21 加到十三條）。
+
+**兩個刻意的技術選擇（記在碼裡）**：
+1. **不用 WPF `DragDrop.DoDragDrop`**——它會進入自己的模態訊息迴圈，於是拖曳只能靠真滑鼠驗證，而本專案已裁定不跑合成滑鼠。改成自製「按下／移動／放開」三段（`MergeWindow.cs` L411–413），**自測餵進去的正是真滑鼠會呼叫的那三個方法**。
+2. **不用 `ScrollViewer`**——本專案有一條「視窗裡不可以出現有可捲動範圍的捲軸」的斷言；改成自製上／下翻頁與「顯示第 X-Y 列，共 N 列」。
+
+### ★ 這一刀推翻了我先前的驗收結論（最重要的一條）
+
+我先前把 **S20.12**（`--tools-list --wheel-source pdf` ⇒ `count=6 … merge-pdf`）當成「PDF 確實拿得到合併工具」的證據。**那是錯的。**
+
+子代理逐行追出根因並**量到**決定性證據：`--wheel-payload <3 個 PDF>` ⇒ `status=Unsupported source=UNKNOWN targets=0 notice=不支援的格式 tools=0`，且 `--wheel-tool merge-pdf: not in the catalog []`。原因是 `FormatCatalog.Classify` 只在類別為 `IMAGE` 時回 `Ready`（`CodecRegistry.cs` 的註解自己寫明了這是刻意的），而 `ToolCatalog.ToolsFor` 對非 `Ready` 回空清單 ⇒ **`OpMergePdf` 的提交區塊在正式路徑上是死碼，`MergeUi.Open` 永遠不會被叫到**。
+
+為什麼 S20.12 一直是綠的：**`--tools-list` 根本不吃 `--wheel-payload`**，它自己塞一個 `Ready` 的 `sourceFormat` 進去就結束 ⇒ 那是**目錄過濾查詢**的答案，繞過了 `Classify`；而「目錄查詢說有 merge-pdf」不等於「執行期拿得到工具」。
+
+**教訓（已寫進碼與本日誌）：查得到的東西與跑得到的事情要分別斷言。一條查詢型斷言不能代替執行期斷言。** 子代理的注入演練把這件事證死了：**把 (b) 拿掉 ⇒ 只有 S21.07／S21.10／S21.11／S21.13 變紅，而 S21.01（目錄查詢）與 S21.02–06（視窗自測）全綠**——舊斷言看不到這個缺陷。
+
+### (b) 的內容與護欄
+
+`FormatCatalog.cs` 新增 `ToolFormats = { "PDF" }` 與 `HasApplicableTool()`，把「**有工具適用**」與「**可轉成圖片**」正式分成兩個判定；`TargetsFor` 對不能轉成圖片的來源回空清單。
+
+- 修前：`status=Unsupported source=UNKNOWN targets=0 tools=0`
+- 修後：`status=Ready source=PDF targets=0 layer=tool tools=6`（**格式層仍是空的**，不能把 PDF 轉成 PNG）
+- 護欄仍在：`--convert <pdf> --to png` ⇒ **exit=9**、`error=Unsupported`、**0 個新檔**；`verify-m1d.ps1` 的 S12.8a/b/c 維持綠。
+- 混合 payload 實測：`[jpg + pdf]` ⇒ `status=Mixed`、`tools=0`、notice「混合選取，請選同類別」⇒ 判定為**正確行為**（兩者沒有共同的可執行語意），照實斷言下來。
+
+**子代理主動更正了我指定的做法，我接受**：我要求斷言 `--wheel-payload <pdfs> --tools-list` 必須列出 merge-pdf，但 `--tools-list` 原本完全不吃 `--wheel-payload`（那正是 S20.12 的問題本身）。它把 `--tools-list` 改成「**有酬載就用酬載走 `Classify`**，只有 `--wheel-source` 才是目錄查詢」，否則我指定的命令仍然只是目錄查詢。
+
+### 我方獨立驗收（我自己跑，對 `93bc701`）
+
+| 項目 | 結果 |
+| --- | --- |
+| **強制重建**（`-t:Rebuild`） | `dotnet exit=0 warnings=0 errors=0`；**`Confern.dll` 17:59:43.772 `8DDCB731…` → 20:38:22.336 `2EF27C96…`**（moved=True、content changed=True）⇒ 真的編譯了，不是 no-op |
+| `verify-m3d.ps1 -Section S18,S19,S20,S21` | **`checks=85 pass=85 fail=0 inconclusive=0 expected=85`**（72＋13） |
+| `verify-m3c.ps1`（S17） | `20/20 expected=20` |
+| `verify-m1d.ps1` | `74/74 expected=74` |
+| 注入 `merge-nosort` | `checks=13 pass=12 fail=1`，**唯一紅燈 S21.04（頁序）** |
+| 注入 `merge-cancelqueues` | `checks=13 pass=12 fail=1`，**唯一紅燈 S21.06（取消不交回）** |
+| **執行期路徑（原本到不了的那條）** | `tool list: count=6 tools=[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf] (source=PDF, status=Ready, notice=-, runtime classification of 3 payload file(s) (FormatCatalog.Classify), source of truth: ToolCatalog)` ⇒ 日誌**自己標明這是執行期分類**，不是目錄查詢 |
+| **產物由我自己的見證程式讀** | 走 UI 路徑跑出的 `fx-a (1).pdf`（4461 B、20:40:43）：6 頁 `200x300(74/9102714aeeb4)`、`210x310(80/2b2962f9ecba)`、`300x200(74/9afd975a8921)`、`100x100(73/4d17d32e24d6)`、`120x140(80/2814e72c9603)`、`160x180(78/711c279a7ae1)` ⇒ **頁序＝來源順序，內容雜湊與來源逐頁相同** |
+
+### 子代理自己抓到並修掉的缺陷（都已先量到才修）
+
+1. `--merge-ui-selftest` 餵 2 個檔會 `IndexOutOfRangeException`，整個行程以 `0xE0434352` 收場（**診斷指令自己崩潰比它說「我驗不了」還糟**）。
+2. 它在 `verify-m3d.ps1` 做的一次整檔變數改名誤傷 S18 的裁切區段（13 條轉紅）——**先用 `git stash` 還原到 HEAD 證實「HEAD 是 39/39、我的版本是 26/39」**才判定是自己造成的。
+3. `TargetsFor` 一開始沒擋：PDF 的第一層出現 4 顆做不到事的扇形（語意會變成「把 PDF 轉成 PNG」）。
+4. **`ToolFormats` 比對的是格式名、不是類別鍵**：PDF 的類別鍵是 `UNDECODABLE:PDF`，拿 `"PDF"` 比類別鍵**永遠不成立**——第一版就是這樣「看起來沒生效」，靠再量一次才抓到。
+5. 測試腳本裡未轉義的 `[...]`：`Select-String` 吃 regex，`[rotate90,…,read-qr]` 被當字元組 ⇒ `range in reverse order` 當場炸掉整個 S21 區段。
+
+### 建置量測的規矩（本輪升級，已寫進事實清單）
+
+- **`Confern.exe` 只是 apphost，它的 sha 永遠不變** ⇒ 判斷有沒有真的重建，看 **`Confern.dll` 的雜湊或時間戳**。
+- **不要用「dll 裡有沒有我注入的那串字」當證據**（註解字串會被編譯器消掉）——用雜湊。
+- `dotnet build … -t:Rebuild` 在這個 repo 只要約 **1.5 秒** ⇒ 沒有理由不做強制重建。
+- 我自己的量測工具也有假象：同一個檔 `MergeWindow.cs`，`git show <commit>:<path> | @().Count` = **852**（權威）、`Measure-Object -Line` = **765**（**它會跳過空行**，差 87 個空行）、`Get-Content .Count` = **777**（原因未查明，不引用）。⇒ 行數一律用 git。
+
+### 我的裁定：`--merge-ui-autoconfirm` 診斷接縫**保留**
+
+它是**唯一不靠合成滑鼠**就能覆蓋「確認鈕 → 回呼 → 排隊 → 既有 tick 抽乾 → worker 產出」這條路的接縫，且不傳它時一行都不執行。但它必須在程式註解、日誌與提交訊息裡都寫明**「這不是真人在按」**，免得下一個人誤讀。
+
+### 照抄、我沒能獨立複核
+
+- 子代理的兩支**產品碼注入**演練（拿掉 (b)、確認回呼只回報不排隊）與其 dll 雜湊逐位元還原——我複核的是**套件內建注入**那一組（`merge-nosort`／`merge-cancelqueues`）與執行期路徑本身。
+- 它自報的 m1b 14/14、m1c 20/20、m1f 34/34、m1g 25/25——我這輪只重跑了 m3d／m3c／m1d。
+- `--merge-ui-selftest` 的逐項輸出、以及視窗離屏合成的外觀檢查。
+
+### 尚未完成／未驗到
+
+1. **去背**：M3 最後一個工具，**已派工**（新子代理），正在進行。
+2. **沒有真人真的拖過那個視窗、用真滑鼠按過確認／取消**：S21.13 走的是視窗自己的確認鈕（`RaiseEvent(Click)`），與真滑鼠的差別只在「Windows 有沒有把 mouse-up 送進來」，而本專案已裁定不跑合成滑鼠 ⇒ **真實手勢要人工確認**。
+3. 視窗的**實際視覺外觀**只由離屏合成驗（尺寸、非空白、無捲軸），沒有像素級美術驗收。
+4. **速度未量**（測資只有 1–3 頁）。
+5. `/Outlines`（書籤）不保留、`/Annots` 不深拷貝、object stream 不寫出——PDFsharp 的既有極限，README 有記。
+6. 加密 PDF 的端到端由我在 repo 外以自製探針覆蓋（四條全過），**不在** repo 的套件裡。
+
+---
