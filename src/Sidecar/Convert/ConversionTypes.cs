@@ -58,11 +58,51 @@ internal enum ConversionError
     /// 分類錯的訊息會把使用者送去檢查一個沒有問題的檔案（2026-10-06 量到：40/40 全失敗、
     /// 每一行都寫「無法讀取來源檔案」，而來源一個位元都沒變）。
     /// </summary>
-    WriteConflict
+    WriteConflict,
+
+    /// <summary>
+    /// 工具 `read-qr`（讀 QR，M3 第五顆扇形）專用：圖**讀得動、但裡面沒有 QR**——
+    /// 來源檔完好、解碼成功、只是每一輪都在畫面上找不到 QR 碼。
+    ///
+    /// **為什麼既有分類沒有一個合用**（逐個對過）：
+    ///   • <see cref="DecodeFailed"/>——它的規格訊息是「**檔名** 無法解碼」，說的是「這個檔案壞了」。
+    ///     這裡的檔案一點都沒壞，說那句話等於把使用者送去檢查一個完好的檔案，
+    ///     正是 <see cref="WriteConflict"/> 那一條註解記下來的同一種錯。
+    ///   • <see cref="Unsupported"/>——格式在支援表裡，decoder 也真的解開了。
+    ///   • <see cref="CropRectEmpty"/> 那一族——它們是「你的要求本身沒有東西可以做」，
+    ///     而這裡的要求（在這張圖上找 QR）完全可以做，只是結果是「沒有」。
+    ///
+    /// **為什麼「沒有」必須是一個回報而不是失敗的例外**：找不到 QR 是這個工具最常見的正常結果
+    /// （使用者拿錯圖、截圖裡沒有碼）。它必須是一句可讀的訊息，而且**不產生任何檔案**——
+    /// 產生一個空檔案會讓使用者以為「讀到了什麼」。
+    ///
+    /// ⚠ 這一條**不是**失敗於環境，也**不是**失敗於使用者的要求；它是「查詢型工具的否定答案」。
+    /// 這也是唯一一個**成功執行但 `Ok == false`** 的分類：`read-qr` 的結果是文字，
+    /// 沒有文字就沒有東西可以回，所以它走既有的失敗回報路徑（訊息 ＋ 不寫檔）而不是另開一條。
+    /// </summary>
+    QrNotFound
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
-internal sealed record ConversionResult(string SourcePath, string? OutputPath, ConversionError Error, string Detail)
+/// <param name="QrText">
+/// **讀 QR 的產物是文字，不是檔案**（工具 id `read-qr`；2026-10-07 M3 第五顆扇形）。
+/// 這是**新增的欄位**，不是新增的通道——理由與 <c>crop</c> 當年新增五個協議欄位逐條相同：
+///
+///   • 既有的結果通道（<see cref="ConversionResult"/> ＋ 規格 §9.1 的 <c>result</c> 封包）已經
+///     是「一個檔案進去、一個結果出來」的唯一路徑，失敗分類、使用者訊息、日誌、
+///     跨管道回報全部掛在它上面。另開一條「文字通道」等於讓第二個擁有者去重寫這四件事。
+///   • 缺席語意不會變成靜默錯誤：`read-qr` 之外的每一個 op 都**不讀這個欄位**，
+///     所以它對既有四個工具的行為是**零**（建構子尾端多一個可選參數，既有呼叫一字未改）。
+///   • <c>null</c> ＝「這個結果沒有文字」：成功時只有 `read-qr` 會給值；失敗時一律 <c>null</c>
+///     （包含 <see cref="ConversionError.QrNotFound"/>——**沒有文字就是沒有文字，不填空字串**，
+///     否則「找不到」與「找到空字串」在呼叫端會長得一樣）。
+///
+/// ⚠ 它與 <see cref="OutputPath"/> 的關係是**互斥的**：`read-qr` 不寫任何檔案，
+/// 所以它回的結果 <see cref="OutputPath"/> 必定是 <c>null</c>、<see cref="QrText"/> 才有值。
+/// 兩者同時有值＝有東西壞了，不是一種可以接受的組合。
+/// </param>
+internal sealed record ConversionResult(string SourcePath, string? OutputPath, ConversionError Error,
+                                        string Detail, string? QrText = null)
 {
     public bool Ok => Error == ConversionError.None;
 
@@ -94,6 +134,9 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 另一個行程搶走了每一個候選檔名（含 `name (1)`…`name (7)`）。罕見到幾乎不會出現，
         // 但出現時必須說得出真正的原因，不能叫使用者去檢查一個完好的來源檔。
         ConversionError.WriteConflict => "輸出檔名被其他行程占用",
+        // 工具 read-qr 專用（規格 §9.4）。說的是「這張圖裡沒有 QR」，不是「這張圖壞了」
+        // （見 QrNotFound 的逐條比較）。
+        ConversionError.QrNotFound => "圖片中找不到 QR 碼",
         _ => "轉檔失敗"
     };
 

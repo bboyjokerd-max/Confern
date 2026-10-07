@@ -53,6 +53,13 @@ internal static class WorkerProtocol
     /// 五個都是 <c>null</c> 且 <c>WhenWritingNull</c>，所以**既有 op 的封包逐位元不變**；
     /// 而舊 worker 收到 `op=crop` 一樣走到 <see cref="WorkerServer.RejectUnknownOp"/>，
     /// 到不了讀那五個欄位的那一行。
+    ///
+    /// **2026-10-07 新增 `op=read-qr`（第五顆扇形，讀 QR）——同樣不升，理由逐條相同。**
+    /// 它帶來**一個新的結果欄位**（<c>text</c>，見 <see cref="WorkerMessage.text"/>）而不是新的
+    /// 請求欄位：缺席是 <c>null</c> 且 <c>WhenWritingNull</c>，所以既有的 <c>result</c> 封包
+    /// **逐位元不變**；而一個不認識 `read-qr` 的舊 worker 走
+    /// <see cref="WorkerServer.RejectUnknownOp"/>，根本到不了填那個欄位的那一行。
+    /// 「欄位被忽略」這種靜默錯誤需要「op 被接受但欄位被丟掉」這個前提，而那個前提不成立。
     /// </summary>
     public const int Version = 3;
 
@@ -92,6 +99,17 @@ internal static class WorkerProtocol
     /// <see cref="WorkerServer.RejectUnknownOp"/>，而且它**根本走不到**讀那五個新欄位的那一行。
     /// </summary>
     public const string OpCrop = "crop";
+
+    /// <summary>
+    /// 工具 `read-qr`（讀 QR，M3 第五顆扇形）。**這是唯一一個不產生檔案的 op**：
+    /// 它的產物是文字，回在結果封包的 <see cref="WorkerMessage.text"/>，
+    /// 見 <see cref="ConversionEngine.ReadQr"/> 與規格 §9.4。
+    ///
+    /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由與前三顆逐條相同：舊 worker 走
+    /// <see cref="WorkerServer.RejectUnknownOp"/>（它會回一個具名的失敗，而不是默默做別的事），
+    /// 而且它**根本走不到**填 <c>text</c> 的那一行。
+    /// </summary>
+    public const string OpReadQr = "read-qr";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -228,6 +246,24 @@ internal sealed class WorkerMessage
     public string? outputPath { get; set; }
     public string? errorCode { get; set; }
     public string? message { get; set; }
+    /// <summary>
+    /// 讀 QR 的產物（<see cref="WorkerProtocol.OpReadQr"/> 專用，2026-10-07 M3 第五顆扇形）。
+    ///
+    /// **為什麼是新的欄位而不是新的封包型別／新的通道**：理由與 `crop` 那五個欄位是同一條，
+    /// 而這裡更強一點——<c>result</c> 封包已經是「一個檔案進去、一個結果出來」的唯一路徑，
+    /// 失敗分類（<see cref="errorCode"/>）、規格 §7.1 的訊息（<see cref="message"/>）、
+    /// 來源檔（<see cref="sourcePath"/>）、詳細原因（<see cref="detail"/>）全部掛在它上面；
+    /// 另開一個 `text` 封包型別等於讓第二個擁有者去重新回答「進度怎麼報、失敗怎麼報」。
+    ///
+    /// **缺席語意（<c>null</c>）＝「這個結果沒有文字」**：那是「這個欄位還不存在的年代」的封包
+    /// 該有的意思，也正是**其餘每一個 op 的行為**——它們不讀這個欄位，所以它們的封包
+    /// 逐位元不變（<c>WhenWritingNull</c> 讓 null 根本不進 JSON）。配對錯誤不會變成靜默做錯事，
+    /// 因為一個不認識 <c>read-qr</c> 的舊 worker 走 <see cref="WorkerServer.RejectUnknownOp"/>。
+    ///
+    /// ⚠ 它與 <see cref="outputPath"/> **互斥**：`read-qr` 不寫檔，所以它的結果
+    /// <see cref="outputPath"/> 一定是 null、<c>text</c> 才有值。
+    /// </summary>
+    public string? text { get; set; }
     /// <summary>
     /// 單檔結果的來源檔案。`message` 是規格 §7.1 的**排版結果**（`broken.png 無法解碼`），
     /// 把檔名當資料用等於在解析自己的排版；UI 的失敗清單（§7.3）要檔名與原因兩欄，
@@ -385,6 +421,10 @@ internal static class WorkerServer
                     // 矩形整個缺席：那是同版本的 UI 送出了不該送的東西＝bug。**不猜**、也不默默
                     // 用一個全圖矩形去裁（那會變成 CropNothingToDo 的拒絕，訊息還會誤導人）。
                     : RejectCropWithoutRect(paths[i]),
+                // 讀 QR：**唯一一個不寫檔的 op**，產物是 result 封包上的 `text`（下一行）。
+                // outputDir 對它沒有意義（沒有檔案可寫），所以刻意不傳——傳了就是讓一個
+                // 沒有效果的欄位看起來像有效果。
+                WorkerProtocol.OpReadQr => engine.ReadQr(paths[i], journal),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
@@ -398,6 +438,10 @@ internal static class WorkerServer
                 errorCode = result.Error.ToString(),
                 message = result.UserMessage,
                 sourcePath = result.SourcePath,
+                // `text` 只有 read-qr 會有值（其餘 op 一律 null ⇒ 不進 JSON，見 WorkerMessage.text）。
+                // **原封不動**傳下去：這個欄位是產物本身，不是排版——呼叫端要斷言的是
+                // 「解出來的每一個字元」，所以中間不可以有任何加工（沒有 trim、沒有截斷）。
+                text = result.QrText,
                 detail = result.Detail,
                 done = i + 1,
                 total = paths.Length,
@@ -508,12 +552,16 @@ internal static class WorkerServer
     /// **列出認識的 op 是刻意的**：這一行就是「未知 op 不會靜默變成 convert」這句話的可觀測證據，
     /// 也是不升協議版本的理由（見 <see cref="WorkerProtocol.Version"/>）。加工具時**要一起更新它**，
     /// 否則這句失敗訊息會說謊。
+    ///
+    /// ⚠ **這一串必須與上面分派 <c>switch</c> 的臂一一對應、順序相同**——
+    /// 兩份清單不同步＝這句訊息開始說謊，而它正是「舊 worker 不會默默做錯事」的證據。
+    /// 這條規則不是靠自律：`tools/verify-m3d.ps1` 的 S19.06 直接讀**原始碼**把兩份清單對起來。
     /// </summary>
     private static ConversionResult RejectUnknownOp(string sourcePath, string op) =>
         new(sourcePath, null, ConversionError.Unknown,
             $"unknown op '{op}' (this worker speaks " +
             $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata}/" +
-            $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop})");
+            $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop}/{WorkerProtocol.OpReadQr})");
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

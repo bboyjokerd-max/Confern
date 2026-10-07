@@ -489,8 +489,8 @@ function Invoke-S17 {
   # The worker's output must be byte-for-byte what the in-process engine produced for the
   # same source and the same level: that is what makes "the same engine" a measurement.
   $wLen = Get-FileLength (Join-Path $wOut 'photo.jpg')
-  Check 'S17.20 the wheel tool layer has four sectors, the compress op really travels to the worker process, and it returns the same bytes' `
-    (($w.Exit -eq 0) -and (Test-Log $w.Lines 'tools=\[rotate90,strip-metadata,compress,crop\]') -and
+  Check 'S17.20 the wheel tool layer lists every sector, the compress op really travels to the worker process, and it returns the same bytes' `
+    (($w.Exit -eq 0) -and (Test-Log $w.Lines 'tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
      ($jobLine -match 'op=compress') -and ($finLine -match 'finished=True ok=1') -and
      ($wLen -gt 0) -and ($wLen -eq $small.OutLen)) `
     "job='$jobLine' finished='$finLine' workerOut=${wLen}B inProcess=$($small.OutLen)B"

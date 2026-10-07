@@ -107,11 +107,36 @@ internal sealed class ToolCatalog : IToolCatalog
         Icon: ToolIcon.Crop);
 
     /// <summary>
+    /// M3 的第五個工具：**讀 QR**（`read-qr`）。這是**唯一一個不產生檔案的引擎方法**
+    /// （見 <see cref="ConversionEngine.ReadQr"/>）：輸入是一張圖，產物是一段**文字**。
+    ///
+    /// ⚠ **它與前四顆在結構上不同的一點**：前四顆的產物都是「一個新的檔案」，
+    /// 而這一顆的產物是文字，回在 <see cref="ConversionResult.QrText"/>（新增欄位、不是新增通道）。
+    /// 所以它**不經過** <see cref="NamingPolicy"/> 與 <see cref="AtomicWriter"/>，
+    /// 也不會在來源旁邊留下任何東西。**這一刀只加目錄條目**：UI 的接線（輪盤扇形、
+    /// 開瀏覽器、文字視窗）是下一刀，這裡先讓「工具知識」先有這個工具——
+    /// 與前四顆同一條紀律：**清單只寫在這裡**。
+    ///
+    /// ⚠ **相依是例外**：這是本專案唯一一個需要第三方解碼器的工具（ZXing.Net 0.16.11），
+    /// 理由與界線寫在 `Sidecar.csproj` 的 `PackageReference` 註解裡
+    /// （自己寫 QR 的解碼等於拿使用者的檔案冒險：定位圖案、對齊、Reed-Solomon 都要對）。
+    ///
+    /// 文字長度預算（圓心鏤空直徑 94px）：`讀 QR` 是**三個字**，比既有的 `去中繼資料`（5 個）
+    /// 與 `依設定壓縮`（5 個）都短，膠囊只會更窄。扇區標籤 `READ QR` 是 7 個字元
+    /// （含一個空白），比 `COMPRESS`（8 個）短——見 <see cref="WheelDesign.ToolIconPx"/> 的框寬。
+    /// </summary>
+    private static readonly ToolDescriptor ReadQr = new(
+        Id: "read-qr",
+        Label: "READ QR",
+        Description: "讀 QR",
+        Icon: ToolIcon.ReadQr);
+
+    /// <summary>
     /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
     /// 輪盤與命中測試不必改一行。
     /// </summary>
     public IReadOnlyList<ToolDescriptor> Tools { get; } =
-        new[] { Rotate90, StripMetadata, Compress, Crop };
+        new[] { Rotate90, StripMetadata, Compress, Crop, ReadQr };
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {

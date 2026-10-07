@@ -332,6 +332,10 @@ internal sealed class Options
           --compress <path>         run tool compress on <path> and report; the level comes from the
                                     settings file (compressionMode / compressionTargetKb), never
                                     from the command line; the source file is never touched
+          --read-qr <path>          run tool read-qr on <path> and print the decoded text; NO file is
+                                    ever written (this tool's product is text, not a file) and the
+                                    source file is never touched; a picture without a QR code is
+                                    refused by name (QrNotFound), not with an exception
           --crop <p1;p2>            run tool crop on these files through the real WORKER process
                                     (op=crop over the pipe) and report; one normalized rectangle is
                                     applied to every file, each according to its own size;
@@ -499,6 +503,15 @@ internal sealed class Options
     /// 旗標等於讓驗收繞過那條鏈，驗到一個產品裡不存在的組合。
     /// </summary>
     public string? Compress;
+    /// <summary>
+    /// M3 診斷（2026-10-07）：`--read-qr &lt;path&gt;` 直接對這個檔案跑工具 `read-qr`（第五顆扇形）。
+    /// 形狀與 <see cref="Rotate90"/>／<see cref="StripMetadata"/> 一字不差（同一個引擎、同一個行程內），
+    /// 差別在**它沒有任何輸出的檔案**：產物是一段文字，印到 stdout。
+    ///
+    /// ⚠ 這一條的 stdout 是**驗收的斷言對象**（見 <see cref="ReadQrDiagnostic"/>）：
+    /// 「解出來的文字」必須能從產品的輸出**重新推導**出來，而不是只相信它印的 `ok=True`。
+    /// </summary>
+    public string? ReadQr;
     /// <summary>
     /// M3 診斷（2026-10-06）：`--crop &lt;p1;p2&gt;` 走**完整的一條路**（worker 行程、`op=crop`、
     /// 管道、快照）對這幾個檔案跑工具 `crop`（第四顆扇形）。分號分隔＝一次批次，
@@ -798,6 +811,7 @@ internal sealed class Options
                 case "--rotate90": if (i + 1 < args.Length) o.Rotate90 = args[++i]; break;
                 case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
                 case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
+                case "--read-qr": if (i + 1 < args.Length) o.ReadQr = args[++i]; break;
                 case "--crop":
                     if (i + 1 < args.Length) { o.Crop = args[i + 1]; o.CropUiSource ??= args[i + 1].Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(); i++; }
                     break;
@@ -1082,6 +1096,8 @@ internal static class App
             return StripMetadataDiagnostic(evidence, opt);
         if (opt.Compress != null)
             return CompressDiagnostic(evidence, opt);
+        if (opt.ReadQr != null)
+            return ReadQrDiagnostic(evidence, opt);
 
         // 診斷：--wheel-tools 讓無頭驗收能走到第二層，不必合成鍵盤輸入（產品路徑不讀這個旗標）。
         _forceToolLayer = opt.WheelTools;
@@ -1856,6 +1872,90 @@ internal static class App
         {
             evidence.Line("--compress FAILED: the source file was modified (spec 5 violation)");
             return 1;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// M3 診斷：`--read-qr &lt;path&gt;`（第五顆扇形）。走的是 **worker 用的同一個引擎**
+    /// （<see cref="ConversionEngine.ReadQr"/>），所以量到的就是產品的能力。
+    ///
+    /// 它刻意把四件事印成可斷言的事實（與 <see cref="CompressDiagnostic"/> 同一個形狀）：
+    ///   ①**解出來的文字本體**——印在 stdout 的固定前綴後面（`tool read-qr: text=`），
+    ///     而且**逐字元原封不動**（沒有 trim、沒有截斷、沒有引號）。驗收要能從這一條輸出
+    ///     **重新推導**出那段文字，而不是只相信 `ok=True`：`ok=True` 只證明引擎說它成功了；
+    ///     ②長度（`chars=N`）——它讓「文字被截斷」變成當場看得見的事實（`Chars` 是 C# 的
+    ///     UTF-16 計數，與 QR 的位元組數無關，這裡只當「有沒有變短」的守門員）；
+    ///   ③引擎自己那一行 `read-qr: &lt;round&gt; WxH in N ms -&gt; ...`（**哪一輪**解到的、
+    ///     花了多久）——那是引擎的事實，在這裡重講一遍就是第二個擁有者；
+    ///   ④來源檔**完全沒被動到**——SHA256／長度／mtime 三項前後比對（規格 §5 的第一名）。
+    ///     這一條對這個工具特別重要：**它是唯一一個不寫檔的 op**，「來源不變」不是靠寫入路徑
+    ///     保證的，是靠「整條路上沒有任何寫入呼叫」保證的，而這裡是那個事實的量測。
+    ///
+    /// ⚠ **沒有 QR 的圖不是錯誤路徑的意外，是一條正常的回報**：引擎回
+    /// <see cref="ConversionError.QrNotFound"/>，這裡把它的 <c>detail</c>（試過哪幾輪）印出來，
+    /// 回傳碼 3，而且**沒有任何檔案產生**（`--read-qr` 本來就不寫檔）。
+    /// 回傳碼：0 成功解到文字、1 來源被動到（§5 紅線）、2 找不到來源、3 引擎失敗（含找不到 QR）。
+    /// </summary>
+    private static int ReadQrDiagnostic(Evidence evidence, Options opt)
+    {
+        string source = opt.ReadQr!;
+        if (!File.Exists(source))
+        {
+            evidence.Line($"--read-qr: source not found: {source}");
+            return 2;
+        }
+
+        string beforeHash = Sha256Of(source);
+        long beforeLength = new FileInfo(source).Length;
+        DateTime beforeWrite = File.GetLastWriteTimeUtc(source);
+
+        var registry = new CodecRegistry();
+        var engine = new ConversionEngine(registry, evidence.Line);
+        // 沒有 outputDir 這回事：這個工具不寫檔（見 ReadQrDiagnostic 的說明）。
+        // 印出來是為了讓「它真的沒有輸出資料夾」變成看得見的事實，而不是少一行要讀原始碼才知道。
+        evidence.Line("tool read-qr: output=(none) -- this tool never writes a file");
+        ConversionResult result = engine.ReadQr(source, journal: null);
+
+        string afterHash = Sha256Of(source);
+        bool untouched = beforeHash == afterHash
+                         && new FileInfo(source).Length == beforeLength
+                         && File.GetLastWriteTimeUtc(source) == beforeWrite;
+
+        // ⚠ 這一行的**格式是驗收斷言的一部分**（固定前綴 ＋ 文字本體 ＋ 長度）。
+        // 改格式要先改 `tools/verify-m3d.ps1` 的 S19.01。
+        //
+        // 「沒有文字」用 `output=` 而不是 `text=`：`Ok` 是「引擎回報成功」，
+        // 而 `QrText` 是「真的有文字」。**成功的空字串**（QR 裡編的是空內容）在實務上不存在
+        // （ZXing 的編碼器不會產生它），所以這裡用 `?? null` 判斷——萬一真的出現，
+        // 這一條會印 `text=` 加零個字元，而驗收的逐字元比對會直接失敗（那是誠實的結果）。
+        string? text = result.QrText;
+        string textLine = text != null
+            ? $"tool read-qr: text={text} chars={text.Length}"
+            : $"tool read-qr: output=(none) error={result.Error}";
+        evidence.Line(textLine);
+        // **同一行也印到 stdout**：`--rotate90`／`--compress` 那一族只寫證據檔（`Evidence.Line`
+        // 另外會鏡射到 stderr），但這個工具的產物是**文字本身**——它必須能像 `--version` 那樣
+        // 被直接讀走（`Confern --read-qr x.png > out.txt`），否則「把解出來的文字印出來」這件事
+        // 就只存在於日誌裡，而日誌是產品的內部格式。**這不是第二個擁有者**：字串是同一個變數，
+        // 兩個出口，所以它們不可能說不同的話。
+        try { Console.WriteLine(textLine); } catch (IOException) { /* 沒有 stdout（父行程已關）：日誌仍然有 */ }
+        evidence.Line($"tool read-qr: ok={result.Ok} error={result.Error} " +
+                      $"detail={result.Detail}");
+        evidence.Line($"tool read-qr: source-untouched={untouched} " +
+                      $"(sha256 {beforeHash.Substring(0, 12)} -> {afterHash.Substring(0, 12)}, " +
+                      $"len {beforeLength}, mtime {(beforeWrite == File.GetLastWriteTimeUtc(source) ? "same" : "CHANGED")})");
+
+        if (!untouched)
+        {
+            // §5 是紅線，所以它排在「引擎成功／失敗」前面：來源被動到比讀不到碼嚴重得多。
+            evidence.Line("--read-qr FAILED: the source file was modified (spec 5 violation)");
+            return 1;
+        }
+        if (!result.Ok)
+        {
+            evidence.Line($"--read-qr FAILED: {result.UserMessage}");
+            return 3;
         }
         return 0;
     }

@@ -394,12 +394,17 @@ function Invoke-S18 {
 
   # ---------------------------------------------------------------- S18.03 the fourth sector
   # The tool layer's composition, asked WITHOUT the wheel and WITHOUT the single-instance guard.
-  # This is the same catalog the wheel draws (ToolCatalog.ToolsFor), so "four sectors, crop last"
-  # is a fact that can be re-checked at any time - including while the user's own copy is running.
+  # This is the same catalog the wheel draws (ToolCatalog.ToolsFor), so "crop is fourth" is a fact
+  # that can be re-checked at any time - including while the user's own copy is running.
+  #
+  # !! 2026-10-07: the count moved from 4 to 5 because `read-qr` was really added to the catalog
+  # (the FIFTH sector; its own checks are S19.07 onwards). The id list is asserted whole on
+  # purpose: a tool appearing or disappearing changes this line, and that has to be a conscious
+  # edit here and not a silent drift.
   $tl = Invoke-Confern 'tools-list' @('--tools-list')
-  Check 'S18.03 the tool layer has exactly four sectors, in order, and crop is the fourth' `
+  Check 'S18.03 the tool layer lists every sector in order, and crop is the fourth' `
     (($tl.Exit -eq 0) -and
-     (Test-Log $tl.Lines 'tool list: count=4 tools=\[rotate90,strip-metadata,compress,crop\]') -and
+     (Test-Log $tl.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
      (Test-Log $tl.Lines 'tool list: 3 id=crop ')) `
     "exit=$($tl.Exit) line='$(Get-LogLine $tl.Lines 'tool list: count=')' crop='$(Get-LogLine $tl.Lines 'tool list: 3 ')'"
 
@@ -1274,6 +1279,250 @@ function Invoke-S18 {
     "source orientation=$o6SrcTag output orientation=$o6OutTag"
 }
 
+# =============================================================================
+#  S19 READ QR (tool `read-qr`, the FIFTH tool sector; spec 9.4)
+#
+#  WHAT THIS PROVES, AND WHAT IT DOES NOT
+#   1. THE TEXT IS RE-DERIVED FROM THE PRODUCT'S OWN OUTPUT. `ok=True` only says the engine
+#      thinks it succeeded. S19.01 therefore parses the decoded text OUT of the `--read-qr`
+#      stdout line and compares it character for character against the known payload. Nothing
+#      here trusts a boolean.
+#   2. NOTHING IS WRITTEN. This is the only tool whose product is text rather than a file, so
+#      "no file appeared" is asserted on a whole-directory snapshot (name/size/mtime before and
+#      after), not on "the output path is empty".
+#   3. THE SOURCE IS READ-ONLY (spec 5): sha256 + length + mtime before and after.
+#   4. THE SECOND ROUND IS NOT DECORATION. `qr-small-in-scene-160.png` is decoded by the
+#      full-size round after the first pass fails - and the round is read from the PRODUCT's log
+#      line, so a product that only ever ran one pass would fail this check.
+#   5. THE FIXTURES ARE COMMITTED (see fixtures/qr/README.md) and they were ENCODED WITH ZXing
+#      ITSELF - the same library the product decodes with. That makes them a valid fixture for
+#      the DECODE PATH, and it does NOT license any claim about real-world photographs.
+#
+#  NOT covered here:
+#   - the wheel sector / the text window / "open in browser" are NOT wired yet (the UI cut is a
+#     separate slice). What is checked is the catalog entry (S19.07) and the engine + headless
+#     path.
+#   - the worker dispatch arm for op=read-qr is NOT exercised at runtime by this suite: nothing
+#     on the command line can ask the WORKER for a read-qr job today, and this suite refuses to
+#     invent one (see S19.06, which checks the dispatcher and the unknown-op message against the
+#     source instead).
+#   - recognition of photographed / printed / perspective-distorted codes: UNMEASURED.
+# =============================================================================
+
+# The output of one `--read-qr` run.
+#
+# !! The EVIDENCE comes from STDERR, not from a `--log` file, and that is not a workaround: the
+# headless diagnostics of this product write to the EVIDENCE channel (`Evidence.Line`), which
+# mirrors every line to stderr (see Evidence.cs: `if (!_quiet) Console.Error.WriteLine(...)`).
+# Measured 2026-10-07: this process also creates a resident hit layer on the way (the settings log
+# line says log=<%LOCALAPPDATA%>\Confern\logs\confern.log, NOT the --log path), so there is no
+# per-run log file for this switch - reading stderr is the only honest reader. `--quiet` is
+# deliberately NOT passed, because it would silence exactly the lines under assertion.
+function Invoke-ReadQr([string]$name, [string]$fixture) {
+  $d = Join-Path $Work "qr-$name"
+  New-Item -ItemType Directory -Force -Path $d | Out-Null
+  $src = Join-Path $d (Split-Path -Leaf $fixture)
+  Copy-Item -LiteralPath $fixture -Destination $src -Force
+
+  $beforeNames = @(Get-ChildItem -LiteralPath $d -File | Sort-Object Name |
+                   ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" })
+  $sha = Get-Sha $src
+  $len = (Get-Item -LiteralPath $src).Length
+  $mtime = (Get-Item -LiteralPath $src).LastWriteTimeUtc
+
+  $r = Invoke-ConfernStdout "read-qr-$name" @('--read-qr', $src, '--no-autostart')
+  $afterNames = @(Get-ChildItem -LiteralPath $d -File | Sort-Object Name |
+                  ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" })
+
+  return [pscustomobject]@{
+    Name        = $name
+    Exit        = $r.Exit
+    Stdout      = $r.Lines
+    Evidence2   = (Get-LogLines (Join-Path $Work "read-qr-$name.stderr.txt"))
+    Text        = (Get-QrText $r.Lines)
+    DirSame     = (($beforeNames -join "`n") -eq ($afterNames -join "`n"))
+    FileCount   = $afterNames.Count
+    Sha         = $sha
+    ShaAfter    = (Get-Sha $src)
+    Length      = $len
+    LengthAfter = (Get-Item -LiteralPath $src).Length
+    Mtime       = $mtime
+    MtimeAfter  = (Get-Item -LiteralPath $src).LastWriteTimeUtc
+  }
+}
+
+# Re-derive the decoded text from the product's stdout line. `tool read-qr: text=<TEXT> chars=<N>`
+# -- the text runs to the LAST ` chars=` (the payload could contain " chars=" in principle, so the
+# pattern is anchored on the trailing count instead of on the first space).
+function Get-QrText([string[]]$lines) {
+  foreach ($line in $lines) {
+    $m = [regex]::Match([string]$line, '^(?:\d\d:\d\d:\d\d\.\d+ )?tool read-qr: text=(.*) chars=(\d+)$')
+    if ($m.Success) { return $m.Groups[1].Value }
+  }
+  return ''
+}
+
+function Invoke-S19 {
+  Write-Host "=== S19 read-qr tool: text, the two-stage decode, and a negative fixture ==="
+
+  $repo = Split-Path -Parent $PSScriptRoot
+  $fdir = Join-Path $repo 'fixtures\qr'
+  $payload = 'Confern QR fixture 2026-10-07 / payload-v1'
+  $fClean = Join-Path $fdir 'qr-clean-512x512.png'
+  $fScaled = Join-Path $fdir 'qr-scaled-256x256.png'
+  $fJpeg = Join-Path $fdir 'qr-scaled-jpeg-q40-512x512.jpg'
+  $fBig = Join-Path $fdir 'qr-big-2400x2400.png'
+  $fTiny = Join-Path $fdir 'qr-small-in-scene-160.png'
+  $fNone = Join-Path $fdir 'no-qr-512x384.png'
+  $missing = @()
+  foreach ($f in @($fClean, $fScaled, $fJpeg, $fBig, $fTiny, $fNone)) {
+    if (-not (Test-Path -LiteralPath $f)) { $missing += (Split-Path -Leaf $f) }
+  }
+  if ($missing.Count -gt 0) {
+    Inconclusive "QR fixtures missing from $fdir ($($missing -join ', ')) - they are committed, so a missing one means the checkout is broken"
+  }
+
+  # ---------------------------------------------------------------- S19.01 the clean code
+  $clean = Invoke-ReadQr 'clean' $fClean
+  Check 'S19.01 the clean QR decodes to EXACTLY the known payload (re-derived from the product stdout, not from ok=True)' `
+    (($clean.Exit -eq 0) -and ($clean.Text -ceq $payload) -and
+     (Test-Log $clean.Evidence2 'tool read-qr: ok=True error=None')) `
+    "exit=$($clean.Exit) chars=$($clean.Text.Length) identical=$($clean.Text -ceq $payload) text='$($clean.Text)'"
+
+  # ---------------------------------------------------------------- S19.02 scaled + JPEG
+  # The same payload scaled to 256x256 and re-encoded as a lossy JPEG at quality 40. Both have to
+  # come back character for character: "it decoded something" is not the assertion.
+  $scaled = Invoke-ReadQr 'scaled' $fScaled
+  $jpeg = Invoke-ReadQr 'jpeg' $fJpeg
+  Check 'S19.02 the scaled (256x256) and the JPEG-quality-40 version of the same code decode to the same 42 characters' `
+    (($scaled.Exit -eq 0) -and ($scaled.Text -ceq $payload) -and
+     ($jpeg.Exit -eq 0) -and ($jpeg.Text -ceq $payload)) `
+    "scaled exit=$($scaled.Exit) identical=$($scaled.Text -ceq $payload) | jpeg exit=$($jpeg.Exit) identical=$($jpeg.Text -ceq $payload)"
+
+  # ---------------------------------------------------------------- S19.03 the second round
+  # THE TWO-STAGE STRATEGY IS MEASURED, NOT ASSUMED. A 160 px code inside a 3000x2250 picture is
+  # too coarse after decoding at 1600 px, so the product has to fall back to the full size - and
+  # the round that answered is on the product's own log line.
+  $tiny = Invoke-ReadQr 'second-round' $fTiny
+  $firstPassNoQr = Test-Log $tiny.Evidence2 'read-qr: first-pass \d+x\d+ in \d+ ms -> \(no qr\)'
+  $fullSizeHit = Test-Log $tiny.Evidence2 'read-qr: full-size 3000x2250 in \d+ ms -> 42 chars'
+  Check 'S19.03 a code too small for the first pass is still found by the full-size round (both rounds are on the log line)' `
+    (($tiny.Exit -eq 0) -and ($tiny.Text -ceq $payload) -and $firstPassNoQr -and $fullSizeHit) `
+    ("exit=$($tiny.Exit) firstPassMissed=$firstPassNoQr fullSizeFound=$fullSizeHit line='" +
+     (Get-LogLine $tiny.Evidence2 'read-qr: full-size') + "'")
+
+  # ---------------------------------------------------------------- S19.03b the first pass pays off
+  # The SAME code at 2400x2400 is answered by the first pass (natively decoded at 1600 px), so the
+  # cheap round is not dead code either: it is the round that answers for the ordinary big picture.
+  $big = Invoke-ReadQr 'big-first-pass' $fBig
+  Check 'S19.03b a 2400x2400 picture is answered by the first pass at 1600 px, without decoding the full size' `
+    (($big.Exit -eq 0) -and ($big.Text -ceq $payload) -and
+     (Test-Log $big.Evidence2 'read-qr: first-pass 1600x1600 in \d+ ms -> 42 chars') -and
+     (-not (Test-Log $big.Evidence2 'read-qr: full-size'))) `
+    "exit=$($big.Exit) line='$(Get-LogLine $big.Evidence2 'read-qr: first-pass')' fullSizeRan=$(Test-Log $big.Evidence2 'read-qr: full-size')"
+
+  # ---------------------------------------------------------------- S19.04 the negative fixture
+  # A picture with no QR must fail BY NAME, without an exception and without producing anything.
+  # The directory snapshot is the load-bearing half: a tool that "helpfully" wrote an empty output
+  # would pass an assertion that only looked at the exit code.
+  $none = Invoke-ReadQr 'no-qr' $fNone
+  Check 'S19.04 a picture with no QR fails BY NAME (QrNotFound), and writes no file at all' `
+    (($none.Exit -eq 3) -and (Test-Log $none.Evidence2 'QrNotFound') -and
+     (Test-Log $none.Evidence2 'no file is written') -and $none.DirSame -and ($none.FileCount -eq 1)) `
+    "exit=$($none.Exit) dirUnchanged=$($none.DirSame) filesInDir=$($none.FileCount) line='$(Get-LogLine $none.Evidence2 'tool read-qr: ok=')'"
+
+  # ---------------------------------------------------------------- S19.05 sources are read-only
+  # Spec 5, the first rule. read-qr is the one op that never writes, so this is the only place the
+  # promise "it reads and nothing else" can go red.
+  $allUntouched = $clean.DirSame -and $scaled.DirSame -and $jpeg.DirSame -and
+                  $big.DirSame -and $tiny.DirSame -and $none.DirSame -and
+                  ($clean.Sha -eq $clean.ShaAfter) -and ($scaled.Sha -eq $scaled.ShaAfter) -and
+                  ($jpeg.Sha -eq $jpeg.ShaAfter) -and ($big.Sha -eq $big.ShaAfter) -and
+                  ($tiny.Sha -eq $tiny.ShaAfter) -and ($none.Sha -eq $none.ShaAfter) -and
+                  ($clean.LengthAfter -eq $clean.Length) -and ($jpeg.LengthAfter -eq $jpeg.Length) -and
+                  ($clean.MtimeAfter -eq $clean.Mtime) -and ($jpeg.MtimeAfter -eq $jpeg.Mtime)
+  Check 'S19.05 all six runs: the source file AND the whole folder are byte-for-byte unchanged (sha256 + length + mtime, spec 5)' `
+    $allUntouched `
+    "clean=$($clean.Sha.Substring(0,12))->$($clean.ShaAfter.Substring(0,12)) jpeg=$($jpeg.Sha.Substring(0,12))->$($jpeg.ShaAfter.Substring(0,12)) filesPerDir=$($clean.FileCount)/$($scaled.FileCount)/$($big.FileCount)/$($tiny.FileCount)/$($none.FileCount)"
+
+  # ---------------------------------------------------------------- S19.06 unknown op is still rejected
+  # The regression guard for the edit this slice makes to WorkerServer: a new op was added to the
+  # dispatch switch, and the unknown-op message has to keep naming the FULL list (it is the
+  # observable evidence behind "an old worker refuses instead of silently doing the wrong thing").
+  # Nothing on the command line can send an unknown op to the worker today, so this reads the
+  # SOURCE: the switch arms and the reject message must list the same ops, in the same order.
+  # That check goes red exactly when someone adds an op and forgets the message (or breaks the
+  # reject path's list), which is the failure this slice could plausibly introduce.
+  $workerSrc = Join-Path $repo 'src\Sidecar\Convert\WorkerServer.cs'
+  $workerLines = @()
+  if (Test-Path -LiteralPath $workerSrc) {
+    $workerLines = @(Get-Content -LiteralPath $workerSrc -Encoding UTF8)
+  }
+  $dispatchOps = @(); $rejectOps = @()
+  $inSwitch = $false
+  foreach ($line in $workerLines) {
+    $t = ([string]$line).Trim()
+    if ($t -match '^ConversionResult result = op switch') { $inSwitch = $true; continue }
+    if ($inSwitch) {
+      foreach ($m in [regex]::Matches($t, 'WorkerProtocol\.(Op[A-Za-z0-9]+) =>')) {
+        $dispatchOps += $m.Groups[1].Value
+      }
+      if ($t -match '^\};') { $inSwitch = $false }
+    }
+    # The message is built from $"{WorkerProtocol.OpX}/{WorkerProtocol.OpY}" - collect every one
+    # that appears on a line inside RejectUnknownOp (its own body mentions WorkerProtocol only
+    # there, so a plain scan of the two interpolated lines is enough).
+    if ($t -match '\$"\{WorkerProtocol\.Op') {
+      foreach ($m in [regex]::Matches($t, 'WorkerProtocol\.(Op[A-Za-z0-9]+)')) {
+        $rejectOps += $m.Groups[1].Value
+      }
+    }
+  }
+  $sameList = (($dispatchOps -join '/') -eq ($rejectOps -join '/'))
+  Check 'S19.06 the unknown-op rejection still names exactly the ops the dispatch switch handles, in order (nothing broke)' `
+    (($dispatchOps.Count -ge 6) -and ($rejectOps.Count -eq $dispatchOps.Count) -and $sameList -and
+     ($rejectOps -contains 'OpReadQr') -and (Test-Log $workerLines 'RejectUnknownOp')) `
+    "dispatch=($($dispatchOps -join '/')) reject=($($rejectOps -join '/')) same=$sameList"
+
+  # ---------------------------------------------------------------- S19.07 the catalog entry
+  # The catalog is the only owner of "which tools exist" (the wheel draws whatever it says). This
+  # slice adds the entry only: the sector, the browser and the text window are a later cut.
+  $tl = Invoke-Confern 'tools-list-qr' @('--tools-list')
+  Check 'S19.07 the tool catalog now lists five tools and read-qr is the fifth, labelled READ QR' `
+    (($tl.Exit -eq 0) -and
+     (Test-Log $tl.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+     (Test-Log $tl.Lines "tool list: 4 id=read-qr label='READ QR'")) `
+    "exit=$($tl.Exit) line='$(Get-LogLine $tl.Lines 'tool list: count=')' fifth='$(Get-LogLine $tl.Lines 'tool list: 4 ')'"
+
+  # ---------------------------------------------------------------- S19.08 documented
+  # Every switch this product exposes is documented in --help; a headless diagnostic nobody can
+  # find is not a diagnostic.
+  $help = Invoke-ConfernStdout 'help-qr' @('--help')
+  Check 'S19.08 --read-qr is documented in --help (it is not a secret switch)' `
+    (Test-Log $help.Lines '--read-qr <path>') `
+    "help lines=$($help.Lines.Count) line='$(Get-LogLine $help.Lines '--read-qr')'"
+
+  # ---------------------------------------------------------------- S19.09 the op is declared once
+  # The declaration order of the Op* constants is the order the dispatch switch and the reject
+  # message use, so the three lists are kept in one order on purpose; this pins the declaration
+  # side of it so a stray edit cannot reorder them silently.
+  $opsInWorkerProtocol = @()
+  $protoLines = @($workerLines | ForEach-Object { [string]$_ })
+  foreach ($line in $protoLines) {
+    $t = ([string]$line).Trim()
+    # The modifiers are optional in the pattern on purpose: `internal const` is what these are
+    # today, and a pattern that only accepted `public const` would silently read an EMPTY list -
+    # which is exactly how this check first failed (measured 2026-10-07: declared=() while the
+    # dispatch list was complete, i.e. the parser was wrong, not the product).
+    $m = [regex]::Match($t, '^(?:public|internal|private)?\s*(?:const|static readonly)\s+string\s+(Op[A-Za-z0-9]+)\s*=')
+    if ($m.Success) { $opsInWorkerProtocol += $m.Groups[1].Value }
+  }
+  Check 'S19.09 WorkerProtocol declares the six ops in the same order the dispatcher and the reject message use' `
+    ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr') -and
+     (($opsInWorkerProtocol -join '/') -eq ($dispatchOps -join '/'))) `
+    "declared=($($opsInWorkerProtocol -join '/')) dispatch=($($dispatchOps -join '/'))"
+}
+
 # ------------------------------------------------------------------ main
 $sections = @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 Write-Host "verify-m3d: exe=$Exe sections=$($sections -join ',') logdir=$LogDir fault='$FaultInjection'"
@@ -1285,6 +1534,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 foreach ($s in $sections) {
   switch ($s) {
     'S18' { Expect 39; Invoke-S18 }
+    'S19' { Expect 10; Invoke-S19 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

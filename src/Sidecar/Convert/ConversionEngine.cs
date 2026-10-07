@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;                 // Int32Rect（裁切矩形用；WindowsBase）
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using ZXing;                          // 只有工具 read-qr 會用到（BarcodeReaderGeneric／RGBLuminanceSource）
 
 namespace Sidecar;
 
@@ -692,6 +693,359 @@ internal sealed class ConversionEngine
         return new ConversionResult(sourcePath, targetPath, ConversionError.None,
             $"{inW}x{inH} -> {cropped.PixelWidth}x{cropped.PixelHeight} " +
             $"({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
+    }
+
+    /// <summary>
+    /// 工具：讀 QR（工具 id `read-qr`，M3 的第五顆扇形；規格 §9.4）。
+    ///
+    /// **這是唯一一個不產生檔案的引擎方法**：輸入是一張圖，產物是一段**文字**，
+    /// 回在 <see cref="ConversionResult.QrText"/>（見那個參數的註解：新增欄位，不是新增通道）。
+    /// 所以它**不碰** <see cref="NamingPolicy"/>、**不碰** <see cref="AtomicWriter"/>、
+    /// 也**不碰** <see cref="TempJournal"/>（那個參數只是為了與其他工具同一個呼叫形狀，
+    /// 這裡不會寫入任何位元組，所以沒有暫存檔要記）。來源一律唯讀開啟（規格 §5）——
+    /// 這一條不是靠「記得不要寫」保證的，是**這個方法沒有任何寫入呼叫**。
+    ///
+    /// **解碼路線**：WIC（`BitmapImage`／`FormatConvertedBitmap` → `Bgra32` → `CopyPixels`）
+    /// → `ZXing.RGBLuminanceSource` → `BarcodeReaderGeneric.Decode`。**不使用 System.Drawing**
+    /// ——那個相依在本專案裡從來沒有被引用過（見 csproj 的註解），而 WIC 本來就是本產品的影像層。
+    ///
+    /// **兩段式策略**（ZXing.Net 核心**沒有**任何內建降採樣：`DecodingOptions` 沒有縮放選項，
+    /// 所以「自己先縮圖」是唯一能讓大圖不慢的做法）：
+    /// <list type="number">
+    /// <item><b>第一輪：縮到約 <see cref="QrFirstPassPixels"/> px。</b>用
+    /// <see cref="BitmapImage.DecodePixelWidth"/>——那是 **JPEG／PNG codec 的原生解碼尺寸**，
+    /// 也就是「免費的降採樣」：整張 3000×2250 的圖不會先被展開成全尺寸再縮。
+    /// 這一輪在實務上就是答案所在的那一輪（QR 的模組數 ≲ 177，1600 px 遠超過需要的取樣密度）。</item>
+    /// <item><b>第二輪：第一輪失敗才用原尺寸再解一次。</b>原尺寸是**昂貴**的那一輪
+    /// （整張點陣圖展開 ＋ ZXing 掃描），所以它必須是備援而不是預設。
+    /// 兩輪都是同一個引擎方法，而且第二輪的失敗訊息會把兩輪都寫進日誌——
+    /// 「試過幾次、每次多少像素、花多少毫秒」都要看得見，否則「解不出來」沒有可維修的資訊。</item>
+    /// </list>
+    ///
+    /// ⚠ **縮圖是「解碼時縮」，不是「先縮再放大」**：小圖（例如 256×256）在第一輪就已經是原尺寸，
+    /// 這時候第二輪會**自動跳過**（見 <see cref="QrReadRounds"/> 的 <c>RetryFullSize</c>）——
+    /// 對同一張圖解兩次一樣的像素只是浪費時間，而且會讓日誌出現一輪假的「原尺寸重試」。
+    ///
+    /// <c>PossibleFormats = [QR_CODE]</c>、<c>TryHarder = true</c>；<c>AutoRotate</c> **保持關閉**
+    /// （那是 `BarcodeReaderGeneric` 的預設值）。理由是成本：ZXing 的 <c>AutoRotate</c> 實作是
+    /// 把整張圖再掃 90°／180°／270° 三個方向，等於**同一張圖解四次**；
+    /// 而本產品的輸入是**螢幕截圖與圖片檔**，不是手機隨手拍的照片——截圖不會躺著。
+    /// 若日後有實測顯示躺著的 QR 真的出現（例如使用者拿手機翻拍螢幕），
+    /// 那時要開的是「四方向」這一整條路，並且必須附上量到的耗時與辨識率，不是現在先開著。
+    ///
+    /// **找不到 QR 時**回 <see cref="ConversionError.QrNotFound"/>：不丟例外、不產生檔案，
+    /// 使用者訊息是「圖片中找不到 QR 碼」（見那個錯誤碼的註解：為什麼既有分類沒有一個合用）。
+    /// 真正的解碼器例外（檔案壞掉、WIC 解不開）仍然走既有的解碼失敗分類，
+    /// 因為那是**另一件事**：前者是「圖是好的、裡面沒有碼」，後者是「這張圖讀不出來」。
+    ///
+    /// 回傳碼語意（診斷入口 <c>--read-qr</c> 靠它分辨）：<see cref="ConversionError.None"/>＝解到文字，
+    /// 其餘＝<see cref="ConversionError"/> 的分類。**沒有任何檔案被產生**。
+    /// </summary>
+    public ConversionResult ReadQr(string sourcePath, TempJournal? journal = null)
+    {
+        _ = journal;   // 這個工具不寫入任何位元組，所以沒有暫存檔要記（形狀一致，語意不變）
+
+        string? sourceFormat = _codecs.FormatOfPath(sourcePath);
+        if (sourceFormat == null)
+            return Fail(sourcePath, ConversionError.Unsupported, "extension is not in the format table");
+        if (_codecs.Capability(sourceFormat) is { Decode: DecodeSupport.No })
+            return Fail(sourcePath, ConversionError.Unsupported, $"no decoder for {sourceFormat}");
+        if (!AtomicWriter.Exists(sourcePath))
+            return Fail(sourcePath, ConversionError.SourceMissing, "source disappeared before reading the QR");
+
+        // 便宜的探測先做（只看檔頭）：壞檔要在這裡就被歸類成「無法解碼」，
+        // 而不是等到 ZXing 找不到碼之後被誤報成「圖片中找不到 QR 碼」。
+        DecodeOutcome probe = _codecs.ProbeDecode(sourcePath);
+        if (probe.Status != DecodeStatus.Ok)
+            return Fail(sourcePath, MapDecodeStatus(probe.Status), probe.Detail);
+
+        _log($"read-qr: {Path.GetFileName(sourcePath)} ({sourceFormat}) " +
+             $"first pass at <= {QrFirstPassPixels} px, full size only if that finds nothing");
+
+        QrReadRounds rounds;
+        try
+        {
+            rounds = DecodeQrRounds(sourcePath);
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath,
+                MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, sourceFormat, sourcePath)),
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        bool found = false;
+        string? text = null;
+        string foundIn = "";
+        var total = System.Diagnostics.Stopwatch.StartNew();
+        foreach (QrReadRound round in rounds.Rounds)
+        {
+            // 縮過的圖解不到才值得解原尺寸；對小圖而言「原尺寸」就是剛剛那一輪，
+            // 再解一次同樣的像素只是浪費時間（而且會在日誌留下一次假的「原尺寸重試」）。
+            if (round.Label == QrFullSizeLabel && !rounds.RetryFullSize)
+            {
+                _log($"read-qr: {Path.GetFileName(sourcePath)} skipped {QrFullSizeLabel} " +
+                     "(the first pass was already the whole image)");
+                break;
+            }
+
+            string? foundText;
+            int w, h;
+            QrReadRound current = round;   // 區域別名，供 catch 區塊使用（catch 不能捕捉 foreach 變數）
+            try
+            {
+                BitmapSource frame = current.Frame();
+                byte[] bgra = ToBgra32(frame, out w, out h);
+                foundText = QrReaderFor().Decode(bgra, w, h, RGBLuminanceSource.BitmapFormat.BGRA32)?.Text;
+            }
+            catch (Exception ex)
+            {
+                // 解碼器自己的例外 = 「這張圖讀不出來」，不是「裡面沒有一碼」。
+                // 分類沿用既有的解碼失敗，而且把輪次寫進去，否則維修的人只知道「失敗」。
+                _log($"read-qr: {Path.GetFileName(sourcePath)} {current.Label} " +
+                     $"threw {ex.GetType().Name}: {ex.Message}");
+                return Fail(sourcePath,
+                    MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, sourceFormat, sourcePath)),
+                    $"{current.Label}: {ex.GetType().Name}: {ex.Message}");
+            }
+            current.Timer.Stop();
+
+            // ⚠ 這一行的格式是**驗收斷言的一部分**（哪一輪、多少像素、花了多久、有沒有解到）。
+            _log($"read-qr: {current.Label} {w}x{h} in {current.Timer.Elapsed.TotalMilliseconds:F0} ms " +
+                 $"-> {(foundText == null ? "(no qr)" : $"{foundText.Length} chars")} " +
+                 $"({Path.GetFileName(sourcePath)})");
+            if (foundText != null) { text = foundText; foundIn = current.Label; found = true; break; }
+        }
+        total.Stop();
+
+        if (!found)
+        {
+            // **明確、可讀、不產生檔案的否定答案**（不是例外、不是崩潰）。
+            _log($"read-qr: no QR found in {Path.GetFileName(sourcePath)} " +
+                 $"({rounds.Rounds.Count} round(s): {rounds.Describe()}, " +
+                 $"{total.Elapsed.TotalMilliseconds:F0} ms total); no file is written");
+            return Fail(sourcePath, ConversionError.QrNotFound,
+                $"no QR code found in a {rounds.FullWidth}x{rounds.FullHeight} {sourceFormat} image " +
+                $"(rounds: {rounds.Describe()})");
+        }
+
+        _log($"read-qr: {Path.GetFileName(sourcePath)} decoded in the {foundIn}, " +
+             $"{total.Elapsed.TotalMilliseconds:F0} ms total; NO file is written by this tool");
+        // ⚠ OutputPath 一定是 null：這個工具不寫檔（見 ConversionResult.QrText 的互斥說明）。
+        return new ConversionResult(sourcePath, null, ConversionError.None,
+            $"{text!.Length} chars from the {foundIn} ({total.Elapsed.TotalMilliseconds:F0} ms)",
+            text);
+    }
+
+    /// <summary>
+    /// 第一輪的縮圖上限（**寬或高較大的一邊**）。選 1600 而不是更大的理由：
+    /// QR 的模組數上限是 177×177，加上 4 模組的安靜區＝185 模組；1600 px 給每個模組
+    /// 8.6 px，遠高於 ZXing 需要的取樣密度，而掃描成本隨像素數走，所以再大只是變慢。
+    /// 選更小的理由則相反：1200 px 在「碼只佔畫面一角」的照片上會讓模組掉到 3 px 以下。
+    /// </summary>
+    private const int QrFirstPassPixels = 1600;
+
+    /// <summary>第一輪的標籤（縮圖）。**它是識別碼，不是排版**：驗收會斷言這幾個字。</summary>
+    private const string QrFirstPassLabel = "first-pass";
+
+    /// <summary>第二輪的標籤（原尺寸）。見 <see cref="QrReadRound"/>。</summary>
+    private const string QrFullSizeLabel = "full-size";
+
+    /// <summary>一輪解碼：它的標籤、**它的畫格（延遲取得）**，以及只有這一輪的碼表。</summary>
+    /// <param name="Frame">
+    /// ⚠ **是一個延遲工廠，不是一個已經解好的畫格**。原因就是這個工具存在的理由：
+    /// 「第一輪解到就不解原尺寸」只有在**原尺寸那一張還沒被解碼**時才有意義。
+    /// 先把原尺寸 <c>BitmapImage</c> 建好再放進迴圈，等於每一張圖都已經付過全尺寸解碼的成本
+    /// （3000×2250 是一張 27 MB 的點陣圖），而降採樣帶來的好處就整個消失了。
+    /// 每一輪在**第一次被用到**時才呼叫它；工廠只被呼叫一次（迴圈每輪最多跑一次）。
+    /// </param>
+    private sealed record QrReadRound(string Label, Func<BitmapSource> Frame)
+    {
+        /// <summary>
+        /// 碼表在**建構時就開始**（不是迴圈裡才開始）：這樣它涵蓋的正是「這一輪真正花的時間」，
+        /// 也就是把該輪的延遲解碼也算進去——不然日誌上會出現一輪「0 ms 解完 3000×2250」。
+        /// 總計另外有一個 <c>total</c> 碼表，兩者都寫進日誌。
+        /// </summary>
+        public System.Diagnostics.Stopwatch Timer { get; } = System.Diagnostics.Stopwatch.StartNew();
+    }
+
+    /// <summary>
+    /// 這一張圖要解幾輪、每一輪用哪個尺寸。<paramref name="RetryFullSize"/> 為 false 代表
+    /// **沒有「原尺寸」那一輪**（第一輪本來就是原尺寸），呼叫端必須跳過它——
+    /// 解兩次同樣的像素不是「更努力」，只是浪費時間。
+    /// </summary>
+    private sealed record QrReadRounds(IReadOnlyList<QrReadRound> Rounds, bool RetryFullSize,
+                                       int FullWidth, int FullHeight)
+    {
+        /// <summary>
+        /// 日誌與訊息用的「試過什麼」摘要。**尺寸取自記下來的數字，不取自畫格**——
+        /// 讀畫格會**強迫解碼**（這正是延遲工廠要避免的事），而且會在「還沒輪到那一輪」時
+        /// 就把成本提前付掉（實測過：那一種寫法讓「第一輪解到就不解原尺寸」變成一句空話）。
+        /// </summary>
+        public string Describe()
+        {
+            var parts = new List<string>();
+            foreach (QrReadRound r in Rounds)
+            {
+                parts.Add($"{r.Label} {(r.Label == QrFullSizeLabel ? FullSizeText : ScaledSizeText)}");
+            }
+            return string.Join(", ", parts);
+        }
+
+        private string FullSizeText => $"{FullWidth}x{FullHeight}";
+
+        /// <summary>
+        /// 第一輪的尺寸。縮過的時候是「只設長邊、短邊依比例」（與 <see cref="BitmapImage"/> 的
+        /// <c>DecodePixelWidth</c>／<c>DecodePixelHeight</c> 同一條規則）；**沒縮的時候就是原尺寸**
+        /// （小圖走的就是這一條）——這裡只是把同一件事寫出來給日誌用，不重算一次解碼策略。
+        /// </summary>
+        private string ScaledSizeText => !RetryFullSize
+            ? FullSizeText
+            : FullWidth >= FullHeight
+                ? $"{QrFirstPassPixels}x{Math.Max(1, (int)Math.Round((double)FullHeight * QrFirstPassPixels / FullWidth))}"
+                : $"{Math.Max(1, (int)Math.Round((double)FullWidth * QrFirstPassPixels / FullHeight))}x{QrFirstPassPixels}";
+    }
+
+    /// <summary>
+    /// 建出兩段式策略的輪次清單（第一輪縮圖、第二輪原尺寸）。
+    ///
+    /// 縮圖走 <see cref="BitmapImage.DecodePixelWidth"/>：**JPEG／PNG 的 codec 直接解到指定尺寸**，
+    /// 所以整張大圖從來沒有被展開過（與 <see cref="DecodeFirstFrame"/> 的
+    /// <c>BitmapCacheOption.OnLoad</c> 不同——那一條一定會展開全尺寸）。
+    /// 只在「原尺寸真的比上限大」時才用它，否則第一輪就是原尺寸。
+    ///
+    /// ⚠ **不要改成 <c>TransformedBitmap</c> 縮圖**：那一條會先把全尺寸解出來再縮，
+    /// 而 3000×2250 的展開正是這個工具要避開的成本（見兩段式策略的說明）。
+    ///
+    /// ⚠ **兩輪都以「延遲工廠」的形式交出**（見 <see cref="QrReadRound.Frame"/>）——
+    /// 這裡**只讀檔頭**（<c>DelayCreation</c>）取得原始尺寸，然後把串流關掉；
+    /// 真正解碼發生在工廠被呼叫時。原尺寸那一輪尤其不能提前解：
+    /// 提前解＝每一張圖都付了全尺寸解碼的成本，降採樣就白做了。
+    /// </summary>
+    private static QrReadRounds DecodeQrRounds(string sourcePath)
+    {
+        // 只讀檔頭：DelayCreation 讓 EndInit 不解像素，PixelWidth／PixelHeight 由 metadata 回答。
+        // 尺寸問完就把串流關掉，兩輪各自在工廠裡重新開檔（唯讀、可共用）。
+        int fullW, fullH;
+        using (var input = new FileStream(LongPath.Prepare(sourcePath), FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite))
+        {
+            var head = new BitmapImage();
+            head.BeginInit();
+            head.CacheOption = BitmapCacheOption.OnLoad;
+            head.CreateOptions = BitmapCreateOptions.DelayCreation;
+            head.StreamSource = input;
+            head.EndInit();
+            fullW = head.PixelWidth;
+            fullH = head.PixelHeight;
+        }
+
+        bool scaled = Math.Max(fullW, fullH) > QrFirstPassPixels;
+        var rounds = new List<QrReadRound>();
+        // 第一輪的標籤一律是 `first-pass`，**不管它有沒有被縮**：它的身分是「第一輪」，
+        // 而不是「縮圖那一輪」。小圖的 first-pass 就是原尺寸（而且沒有第二輪）。
+        // ⚠ 這一條不是排版問題：跳過第二輪的判斷就看這個標籤（見 ReadQr 的迴圈），
+        // 把一張 512x512 的圖標成 `full-size` 會讓它**連第一輪都不解**——
+        // 2026-10-07 實測到這個 bug（乾淨的 512x512 QR 回 QrNotFound，日誌上
+        // 只有 `skipped full-size`，一次解碼都沒跑）。
+        rounds.Add(new QrReadRound(QrFirstPassLabel, scaled
+            ? () => DecodeScaled(sourcePath, fullW, fullH)
+            : () => DecodeFull(sourcePath)));
+        if (scaled)
+        {
+            // 第二輪：原尺寸。**只在第一輪真的縮過時才存在**（見 RetryFullSize）；
+            // 它也是一個工廠，所以第一輪解到時這一張從來沒有被解碼過。
+            rounds.Add(new QrReadRound(QrFullSizeLabel, () => DecodeFull(sourcePath)));
+        }
+
+        return new QrReadRounds(rounds, scaled, fullW, fullH);
+    }
+
+    /// <summary>
+    /// 把來源**在解碼時**縮到長邊 <see cref="QrFirstPassPixels"/> px。
+    /// 兩個 <c>DecodePixel</c> 只有一個會被設（見呼叫端的註解）；<c>OnLoad</c> 讓檔案串流
+    /// 可以在 <c>using</c> 結束後關掉——畫格已經在記憶體裡了（與 <see cref="DecodeFirstFrame"/>
+    /// 同一個理由，只是尺寸不同）。<c>Freeze</c> 與其他解碼路徑一致：凍結過的畫格才可以跨執行緒交付。
+    /// </summary>
+    private static BitmapSource DecodeScaled(string sourcePath, int fullW, int fullH)
+    {
+        using var input = new FileStream(LongPath.Prepare(sourcePath), FileMode.Open, FileAccess.Read,
+                                        FileShare.ReadWrite);
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.DecodePixelWidth = fullW >= fullH ? QrFirstPassPixels : 0;
+        image.DecodePixelHeight = fullH > fullW ? QrFirstPassPixels : 0;
+        image.StreamSource = input;
+        image.EndInit();
+        image.Freeze();
+        return image;
+    }
+
+    /// <summary>
+    /// 原尺寸那一輪的畫格。刻意**不用** <see cref="DecodeFirstFrame"/>：那一條會回一個
+    /// <c>BitmapFrame</c>（帶著 metadata 與色彩內容），而這裡只要像素，而且
+    /// 「原尺寸」的語意要與第一輪（<see cref="BitmapImage"/> 解到指定尺寸）成對——
+    /// 兩輪走同一個型別，才不會出現「第一輪是 A 型別、第二輪是 B 型別」這種只有讀原始碼
+    /// 才知道的差別。
+    /// </summary>
+    private static BitmapSource DecodeFull(string sourcePath)
+    {
+        using var input = new FileStream(LongPath.Prepare(sourcePath), FileMode.Open, FileAccess.Read,
+                                        FileShare.ReadWrite);
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.CreateOptions = BitmapCreateOptions.PreservePixelFormat;
+        image.StreamSource = input;
+        image.EndInit();
+        image.Freeze();
+        return image;
+    }
+
+    /// <summary>
+    /// 畫格 → **BGRA32 的原始位元組**（<c>Bgra32</c> ＝ 藍、綠、紅、alpha，就是
+    /// <see cref="RGBLuminanceSource.BitmapFormat.BGRA32"/> 說的那一種排列）。
+    ///
+    /// <see cref="CopyPixels(Array, int, int)"/> 需要 stride，而且**要自己配置目的陣列**：
+    /// stride 用 <c>width * 4</c>（Bgra32 每像素 4 位元組，而且 WIC 的 stride 就是緊湊的）。
+    /// </summary>
+    private static byte[] ToBgra32(BitmapSource frame, out int width, out int height)
+    {
+        BitmapSource bgra = frame.Format == PixelFormats.Bgra32
+            ? frame
+            : new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+        width = bgra.PixelWidth;
+        height = bgra.PixelHeight;
+        int stride = width * 4;
+        var pixels = new byte[(long)stride * height];
+        bgra.CopyPixels(pixels, stride, 0);
+        return pixels;
+    }
+
+    /// <summary>
+    /// 解碼器。**這是全檔唯一一處 <c>BarcodeReaderGeneric</c>**，所以
+    /// 「設定了哪些選項」只有一個地方要維護（見 <see cref="ReadQr"/> 對每個選項的理由）。
+    ///
+    /// ⚠ **`TryHarder` 在 `Options` 上，不在讀取器上**：`BarcodeReaderGeneric` 只有三個公開屬性
+    /// （`Options`／`AutoRotate`／`TryInverted`），`TryHarder` 是
+    /// <c>ZXing.Common.DecodingOptions</c> 的成員。這是 2026-10-07 用反射對
+    /// `lib/net8.0/zxing.dll`（0.16.11）實測的結果（第一次寫成 `reader.TryHarder = true`
+    /// 直接編譯失敗：CS0117）。同一次實測也確認了 `RGBLuminanceSource.BitmapFormat` 含 `BGRA32`，
+    /// 以及 <c>Decode(byte[], int, int, BitmapFormat)</c> 這個多載存在。
+    ///
+    /// `CharacterSet` 不指定：ZXing 對 QR 的預設是 ISO-8859-1，而編碼端寫進碼裡的
+    /// ECI／字元集指示會被解碼器自己讀出來覆蓋它，所以硬指定一個值只會在
+    /// 「碼是 UTF-8」的時候幫倒忙（把多位元組序列解成亂碼）。
+    /// </summary>
+    private static BarcodeReaderGeneric QrReaderFor()
+    {
+        // AutoRotate 刻意留在預設值（false）並寫出來：開它＝同一張圖解四次（見 ReadQr）。
+        var reader = new BarcodeReaderGeneric { AutoRotate = false };
+        reader.Options.PossibleFormats = new List<BarcodeFormat> { BarcodeFormat.QR_CODE };
+        // 旋轉／低對比的碼要更努力掃；成本只落在「本來就會失敗」的那一輪。
+        reader.Options.TryHarder = true;
+        return reader;
     }
 
     /// <summary>「壓縮到」的搜尋結果。</summary>

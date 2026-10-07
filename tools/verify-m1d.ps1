@@ -850,9 +850,9 @@ if ($payloadLine) {
   if ($tm.Success) { $layerTools = [int]$tm.Groups[1].Value }
 }
 $dumpLen = if (Test-Path -LiteralPath $layerDump) { (Get-Item -LiteralPath $layerDump).Length } else { -1 }
-Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=4 tools) and dumps that frame' `
-  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 4) -and ($dumpLen -gt 8000)) `
-  "exit=$($layerRun.Exit) tools=$layerTools (expected 4: rotate90+strip-metadata+compress+crop; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
+Check 'S12.20 with no key held the payload wheel stays on the FORMAT layer (catalog=5 tools) and dumps that frame' `
+  (($layerRun.Exit -eq 0) -and [bool]($payloadLine -match 'layer=format') -and ($layerTools -eq 5) -and ($dumpLen -gt 8000)) `
+  "exit=$($layerRun.Exit) tools=$layerTools (expected 5: rotate90+strip-metadata+compress+crop+read-qr; update this number only when a tool is really added/removed) dumpBytes=$dumpLen layerLine='$(($payloadLine -replace '^.*wheel from OLE payload: ', '') -replace ' source=.* targets=', ' targets=')'"
 
 # =============================================================================
 #  S12.21 CONCURRENCY (2026-10-06): two conversions running AT THE SAME TIME must
