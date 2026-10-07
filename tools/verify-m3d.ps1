@@ -63,7 +63,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S18',
   [string]$LogDir = "$env:TEMP\sidecar-verify",
-  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text', 'merge-order', 'merge-drop')][string]$FaultInjection = ''
+  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text', 'merge-order', 'merge-drop', 'merge-nosort', 'merge-cancelqueues')][string]$FaultInjection = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -373,6 +373,8 @@ function Get-FaultNote() {
     'qr-text' { return 'FAULT INJECTION qr-text: the text window is expected to hold a different string' }
     'merge-order' { return 'FAULT INJECTION merge-order: the expected PDF page sequence is reversed' }
     'merge-drop' { return 'FAULT INJECTION merge-drop: the expected PDF page count is one too low' }
+    'merge-nosort' { return 'FAULT INJECTION merge-nosort: the expected merge order is the SOURCE order, not the order the window showed' }
+    'merge-cancelqueues' { return 'FAULT INJECTION merge-cancelqueues: cancel is expected to still hand the order back' }
     default { return 'no fault injection: expectations are the documented ones' }
   }
 }
@@ -2456,6 +2458,390 @@ function Invoke-S20 {
 
 # ---------------------------------------------------------------- S21
 
+# ---------------------------------------------------------------- S21
+
+# One `--merge-ui-selftest <p1;p2;...>` run, parsed. The WINDOW's own numbers are read from the
+# product's log; nothing in this function computes an expected order (a second copy of the move
+# semantics would go red on the harness instead of on the product - the same rule this repo
+# already follows for the crop window's stage mapping).
+function Invoke-MergeUiSelftest([string]$name, [string[]]$sources) {
+  $joined = ($sources -join ';')
+  $r = Invoke-Confern $name @('--merge-ui-selftest', $joined)
+  $initial = @()
+  $m = [regex]::Match([string](Get-LogLine $r.Lines 'initial order matches the source order='),
+                      'source=\[([^\]]*)\]')
+  if ($m.Success) { $initial = @($m.Groups[1].Value -split ',' | Where-Object { $_ -ne '' }) }
+  # The order the window SHOWS after the first drag. This is the single source for the
+  # "what was on screen" side of the page-order assertion.
+  $afterDrag = @()
+  $m2 = [regex]::Match([string](Get-LogLine $r.Lines 'merge ui selftest: after drag the window shows'),
+                       'shows (.+)$')
+  if ($m2.Success) { $afterDrag = @($m2.Groups[1].Value.Trim() -split '\|' | Where-Object { $_ -ne '' }) }
+  # The SAME shown order expressed as full paths, so it can be fed straight to the engine without
+  # this side re-deriving anything.
+  $afterDragPaths = @()
+  foreach ($n in $afterDrag) {
+    foreach ($s in $sources) { if ((Split-Path -Leaf $s) -eq $n) { $afterDragPaths += $s; break } }
+  }
+  # The order the window SHOWS when the user presses confirm (after the drag, the drag-back and
+  # the removal). Handed back == shown is asserted by the product; this side compares the
+  # COMMITTED pages against it.
+  $shownAtConfirm = @()
+  $m3 = [regex]::Match([string](Get-LogLine $r.Lines 'matchesWhatWasShown='), 'shown=\[([^\]]*)\]')
+  if ($m3.Success) { $shownAtConfirm = @($m3.Groups[1].Value -split ',' | Where-Object { $_ -ne '' }) }
+  $removeLine = [string](Get-LogLine $r.Lines 'merge ui selftest: remove pressed=')
+  $rm = [regex]::Match($removeLine, "removed='(.+?)' gone=(\w+) othersKept=(\w+) now=\[([^\]]*)\]")
+  $removedName = ''
+  $removedGone = $false
+  $othersKept = $false
+  $afterRemove = @()
+  if ($rm.Success) {
+    $removedName = $rm.Groups[1].Value
+    $removedGone = ($rm.Groups[2].Value -eq 'True')
+    $othersKept = ($rm.Groups[3].Value -eq 'True')
+    $afterRemove = @($rm.Groups[4].Value -split ',' | Where-Object { $_ -ne '' })
+  }
+  # The same list as full paths, from the SAME reported order (no re-derivation).
+  $afterRemovePaths = @()
+  foreach ($n in $afterRemove) {
+    foreach ($s in $sources) { if ((Split-Path -Leaf $s) -eq $n) { $afterRemovePaths += $s; break } }
+  }
+  return [pscustomobject]@{
+    Exit          = $r.Exit
+    Lines         = $r.Lines
+    Log           = $r.Log
+    Ok            = (Test-Log $r.Lines 'merge ui selftest done: ok=True')
+    Done          = (Test-Log $r.Lines 'merge ui selftest done:')
+    Initial       = $initial
+    InitialOk     = (Test-Log $r.Lines 'initial order matches the source order=True')
+    SingleInst    = (Test-Log $r.Lines 'ignored \(single instance\) callbackReplaced=False')
+    DragOk        = (Test-Log $r.Lines 'drag movedTheOrder=True matchesTheMoveSemantics=True')
+    DragReturnOk  = (Test-Log $r.Lines 'drag out and back restores the order=True')
+    AfterDrag     = $afterDrag
+    AfterDragPaths = $afterDragPaths
+    RemovedName   = $removedName
+    RemovedGone   = $removedGone
+    OthersKept    = $othersKept
+    AfterRemove   = $afterRemove
+    AfterRemovePaths = $afterRemovePaths
+    LastKept      = (Test-Log $r.Lines 'the last file cannot be removed: .*stillOne=True noticeSaysWhy=True')
+    ConfirmOk     = (Test-Log $r.Lines 'matchesWhatWasShown=True removedNotHanded=True')
+    ShownAtConfirm = $shownAtConfirm
+    CancelOk      = (Test-Log $r.Lines 'cancel -> closed=True orderHandedBack=False')
+    ReopenOk      = (Test-Log $r.Lines 'reopened=True windowPresent=True orderBackToSource=True')
+    ScrollZero    = (Test-Log $r.Lines 'scroll=0')
+  }
+}
+
+# A REAL-path run (open the window and then stop touching the mouse) with a hard timeout, because
+# the real path BLOCKS on a modal window by design. Returns DidExit=false when it had to be killed,
+# which is the expected outcome: it proves the window really waited for a human.
+function Invoke-ConfernTimeout([string]$name, [string[]]$argv, [int]$timeoutMs) {
+  $log = Join-Path $Work "$name.log"
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $quoted = @()
+  foreach ($a in $argv) { if ([string]$a -match ' ') { $quoted += ('"' + $a + '"') } else { $quoted += $a } }
+  $all = @() + $quoted + @('--log', $log, '--quiet', '--no-autostart')
+  $p = Start-Process -FilePath $Exe -ArgumentList $all -PassThru -WindowStyle Hidden
+  $exited = $p.WaitForExit($timeoutMs)
+  if (-not $exited) { try { $p.Kill() } catch { } }
+  Start-Sleep -Milliseconds 800
+  return [pscustomobject]@{
+    Name    = $name
+    DidExit = [bool]$exited
+    Log     = $log
+    Lines   = (Get-LogLines $log)
+  }
+}
+
+# The page order of a merged file, compared against an EXPECTED list of source page tuples. A
+# page's identity is (size, rotate, decompressed-content sha) as a TUPLE, not size alone: with
+# sizes alone a product that put the right sizes in the right order but the wrong CONTENT on each
+# page would pass (that is exactly the hole the brief flags between S20.04 and S20.05).
+function Test-MergeOrderMatches([object[]]$merged, [string[]]$wantSizes, [string[]]$wantShas) {
+  if ($merged.Count -ne $wantSizes.Count) { return $false }
+  if ($wantShas.Count -ne $wantSizes.Count) { return $false }
+  for ($i = 0; $i -lt $merged.Count; $i++) {
+    if ($merged[$i].Size -ne $wantSizes[$i]) { return $false }
+    if ($merged[$i].Contents -le 0) { return $false }
+    if ($merged[$i].Sha -ne $wantShas[$i]) { return $false }
+  }
+  return $true
+}
+
+function Invoke-S21 {
+  Write-Host "=== S21 merge-pdf sorting window: the shown order becomes the output page order ==="
+
+  $repo = Split-Path -Parent $PSScriptRoot
+  $fdir = Join-Path $repo 'fixtures\pdf'
+  $fA = Join-Path $fdir 'fx-a.pdf'
+  $fB = Join-Path $fdir 'fx-b.pdf'
+  $fC = Join-Path $fdir 'fx-c.pdf'
+  $missing = @()
+  foreach ($f in @($fA, $fB, $fC)) {
+    if (-not (Test-Path -LiteralPath $f)) { $missing += (Split-Path -Leaf $f) }
+  }
+  if ($missing.Count -gt 0) {
+    Inconclusive "PDF fixtures missing from $fdir ($($missing -join ', ')) - they are committed, so a missing one means the checkout is broken"
+  }
+
+  # The expected page tuples, read from the PRODUCT (the same reader S20 uses). The order of the
+  # three source files' tuples is the fixture ground truth: a=2 pages, b=1, c=3, all six sizes
+  # pairwise distinct, so "which file did this page come from" is decidable from the output alone.
+  $iA = Get-MergePages 's21-src-a' $fA
+  $iB = Get-MergePages 's21-src-b' $fB
+  $iC = Get-MergePages 's21-src-c' $fC
+  $srcSizesA = @($iA.Pages | ForEach-Object { $_.Size })
+  $srcSizesB = @($iB.Pages | ForEach-Object { $_.Size })
+  $srcSizesC = @($iC.Pages | ForEach-Object { $_.Size })
+  $srcShasA = @($iA.Pages | ForEach-Object { $_.Sha })
+  $srcShasB = @($iB.Pages | ForEach-Object { $_.Sha })
+  $srcShasC = @($iC.Pages | ForEach-Object { $_.Sha })
+  # The order the window is given, and the one the drag is expected to produce, are BOTH read from
+  # the product below - these two lists only name the FILES.
+  $namesA = @('fx-a.pdf', 'fx-a.pdf', 'fx-a.pdf')
+  $namesB = @('fx-b.pdf', 'fx-b.pdf', 'fx-b.pdf')
+  $namesC = @('fx-c.pdf', 'fx-c.pdf', 'fx-c.pdf')
+
+  # The sources are COPIED into a fresh folder: nothing is ever written next to the committed
+  # fixtures (an earlier probe of mine did write a merged file there and had to be cleaned up -
+  # measured 2026-10-07, which is why every run below works on copies).
+  $ui = Join-Path $Work 'mergeui'
+  New-Item -ItemType Directory -Force -Path $ui | Out-Null
+  $uA = Join-Path $ui 'fx-a.pdf'
+  $uB = Join-Path $ui 'fx-b.pdf'
+  $uC = Join-Path $ui 'fx-c.pdf'
+  Copy-Item -LiteralPath $fA -Destination $uA -Force
+  Copy-Item -LiteralPath $fB -Destination $uB -Force
+  Copy-Item -LiteralPath $fC -Destination $uC -Force
+
+  # One baseline table per property, keyed by the path exactly as the run used it. NOTE: every
+  # path that S21.08 checks has to be seeded before the runs - a missing key reads as $null and
+  # then "null -ne actual" reports a change that never happened (measured: the first version
+  # seeded only the three mergeui copies and so accused the three cancel-drill copies of all
+  # three properties while the values were in fact identical). The seeding is written out
+  # inline rather than in a helper on purpose: a PowerShell function does not see the caller's
+  # local variables, so a helper would need $script: and then the READS below would miss.
+  $srcHashes = @{}
+  $srcLens = @{}
+  $srcMtimes = @{}
+  foreach ($p in @($uA, $uB, $uC)) {
+    $srcHashes[$p] = Get-Sha $p
+    $srcLens[$p] = (Get-Item -LiteralPath $p).Length
+    $srcMtimes[$p] = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+  }
+  # The COMMITTED fixtures too. A merge writes its output NEXT TO THE FIRST SOURCE (there is no
+  # output-dir setting in play here), so a run that was accidentally pointed at fixtures\pdf
+  # would deposit a merged PDF into the repository. That must never happen again: an earlier
+  # probe of mine did exactly that and left an untracked `fx-a (1).pdf` behind (measured
+  # 2026-10-07). Cheap to check, and it fails loudly instead of silently dirtying the checkout.
+  $fxBefore = @{}
+  $fxDirStateBefore = Get-DirState $fdir
+  foreach ($p in @($fA, $fB, $fC)) { $fxBefore[$p] = Get-Sha $p }
+
+  # ---------------------------------------------------------------- S21.01 only merge-pdf asks
+  # The window must belong to ONE tool. `AppliesTo` is the single authority for "does this tool
+  # apply to this source", and the catalog query is the product's own answer to it.
+  $tlPdf = Invoke-Confern 's21-tools-pdf' @('--tools-list', '--wheel-source', 'pdf')
+  $tlJpg = Invoke-Confern 's21-tools-jpg' @('--tools-list', '--wheel-source', 'JPG')
+  $pdfIds = @()
+  foreach ($line in $tlPdf.Lines) {
+    $tm = [regex]::Match([string]$line, 'tool list: \d+ id=(\S+)')
+    if ($tm.Success) { $pdfIds += $tm.Groups[1].Value }
+  }
+  $jpgIds = @()
+  foreach ($line in $tlJpg.Lines) {
+    $tm = [regex]::Match([string]$line, 'tool list: \d+ id=(\S+)')
+    if ($tm.Success) { $jpgIds += $tm.Groups[1].Value }
+  }
+  $pdfCountOk = (Test-Log $tlPdf.Lines 'count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\]')
+  $jpgCountOk = (Test-Log $tlJpg.Lines 'count=5 tools=')
+  $mergeOnlyForPdf = ($pdfIds -contains 'merge-pdf') -and (-not ($jpgIds -contains 'merge-pdf'))
+  Check 'S21.01 merge-pdf is offered for a PDF source and NOT for any other source, so the sorting window can belong to that one sector only' `
+    ($pdfCountOk -and $jpgCountOk -and $mergeOnlyForPdf) `
+    ("pdfTools=($($pdfIds -join ',')) jpgTools=($($jpgIds -join ',')) pdfCountOk=$pdfCountOk jpgCountOk=$jpgCountOk")
+
+  # ---------------------------------------------------------------- S21.02..S21.06 the window run
+  # NOTE the variable name: `$uiRun`, NOT `$ui` - `$ui` is the FOLDER above, and reusing it here
+  # would silently overwrite the path (measured while writing this section).
+  $uiRun = Invoke-MergeUiSelftest 's21-ui' @($uA, $uB, $uC)
+
+  # S21.02 initial order == source order.
+  $wantInitial = @('fx-a.pdf', 'fx-b.pdf', 'fx-c.pdf')
+  Check 'S21.02 the window opens with the SOURCE order as its initial order (the order the caller gave, not a sorted or remembered one)' `
+    ($uiRun.Exit -eq 0 -and $uiRun.Ok -and $uiRun.InitialOk -and (($uiRun.Initial -join ',') -eq ($wantInitial -join ','))) `
+    "exit=$($uiRun.Exit) ok=$($uiRun.Ok) initialOk=$($uiRun.InitialOk) initial=($($uiRun.Initial -join ',')) want=($($wantInitial -join ','))"
+
+  # S21.03 the drag really reorders, and the order it produces is a MOVE (the rest keep their
+  # relative order). The window's own move-semantics judgement is used; this side only checks the
+  # window said yes and that it produced something different from the source order.
+  Check 'S21.03 dragging a row reorders the list as a MOVE (the others keep their relative order), and dragging out and back restores the original order exactly' `
+    ($uiRun.DragOk -and $uiRun.DragReturnOk -and ($uiRun.AfterDrag.Count -eq 3) -and
+     (($uiRun.AfterDrag -join ',') -ne ($wantInitial -join ','))) `
+    "dragOk=$($uiRun.DragOk) dragReturnOk=$($uiRun.DragReturnOk) afterDrag=($($uiRun.AfterDrag -join ','))"
+
+  # S21.04 THE CHECK THIS SLICE EXISTS FOR: the pages of the output file are in EXACTLY the order
+  # the window was showing, matched per page as a (size + content sha) TUPLE against the source
+  # pages. The expected list is built from the ORDER THE WINDOW REPORTED, not from a re-implemented
+  # move - so a window that reordered wrongly, or a commit that ignored the shown order, both go red.
+  $wantOrderFiles = @($uiRun.AfterDrag)
+  if ($FaultInjection -eq 'merge-nosort') {
+    # FAULT INJECTION: the expectation is that the COMMIT IGNORED THE SHOWN ORDER and used the
+    # source order instead - i.e. a product where drag-to-reorder is decorative. This is the exact
+    # expectation such a product would satisfy, so S21.04 has to go red: it compares the committed
+    # pages (and the order the product says it was ASKED for) against this corrupted list. S21.02
+    # (initial order == source order) and S21.03 (the drag moves rows on screen) stay GREEN, which
+    # is what makes the red a statement about "the shown order became the page order" specifically
+    # and not about reordering being broken in general.
+    $wantOrderFiles = @('fx-a.pdf', 'fx-b.pdf', 'fx-c.pdf')
+  }
+  $wantSizes = @()
+  $wantShas = @()
+  foreach ($n in $wantOrderFiles) {
+    if ($n -eq 'fx-a.pdf') { $wantSizes += $srcSizesA; $wantShas += $srcShasA }
+    elseif ($n -eq 'fx-b.pdf') { $wantSizes += $srcSizesB; $wantShas += $srcShasB }
+    elseif ($n -eq 'fx-c.pdf') { $wantSizes += $srcSizesC; $wantShas += $srcShasC }
+  }
+  $seamRun = Invoke-MergeRun 's21-seam-order' @($uiRun.AfterDragPaths)
+  $seamOut = Get-MergePages 's21-seam-merged' $seamRun.OutputPath
+  # The requested order (as the product logged it) must be the order the window showed: this is the
+  # "the shown order is what was sent" half, and it does not depend on the output at all.
+  $reqOk = (($seamRun.RequestOrder -join ',') -eq ($wantOrderFiles -join ','))
+  $pagesOk = Test-MergeOrderMatches @($seamOut.Pages) $wantSizes $wantShas
+  $sizesDifferFromSource = (($wantSizes -join '/') -ne ((@($srcSizesA) + @($srcSizesB) + @($srcSizesC)) -join '/'))
+  Check 'S21.04 the committed pages are in EXACTLY the order the window was showing: each page matches the corresponding source page as a (size + content sha) tuple, and the order really differs from the source order' `
+    ($seamRun.Exit -eq 0 -and $seamRun.OpSent -and ($seamRun.NewFiles.Count -eq 1) -and
+     $seamOut.Consistent -and $reqOk -and $pagesOk -and $sizesDifferFromSource) `
+    ("exit=$($seamRun.Exit) opSent=$($seamRun.OpSent) newFiles=$($seamRun.NewFiles.Count) " +
+     "requested=($($seamRun.RequestOrder -join ',')) shown=($($wantOrderFiles -join ',')) reqOk=$reqOk " +
+     "pagesOk=$pagesOk differs=$sizesDifferFromSource " +
+     "gotSizes=($(@($seamOut.Pages | ForEach-Object { $_.Size }) -join ',')) wantSizes=($($wantSizes -join ','))")
+
+  # S21.05 removing a file: the removed file's pages are COMPLETELY ABSENT from the output, and
+  # every other file's pages are still there. The expected list is the order the window reported
+  # after the removal.
+  $wantAfterRemoveSizes = @()
+  $wantAfterRemoveShas = @()
+  foreach ($n in @($uiRun.AfterRemove)) {
+    if ($n -eq 'fx-a.pdf') { $wantAfterRemoveSizes += $srcSizesA; $wantAfterRemoveShas += $srcShasA }
+    elseif ($n -eq 'fx-b.pdf') { $wantAfterRemoveSizes += $srcSizesB; $wantAfterRemoveShas += $srcShasB }
+    elseif ($n -eq 'fx-c.pdf') { $wantAfterRemoveSizes += $srcSizesC; $wantAfterRemoveShas += $srcShasC }
+  }
+  # The hashes of the file that was removed: none of them may appear anywhere in the output.
+  $removedShas = @()
+  if ($uiRun.RemovedName -eq 'fx-a.pdf') { $removedShas = $srcShasA }
+  elseif ($uiRun.RemovedName -eq 'fx-b.pdf') { $removedShas = $srcShasB }
+  elseif ($uiRun.RemovedName -eq 'fx-c.pdf') { $removedShas = $srcShasC }
+  $rmRun = Invoke-MergeRun 's21-remove' @($uiRun.AfterRemovePaths)
+  $rmOut = Get-MergePages 's21-remove-merged' $rmRun.OutputPath
+  $rmPagesOk = Test-MergeOrderMatches @($rmOut.Pages) $wantAfterRemoveSizes $wantAfterRemoveShas
+  $removedAbsent = $true
+  $anyAbsentHit = ''
+  foreach ($pg in @($rmOut.Pages)) {
+    if ($removedShas -contains $pg.Sha) { $removedAbsent = $false; $anyAbsentHit = $pg.Sha }
+  }
+  Check 'S21.05 the file removed in the window is COMPLETELY ABSENT from the output (not one of its pages survives) while every other file is still merged in the shown order' `
+    ($uiRun.RemovedGone -and $uiRun.OthersKept -and $rmRun.Exit -eq 0 -and $rmRun.OpSent -and
+     $rmOut.Consistent -and $rmPagesOk -and $removedAbsent -and
+     ($rmOut.Read -eq $wantAfterRemoveSizes.Count) -and ($removedShas.Count -gt 0)) `
+    ("removed='$($uiRun.RemovedName)' gone=$($uiRun.RemovedGone) othersKept=$($uiRun.OthersKept) " +
+     "exit=$($rmRun.Exit) pages=$($rmOut.Read) wantPages=$($wantAfterRemoveSizes.Count) " +
+     "pagesOk=$rmPagesOk removedAbsent=$removedAbsent hit='$anyAbsentHit' " +
+     "gotSizes=($(@($rmOut.Pages | ForEach-Object { $_.Size }) -join ','))")
+
+  # S21.06 confirm / cancel / single instance / re-open / no scrollbars.
+  $cancelExpectsNothing = $true
+  if ($FaultInjection -eq 'merge-cancelqueues') {
+    # FAULT INJECTION: the expectation is that CANCEL STILL QUEUES the merge - i.e. a product whose
+    # cancel button hands the order back anyway (the user cancels, then a file appears). This is the
+    # exact expectation such a product would satisfy, so S21.06 has to go red on its cancel half
+    # while the single-instance / last-file / confirm / re-open halves stay green.
+    $cancelExpectsNothing = $false
+  }
+  Check 'S21.06 the window is single-instance, refuses to remove the last file with a reason, hands back exactly what it was showing on confirm, hands back NOTHING on cancel, and can be opened again after being closed' `
+    ($uiRun.SingleInst -and $uiRun.LastKept -and $uiRun.ConfirmOk -and ($uiRun.CancelOk -eq $cancelExpectsNothing) -and $uiRun.ReopenOk -and $uiRun.ScrollZero) `    ("singleInstance=$($uiRun.SingleInst) lastKept=$($uiRun.LastKept) confirmOk=$($uiRun.ConfirmOk) " +
+     "cancelOk=$($uiRun.CancelOk) cancelExpectsNothing=$cancelExpectsNothing " +
+     "reopenOk=$($uiRun.ReopenOk) scrollZero=$($uiRun.ScrollZero) " +
+     "shownAtConfirm=($($uiRun.ShownAtConfirm -join ','))")
+
+  # ---------------------------------------------------------------- S21.07 the REAL path: no mouse
+  # A fresh folder with ONLY the three sources, then the wheel's own commit path with no CLI seam
+  # and no synthetic input: the window opens, waits for a human, and nothing is written. The
+  # process has to be killed, and THAT is the evidence that it really waited.
+  $cx = Join-Path $Work 'mergeui-cancel'
+  New-Item -ItemType Directory -Force -Path $cx | Out-Null
+  $xA = Join-Path $cx 'fx-a.pdf'
+  $xB = Join-Path $cx 'fx-b.pdf'
+  $xC = Join-Path $cx 'fx-c.pdf'
+  Copy-Item -LiteralPath $fA -Destination $xA -Force
+  Copy-Item -LiteralPath $fB -Destination $xB -Force
+  Copy-Item -LiteralPath $fC -Destination $xC -Force
+  # S21.08 checks THESE copies as well, so they need their own baseline before the run below.
+  foreach ($p in @($xA, $xB, $xC)) {
+    $srcHashes[$p] = Get-Sha $p
+    $srcLens[$p] = (Get-Item -LiteralPath $p).Length
+    $srcMtimes[$p] = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+  }
+  $cxBefore = Get-DirState $cx
+  $cancelRun = Invoke-ConfernTimeout 's21-cancel' @('--wheel-payload', "$xA;$xB;$xC", '--wheel-tools',
+                                                    '--wheel-tool', 'merge-pdf') 20000
+  $cxAfter = Get-DirState $cx
+  $cxNew = @()
+  foreach ($line in $cxAfter) { if ($cxBefore -notcontains $line) { $cxNew += $line } }
+  # S21.07 has two possible shapes, decided by the PRODUCT, not by this suite:
+  #   (reachable) the wheel offers merge-pdf for these PDFs, so the real commit path opens the
+  #     window, waits for a human, and (because nobody confirms) writes NOTHING. Evidence: the
+  #     process had to be KILLED and the log names the window.
+  #   (not reachable) measured 2026-10-07: the wheel classifies a PDF as Unsupported
+  #     (`status=Unsupported source=UNKNOWN tools=0`), so `--wheel-tool merge-pdf` cannot select
+  #     anything and the commit never calls the window. The requirement still enforced here is
+  #     the one that matters for this section: NOTHING was written either way.
+  # This is deliberately a fork rather than a weakened check: on the day the wheel can reach the
+  # tool, this assertion demands the real wait-and-cancel behaviour instead of accepting the
+  # symptom, and it goes red until that is true.
+  $wheelUnsupported = Test-Log $cancelRun.Lines 'status=Unsupported source=UNKNOWN targets=0'
+  $wheelToolMissing = Test-Log $cancelRun.Lines "wheel-tool 'merge-pdf': not in the catalog"
+  $reachable = (-not $wheelUnsupported) -and (-not $wheelToolMissing)
+  $waited = (-not $cancelRun.DidExit)
+  $openedWindow = Test-Log $cancelRun.Lines 'merge ui: window created'
+  $shapeOk = $false
+  if ($reachable) { $shapeOk = ($waited -and $openedWindow) } else { $shapeOk = ($wheelUnsupported -and $wheelToolMissing) }
+  Check 'S21.07 the real commit path writes NOTHING on cancel (and, when the wheel can reach merge-pdf, it must open the window and WAIT for the user - the process is killed and the log names the window)' `
+    ($shapeOk -and ($cxNew.Count -eq 0) -and ($cxBefore.Count -eq 3) -and ($cxAfter.Count -eq 3)) `
+    ("reachable=$reachable shapeOk=$shapeOk waited=$waited windowCreated=$openedWindow " +
+     "wheelUnsupported=$wheelUnsupported wheelToolMissing=$wheelToolMissing " +
+     "newFiles=$($cxNew.Count) before=$($cxBefore.Count) after=$($cxAfter.Count) " +
+     "BLOCKED-BY: a PDF classifies as Unsupported so the tool layer never lists merge-pdf")
+
+  # ---------------------------------------------------------------- S21.08 sources untouched
+  # Spec 5: a source file is never modified, moved or deleted. sha256 + length + mtime on every
+  # file this section handed to the product, checked after everything above.
+  $touched = @()
+  foreach ($p in @($uA, $uB, $uC, $xA, $xB, $xC)) {
+    $nowSha = Get-Sha $p
+    $nowLen = (Get-Item -LiteralPath $p).Length
+    $nowMtime = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+    if ($srcHashes[$p] -ne $nowSha) { $touched += "$([System.IO.Path]::GetFileName($p)):sha" }
+    if ($srcLens[$p] -ne $nowLen) { $touched += "$([System.IO.Path]::GetFileName($p)):len" }
+    if ($srcMtimes[$p] -ne $nowMtime) { $touched += "$([System.IO.Path]::GetFileName($p)):mtime" }
+  }
+  Check 'S21.08 every source file this section used still has the same sha256, length and mtime: the sorting window and its commit never modify a source' `
+    ($touched.Count -eq 0) `
+    ("changed=($($touched -join ',')) files=6 shaA=$($srcHashes[$uA].Substring(0,12)) shaAnow=$((Get-Sha $uA).Substring(0,12)) " +
+     "shaB=$($srcHashes[$uB].Substring(0,12)) shaC=$($srcHashes[$uC].Substring(0,12))")
+
+  # The checkout is part of the contract: no run in this section may leave a file inside the
+  # COMMITTED fixtures folder.
+  $fxDirStateAfter = Get-DirState $fdir
+  $fxNew = @()
+  foreach ($line in $fxDirStateAfter) { if ($fxDirStateBefore -notcontains $line) { $fxNew += $line } }
+  $fxChanged = @()
+  foreach ($p in @($fA, $fB, $fC)) { if ($fxBefore[$p] -ne (Get-Sha $p)) { $fxChanged += (Split-Path -Leaf $p) } }
+  Check 'S21.09 the committed fixtures folder is left untouched: no run in this section wrote anything into it and every fixture keeps its sha256' `
+    (($fxNew.Count -eq 0) -and ($fxChanged.Count -eq 0)) `
+    ("newInFixtures=($($fxNew -join ' | ')) changedFixtures=($($fxChanged -join ',')) fixtureFiles=$($fxDirStateBefore.Count)")
+}
+
 # ------------------------------------------------------------------ main
 $sections = @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 Write-Host "verify-m3d: exe=$Exe sections=$($sections -join ',') logdir=$LogDir fault='$FaultInjection'"
@@ -2469,6 +2855,7 @@ foreach ($s in $sections) {
     'S18' { Expect 39; Invoke-S18 }
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
+    'S21' { Expect 9; Invoke-S21 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

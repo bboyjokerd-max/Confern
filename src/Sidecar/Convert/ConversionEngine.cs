@@ -840,6 +840,35 @@ internal sealed class ConversionEngine
     }
 
     /// <summary>
+    /// 一個 PDF 有幾頁（給排序視窗顯示「這一份會帶來幾頁」用）。
+    ///
+    /// **與 <see cref="MergePdf"/> 用同一個 API、同一個模式**（<c>PdfReader.Open</c> ＋
+    /// <c>PdfDocumentOpenMode.Import</c>），所以視窗上顯示的頁數與合併時真正讀到的頁數是同一份
+    /// 規則。刻意**不**在視窗裡自己 new 一個 <c>PdfDocument</c>：那會變成第二份「怎麼讀一個 PDF」
+    /// 的實作，而兩份只要有一份改了模式（例如換成 Modify），視窗顯示的數字就會與實際合併的結果
+    /// 不一致——而且那種不一致看起來完全合理，抓不到。
+    ///
+    /// ⚠ 它**只讀頁數，不碰任何一頁的內容**，所以 #388 那一類「開得起來、碰到頁面才炸」的檔在這裡
+    ///   會回報一個看起來正常的頁數。這是刻意的：這一格是**顯示輔助**，權威仍然是合併本身
+    ///   （失敗時由 fail-fast 指名是哪個檔、為什麼）。回傳 null ＝ 讀不出來（加密、壞檔、不存在），
+    ///   呼叫端必須顯示「讀不到」而不是顯示 0——0 是一個具體的主張，而這裡並沒有主張。
+    /// </summary>
+    internal static int? TryReadPdfPageCount(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path) || !AtomicWriter.Exists(path)) return null;
+            using PdfDocument doc = PdfReader.Open(LongPath.Prepare(path), PdfDocumentOpenMode.Import);
+            return doc.PageCount;
+        }
+        catch (Exception)
+        {
+            // 讀不到不是錯誤狀態，是「這一格沒有答案」；真正的原因由合併那一條路說出來。
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 工具：合併 PDF（工具 id `merge-pdf`，M3 的第六顆扇形；規格 §9.4）。
     ///
     /// ⚠ **這是唯一一個「輸入是一組有序路徑、產物是一個檔」的引擎方法。** 前五顆都是

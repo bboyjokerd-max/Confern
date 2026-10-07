@@ -283,6 +283,15 @@ internal static class Program
             return App.RunCropUiSelfTest(opt, cropUiEvidence);
         }
 
+        // M3 第六顆扇形（切片 B）：合併排序視窗的生命週期與互動自測（不必輪盤、**不必滑鼠**）。
+        // 與 `--merge-pdf` 是兩條不同的路：這一條驗的是**視窗**，那一條驗的是**引擎與協議**。
+        if (!string.IsNullOrEmpty(opt.MergeUiSelfTest) || !string.IsNullOrEmpty(opt.MergeUiDump))
+        {
+            Native.AttachParentConsole();
+            using var mergeUiEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunMergeUiSelfTest(opt, mergeUiEvidence);
+        }
+
         // M1g：托盤圖示的自測（待辦 4）。與設定頁的自測一樣必須在單一實例守衛之前——
         // 否則「已經有一個 Confern 在跑」時，診斷會被守衛擋掉，而這正是使用者最有機會
         // 想跑它的時候。
@@ -433,6 +442,12 @@ internal sealed class Options
           --crop-ui-dump <png>      render the crop window to a PNG (offscreen composite, not a screen
                                     capture) so the layout and the absence of scrollbars can be asserted
           --crop-source <path>      the image shown by --crop-ui-selftest / --crop-ui-dump
+          --merge-ui-selftest <a;b;c>
+                                    open the MERGE PDF sorting window with this order, move a row,
+                                    remove a row, confirm, cancel and reopen (no screen, no mouse).
+                                    It drives the same methods the real drag handlers call
+          --merge-ui-dump <png>     render the merge sorting window to a PNG (offscreen composite);
+                                    the row order comes from --merge-ui-selftest
           --tools-list              print the tool layer's sectors (ids, labels, icons) and exit;
                                     no window, no mouse, and it works while Confern is already running
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
@@ -709,6 +724,17 @@ internal sealed class Options
     /// <summary>--crop-ui-selftest／--crop-ui-dump 要顯示的影像（第一張＝預覽那一張）。</summary>
     public string? CropUiSource;
     /// <summary>
+    /// `--merge-ui-selftest a.pdf;b.pdf;c.pdf`：**合併排序視窗**的生命週期與互動自測
+    /// （不必輪盤、**不必滑鼠**）。見 <see cref="App.RunMergeUiSelfTest"/>；形狀比照 `--crop-ui-selftest`。
+    ///
+    /// ⚠ 它驗的是**視窗本身**（初始順序、拖曳、移除、取消），與 `--merge-pdf` 驗**引擎與協議**
+    ///   是兩條不同的路。兩條都要跑，「順序真的變成輸出頁序」才不只是視窗自己說的。
+    /// </summary>
+    public string? MergeUiSelfTest;
+    /// <summary>`--merge-ui-dump &lt;png&gt;`：把排序視窗畫成一張 PNG（離屏合成），
+    /// 讓驗收能斷言「視窗長什麼樣、有沒有捲軸」。內容順序來自 `--merge-ui-selftest` 的那一組檔。</summary>
+    public string MergeUiDump = "";
+    /// <summary>
     /// M3：`--tools-list`——把工具層的扇區清單印出來就結束（不必視窗、不必滑鼠、不必搶單一實例）。
     /// 見 <see cref="App.RunToolsList"/>。
     /// </summary>
@@ -983,6 +1009,8 @@ internal sealed class Options
                 case "--crop-ui-selftest": o.CropUiSelfTest = true; break;
                 case "--tools-list": o.ToolsList = true; break;
                 case "--crop-ui-dump": if (i + 1 < args.Length) o.CropUiDump = args[++i]; break;
+                case "--merge-ui-selftest": if (i + 1 < args.Length) o.MergeUiSelfTest = args[++i]; break;
+                case "--merge-ui-dump": if (i + 1 < args.Length) o.MergeUiDump = args[++i]; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -1334,6 +1362,10 @@ internal static class App
         // 裁切視窗的確認要在**主執行緒**上接手（它要起 worker，而視覺層與進度藥丸是主執行緒的）：
         // 接在同一個週期回呼上，不新增第二個計時器。這條回呼在診斷路徑上通常沒有東西可抽。
         visual.TickRequested += () => DrainPendingCrops(evidence, runner);
+        // 合併排序視窗的確認也要在**主執行緒**上接手（同一條理由：它要起 worker，而視覺層與進度
+        // 藥丸是主執行緒的）。接在**同一個**既有週期回呼上，**不新增第二個計時器**——這是這個檔案
+        // 已經明文寫下來的規矩（見上面那一行與 DrainPendingCrops 的說明）。
+        visual.TickRequested += () => DrainPendingMerges(evidence, runner);
         // 讀 QR 的結果同樣接在這裡（2026-10-07 切片 2）：它要做的判定與副作用
         // （開瀏覽器／開文字視窗）都必須在主執行緒上發生，而這一顆工具**沒有進度藥丸**
         // 可以掛（見 ConversionRunner.Start）——週期回呼是唯一不必新增計時器擁有者的落點。
@@ -2908,6 +2940,82 @@ internal static class App
             return false;
         }
 
+        // M3 第六顆扇形（合併 PDF，切片 B 的第二刀）：它與裁切那一顆**形狀相同**——都有一個
+        // 「只有使用者才知道的輸入」。裁切的那一個是框在哪裡；合併的這一個是**檔案的前後順序**。
+        //
+        // 這一顆**不需要**任何新的核心：`ConversionEngine.MergePdf` 的排序語意本來就是
+        // 「陣列順序＝頁序」（切片 A 已經把它做成一個原子操作），所以這一刀唯一要做的事是
+        // **把視窗排出來的順序送進去**。也就是說這一區沒有第二份排序規則——
+        // 視窗的 `MergeWindow.Order` 就是送進 `paths` 的那個陣列。
+        //
+        // 兩條路，都是同一份權威（`--merge-pdf a;b;c` 的順序與視窗拖出來的順序都是「一組有序路徑」）：
+        //   ① 有 `--merge-pdf`（診斷）：直接用那個順序提交，**不開視窗**。這是無滑鼠的接縫，
+        //      也是 `--wheel-payload --wheel-tools --wheel-tool merge-pdf` 能跑完的唯一方式
+        //      （與 `--crop-rect` 同一個理由）。
+        //   ② 沒有（正式路徑）：開排序視窗，讓使用者排；確認之後由**主執行緒**接手起 worker
+        //      （視窗那條是 WPF 執行緒，視覺層與進度藥丸都屬於主執行緒）。
+        if (toolOp == WorkerProtocol.OpMergePdf)
+        {
+            string cliOrder = _options.MergePdf ?? "";
+            if (cliOrder.Length > 0)
+            {
+                string[] ordered = cliOrder.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                // ⚠ 這裡的拒絕條件與引擎的**前置檢查**是兩件事，刻意不在這裡重複引擎的判準：
+                //    這裡只擋「連送都不該送」的請求（少於 2 個檔、或路徑不存在），
+                //    其餘（格式不對、壞檔、加密）一律交給引擎，由 fail-fast 指名是哪個檔、為什麼。
+                //    在這裡自己判一次會變成第二份規則，而兩份不一致時使用者拿到的是這裡的訊息。
+                if (ordered.Length < 2)
+                {
+                    evidence.Line($"ENTER: merge refused (--merge-pdf needs at least 2 files, got " +
+                                  $"{ordered.Length}: '{cliOrder}')");
+                    return false;
+                }
+                string missing = "";
+                foreach (string candidate in ordered)
+                    if (!AtomicWriter.Exists(candidate)) { missing = candidate; break; }
+                if (missing.Length > 0)
+                {
+                    evidence.Line($"ENTER: merge refused (--merge-pdf lists a file that does not exist: " +
+                                  $"'{missing}')");
+                    return false;
+                }
+
+                evidence.Line($"ENTER: merge uses --merge-pdf order " +
+                              $"[{string.Join(",", ordered.Select(Path.GetFileName))}] " +
+                              "(diagnostic seam: no window, no mouse)");
+                guard.OnUserResolved("enter");      // 收起輪盤
+                if (runner == null)
+                {
+                    evidence.Line("ENTER: no conversion runner in this mode (diagnostic path)");
+                    return true;
+                }
+                StartMerge(evidence, runner, ordered, centerX, centerY, _settings ?? new Settings());
+                PendingPaths = Array.Empty<string>();
+                PendingTools = Array.Empty<ToolDescriptor>();
+                return true;
+            }
+
+            evidence.Line($"ENTER: merge needs an order -> opening the merge window for " +
+                          $"{paths.Length} file(s) (the commit will happen when the user confirms)");
+            guard.OnUserResolved("enter");      // 收起輪盤
+            string[] batch = paths;
+            MergeUi.Open(batch, ordered =>
+            {
+                // ⚠ 這裡是 **WPF UI 執行緒**。起 worker 會碰視覺層與進度藥丸（都屬於主執行緒），
+                // 所以只排隊，由既有的週期回呼（見 DrainPendingMerges）在主執行緒上接手。
+                PendingMerges.Enqueue(ordered);
+                evidence.Line($"merge ui: the user confirmed the order " +
+                              $"[{string.Join(",", ordered.Select(Path.GetFileName))}] -> queued for the " +
+                              "main thread (the worker starts there)");
+            }, evidence.Line);
+            PendingPaths = Array.Empty<string>();
+            PendingTools = Array.Empty<ToolDescriptor>();
+            // **回 false**：同一條理由——此刻還沒有任何東西被轉檔。
+            // 而且這裡比裁切那一顆更關鍵：合併的「取消」必須留下**零個新檔**，
+            // 所以送出去的那一槍只能發生在使用者真的按了確認之後。
+            return false;
+        }
+
         guard.OnUserResolved("enter");      // 收起輪盤（收層是幂等的）
 
         // M3 第五顆扇形（讀 QR，2026-10-07 切片 2）：**它與另外四顆在結構上不同**——
@@ -3029,7 +3137,57 @@ internal static class App
         }
     }
 
-    /// <summary>進度藥丸的落點：游標位置，取不到就退回主螢幕工作區中心。**不注入任何輸入**（只讀）。</summary>
+    /// <summary>
+    /// 起一個合併工作（**必須在主執行緒**：它會碰視覺層與進度藥丸）。
+    /// <paramref name="ordered"/> 是**排好的順序**——`--merge-pdf` 給的與視窗拖出來的是同一種東西。
+    ///
+    /// 它與 <see cref="StartCrop"/> 的差別只有一個：合併是**多輸入、單輸出**，所以送出去的是
+    /// **一組**路徑而不是「一組路徑 ＋ 一個參數」。順序就是頁序（見 ConversionEngine.MergePdf），
+    /// 所以這裡**不可以**排序、去重或做任何「整理」——那會讓視窗上顯示的順序與輸出不一致。
+    /// </summary>
+    private static bool StartMerge(Evidence evidence, ConversionRunner runner, string[] ordered,
+                                   int centerX, int centerY, Settings settings)
+    {
+        if (ordered.Length == 0)
+        {
+            evidence.Line("merge: no payload paths recorded -> nothing to merge");
+            return false;
+        }
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"merge: start files={ordered.Length} order=" +
+                      $"[{string.Join(",", ordered.Select(Path.GetFileName))}] " +
+                      $"outputDir={outputDir ?? "(source folder)"}");
+        // targetFormat 給空字串、quality 固定 100：與其他工具同一條規矩（工具自己決定輸出格式；
+        // 合併是**整頁物件搬移**，不重新編碼，所以品質這個參數在這一條路上不參與——見 ConversionEngine.MergePdf）。
+        runner.Start(ordered, "", 100, centerX, centerY,
+                     toolOp: WorkerProtocol.OpMergePdf, outputDir: outputDir);
+        return true;
+    }
+
+    /// <summary>
+    /// 把「使用者在排序視窗按下確認」的請求在主執行緒上接手（見 <see cref="PendingMerges"/>）。
+    /// 由**既有**的視覺層週期回呼呼叫（與 <see cref="DrainPendingCrops"/> 同一個 tick）——
+    /// 不新增第二個計時器擁有者。
+    /// </summary>
+    private static void DrainPendingMerges(Evidence evidence, ConversionRunner? runner)
+    {
+        while (PendingMerges.TryDequeue(out string[]? ordered))
+        {
+            if (runner == null)
+            {
+                evidence.Line("merge: confirmed, but this mode has no conversion runner (diagnostic path)");
+                continue;
+            }
+            // 進度藥丸畫在**游標所在處**：使用者剛按下的就是排序視窗的確認鈕，結果出現在同一個
+            // 位置最不需要東張西望（與裁切同一條理由）。
+            (double anchorX, double anchorY) = CursorAnchor();
+            StartMerge(evidence, runner, ordered, (int)anchorX, (int)anchorY, _settings ?? new Settings());
+        }
+    }
+
+    /// <summary>
+    /// 進度藥丸的落點：游標位置，取不到就退回主螢幕工作區中心。**不注入任何輸入**（只讀）。
+    /// </summary>
     private static (double X, double Y) CursorAnchor()
     {
         try
@@ -3141,6 +3299,19 @@ internal static class App
     /// 抽乾點是**既有**的視覺層週期回呼（<see cref="DrainPendingCrops"/>），不新增第二個計時器。
     /// </summary>
     private static readonly ConcurrentQueue<(string[] Paths, CropSpec Spec)> PendingCrops = new();
+
+    /// <summary>
+    /// 排序視窗確認之後、等著由**主執行緒**起 worker 的工作（切片 B）。
+    ///
+    /// 與 <see cref="PendingCrops"/> **同一條理由、同一個形狀**，差別只在內容：裁切帶回的是一個
+    /// 矩形（<see cref="CropSpec"/>），合併帶回的是一**組有序路徑**——因為對合併來說「順序」
+    /// 就是那個參數。抽乾點同樣是**既有**的視覺層週期回呼（<see cref="DrainPendingMerges"/>），
+    /// 不新增第二個計時器。
+    ///
+    /// ⚠ 這一條佇列是「取消不產出」那條契約的關鍵：使用者按取消時**沒有任何東西會被排進來**，
+    ///   所以主執行緒永遠不會收到一槍，輸出目錄也就不可能有新檔（見 CommitWheel 的說明）。
+    /// </summary>
+    private static readonly ConcurrentQueue<string[]> PendingMerges = new();
 
     /// <summary>
     /// 開機自動啟動的唯一擁有者（待辦 4）。常駐路徑建立它，診斷路徑建立的是**別的**子機碼
@@ -4434,6 +4605,266 @@ internal static class App
                       $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing} " +
                       $"reopened={reopened} reopenedPresent={reopenedPresent})");
         evidence.Line("crop ui selftest: ratio states: " + string.Join(" ; ", ratioLines));
+        return ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// 合併排序視窗的生命週期與互動自測（切片 B）。`--merge-ui-selftest a.pdf;b.pdf;c.pdf`。
+    /// 形狀比照 <see cref="RunCropUiSelfTest"/>，而且**一律走自測接縫、不合成任何滑鼠事件**。
+    ///
+    /// 它驗的是「視窗自己說得清楚的四件事」：
+    ///   ① 開啟時**初始順序 = 來源順序**（含每一份的頁數）；
+    ///   ② **拖曳排序**（含來回拖曳要還原）；
+    ///   ③ **移除**（含「最後一份不能移除」）；
+    ///   ④ **確認帶回的順序 = 畫面顯示的順序**、**取消不帶回任何順序**；
+    ///   ⑤ 單一實例、關掉之後可以再開。
+    ///
+    /// ⚠ 「輸出檔的頁序 = 畫面顯示的順序」**不在這裡驗**：那需要真的起一個 worker 並讀出檔案的頁序，
+    ///   屬於 `verify-m3d.ps1` 的 S20 範圍（它拿 `--merge-pdf-inspect` 逐頁量尺寸與內容雜湊）。
+    ///   這一條自測只保證「帶出去的順序是對的」——兩條合起來才是完整的那句話。
+    /// </summary>
+    internal static int RunMergeUiSelfTest(Options opt, Evidence evidence)
+    {
+        var lines = new ConcurrentQueue<string>();
+        bool dumpOnly = string.IsNullOrEmpty(opt.MergeUiSelfTest) && !string.IsNullOrEmpty(opt.MergeUiDump);
+
+        string[] batch = (opt.MergeUiSelfTest ?? "")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .ToArray();
+        if (!dumpOnly && batch.Length < 2)
+        {
+            evidence.Line($"merge ui selftest: FAILED to open: --merge-ui-selftest needs at least 2 files " +
+                          $"(got {batch.Length}: '{opt.MergeUiSelfTest ?? "(none)"}')");
+            return 1;
+        }
+        foreach (string candidate in batch)
+        {
+            if (AtomicWriter.Exists(candidate)) continue;
+            evidence.Line($"merge ui selftest: FAILED to open: '{candidate}' does not exist");
+            return 1;
+        }
+
+        static bool WaitFor(Func<bool> condition, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                if (condition()) return true;
+                Thread.Sleep(25);
+            }
+            return condition();
+        }
+
+        // ---------------------------------------------------------------- `--merge-ui-dump` 那一條
+        if (dumpOnly)
+        {
+            MergeUi.Open(batch, _ => { }, lines.Enqueue);
+            bool up = WaitFor(() => MergeUi.IsOpen, 8000);
+            if (!up)
+            {
+                while (lines.TryDequeue(out string? early)) evidence.Line(early);
+                evidence.Line("merge ui dump: FAILED to open the window");
+                return 1;
+            }
+            Thread.Sleep(500);      // 讓排版跑完，dump 才拿得到真正的畫面
+            bool dumped = MergeUi.DumpFrame(opt.MergeUiDump, 8000, out string dumpDetail, lines.Enqueue);
+            MergeUi.Close();
+            WaitFor(() => !MergeUi.IsOpen, 3000);
+            while (lines.TryDequeue(out string? line)) evidence.Line(line);
+            evidence.Line($"merge ui dump: ok={dumped} detail={dumpDetail} path={opt.MergeUiDump}");
+            return dumped ? 0 : 1;
+        }
+
+        // ① 開啟
+        string[]? confirmed = null;
+        int confirmCalls = 0;
+        MergeUi.Open(batch, order => { confirmed = order; confirmCalls++; }, lines.Enqueue);
+        bool opened = WaitFor(() => MergeUi.IsOpen, 8000);
+        bool windowPresent = false;
+        string presentDetail = "(never asked)";
+        for (int attempt = 0; attempt < 20 && !windowPresent; attempt++)
+        {
+            windowPresent = MergeUi.SelfTestWindowPresent(3000, out presentDetail, lines.Enqueue);
+            if (!windowPresent) Thread.Sleep(250);
+        }
+        evidence.Line($"merge ui selftest: opened={opened} windowPresent={windowPresent} " +
+                      $"state={MergeUi.SelfTestState()}");
+        if (!opened || !windowPresent)
+        {
+            while (lines.TryDequeue(out string? early)) evidence.Line(early);
+            evidence.Line($"merge ui selftest done: ok=False (opened={opened} windowPresent={windowPresent})");
+            return 1;
+        }
+
+        // ② 初始順序**必須等於來源順序**。期望值來自命令列那一組檔（＝呼叫端給的順序），
+        //    而不是「上一次跑出來的東西」——所以這是一條真的斷言，不是回聲。
+        string[] initial = MergeUi.SelfTestOrder();
+        bool initialMatches = initial.Length == batch.Length;
+        for (int i = 0; initialMatches && i < batch.Length; i++)
+            if (!string.Equals(initial[i], batch[i], StringComparison.Ordinal)) initialMatches = false;
+        evidence.Line($"merge ui selftest: initial order matches the source order={initialMatches} " +
+                      $"source=[{string.Join(",", batch.Select(Path.GetFileName))}] " +
+                      $"window=[{string.Join(",", initial.Select(Path.GetFileName))}]");
+        evidence.Line($"merge ui selftest: rows: {MergeUi.SelfTestRowsLine()}");
+
+        // ③ 單一實例：開著的時候第二次 Open 不可以再開一個視窗，也不可以換掉回呼。
+        int callsBeforeSecondOpen = confirmCalls;
+        MergeUi.Open(batch, _ => { confirmCalls += 100; }, lines.Enqueue);
+        bool stillOpen = MergeUi.IsOpen;
+        bool singleInstance = stillOpen && confirmCalls == callsBeforeSecondOpen;
+        evidence.Line($"merge ui selftest: a second open while the window is up was " +
+                      $"{(stillOpen ? "ignored (single instance)" : "ACCEPTED (two windows!)")} " +
+                      $"callbackReplaced={confirmCalls != callsBeforeSecondOpen}");
+
+        // ④ 拖曳排序：把第 1 列往下拖 2 列 ⇒ 它應該落到第 3 位，其餘整體往前移。
+        string[] beforeDrag = MergeUi.SelfTestOrder();
+        bool dragged = MergeUi.SelfTestDrag(0, 2, 5000, out string dragDetail, lines.Enqueue);
+        string[] afterDrag = MergeUi.SelfTestOrder();
+        // 期望值：第 1 個搬到它落點，其餘保留相對順序（這正是「搬移」的定義，與就地交換不同）。
+        //
+        // ⚠ 落點**夾在陣列範圍內**，而且算式對任何 n ≥ 2 都成立：`SelfTestDrag` 的 deltaRows
+        //    是「往下 2 列」，列數只有 2 時落點就是最後一列。寫死 `beforeDrag[1], beforeDrag[2]`
+        //    會讓 2 個檔的請求直接丟 `IndexOutOfRangeException` 出來（**實測 2026-10-07**：
+        //    `--merge-ui-selftest a.pdf;b.pdf` 的行程以 0xE0434352 收場，而它只是一個診斷指令
+        //    ——診斷本身崩潰比診斷說「這一組我驗不了」還糟，因為前者看起來像產品壞了）。
+        int dragTo = Math.Min(2, Math.Max(0, beforeDrag.Length - 1));
+        string[] wantDrag;
+        if (beforeDrag.Length >= 2)
+        {
+            var moved = new List<string>(beforeDrag);
+            string head = moved[0];
+            moved.RemoveAt(0);
+            moved.Insert(Math.Min(dragTo, moved.Count), head);
+            wantDrag = moved.ToArray();
+        }
+        else
+        {
+            wantDrag = beforeDrag;
+        }
+        bool dragMatches = afterDrag.SequenceEqual(wantDrag, StringComparer.Ordinal);
+        evidence.Line($"merge ui selftest: drag movedTheOrder={dragged} matchesTheMoveSemantics={dragMatches} " +
+                      $"before=[{string.Join(",", beforeDrag.Select(Path.GetFileName))}] " +
+                      $"after=[{string.Join(",", afterDrag.Select(Path.GetFileName))}] " +
+                      $"want=[{string.Join(",", wantDrag.Select(Path.GetFileName))}] ({dragDetail})");
+
+        // ⚠ 這一行是**給腳本讀的**，而且它是「輸出頁序 = 畫面顯示的順序」那條斷言的**唯一**來源。
+        //
+        //    為什麼要有它：驗收腳本若要自己算出「第 1 列往下拖 2 列之後順序是什麼」，那個算式就
+        //    變成**第二份排序規則**——它與產品不一致時，那一格會紅在測試的算式上，而不是紅在產品上
+        //    （這正是本專案對 CropWindow.SelfTestStageMapping 立的同一條紀律）。所以產品的接縫
+        //    直接把「拖完之後畫面上是什麼順序」講出來，腳本拿它去餵引擎、再量輸出檔的頁序。
+        //    這樣「畫面 → 輸出」的中間沒有任何一端是腳本自己補的。
+        string[] dragShownOrder = afterDrag;
+        evidence.Line("merge ui selftest: after drag the window shows " +
+                      string.Join("|", dragShownOrder.Select(Path.GetFileName)));
+
+        // ④b 來回拖曳：拖走再拖回原處，順序必須**完全還原**（見 MergeWindow.ContinueDrag 的說明）。
+        //     ⚠ 這一條抓的是「把位移累加起來」那種寫法（每次 ±1），它會讓來回拖曳回不到原位。
+        bool dragReturned = MergeUi.SelfTestDragAndReturn(2, 2, 5000, out string returnDetail, lines.Enqueue);
+        evidence.Line($"merge ui selftest: drag out and back restores the order={dragReturned} ({returnDetail})");
+
+        // ⑤ 移除：按下**真正的移除鈕**，被移除的那一份必須從順序裡消失，而且畫面上的列數跟著少一。
+        string[] beforeRemove = MergeUi.SelfTestOrder();
+        string removedName = Path.GetFileName(beforeRemove[0]);
+        bool removePressed = MergeUi.SelfTestRemoveRow(0, 5000, out string removeDetail, lines.Enqueue);
+        string[] afterRemove = MergeUi.SelfTestOrder();
+        bool removedGone = removePressed && afterRemove.Length == beforeRemove.Length - 1 &&
+                           !afterRemove.Any(p => string.Equals(p, beforeRemove[0], StringComparison.Ordinal));
+        bool othersKept = removedGone;
+        for (int i = 1; othersKept && i < beforeRemove.Length; i++)
+            if (!afterRemove.Contains(beforeRemove[i], StringComparer.Ordinal)) othersKept = false;
+        evidence.Line($"merge ui selftest: remove pressed={removePressed} removed='{removedName}' " +
+                      $"gone={removedGone} othersKept={othersKept} " +
+                      $"now=[{string.Join(",", afterRemove.Select(Path.GetFileName))}] ({removeDetail})");
+
+        // ⑤b 「最後一份不能移除」：一直按到只剩一份，再按一次必須**被拒絕並留下提示**。
+        //     這一條是「0 個輸入的合併」那道防線——它必須看得見，否則使用者會拿到一個空清單。
+        //     刻意用**產品自己的列數**當迴圈條件（不是寫死 3 次），所以換一組夾具也成立。
+        int guardSteps = 0;
+        while (MergeUi.SelfTestOrder().Length > 1 && guardSteps < 64)
+        {
+            MergeUi.SelfTestRemoveRow(0, 5000, out _, lines.Enqueue);
+            guardSteps++;
+        }
+        int leftCount = MergeUi.SelfTestOrder().Length;
+        string[] lastOne = MergeUi.SelfTestOrder();
+        bool lastRefused = MergeUi.SelfTestRemoveRow(0, 5000, out string lastDetail, lines.Enqueue);
+        string afterLastNotice = MergeUi.SelfTestState();
+        bool noticeSaysWhy = afterLastNotice.Contains("至少要留一份", StringComparison.Ordinal);
+        bool stillOne = MergeUi.SelfTestOrder().Length == 1;
+        evidence.Line($"merge ui selftest: the last file cannot be removed: left={leftCount} " +
+                      $"pressed={lastRefused} stillOne={stillOne} noticeSaysWhy={noticeSaysWhy} " +
+                      $"kept='{(lastOne.Length > 0 ? Path.GetFileName(lastOne[0]) : "(none)")}' " +
+                      $"({lastDetail})");
+
+        // ⑥ 確認：帶回的順序**必須就是目前畫面上的順序**（不是原始順序、也不是另一個東西）。
+        string[] atConfirm = MergeUi.SelfTestOrder();
+        MergeUi.SelfTestConfirm(5000, out string confirmDetail, lines.Enqueue);
+        bool closed = WaitFor(() => !MergeUi.IsOpen, 3000);
+        WaitFor(() => confirmed != null, 3000);
+        string[]? handed = confirmed;
+        bool handedMatches = handed != null && handed.Length == atConfirm.Length;
+        if (handedMatches && handed != null)
+        {
+            for (int i = 0; i < atConfirm.Length; i++)
+                if (!string.Equals(handed[i], atConfirm[i], StringComparison.Ordinal))
+                {
+                    handedMatches = false;
+                    break;
+                }
+        }
+        // 「被移除的那一份不在交出的順序裡」——這是移除語意的**終點**：光看視窗自己少了幾列不夠，
+        // 要確認它真的沒有被送出去。
+        bool removedNotHanded = handed != null &&
+                                !handed.Any(p => string.Equals(p, beforeRemove[0], StringComparison.Ordinal));
+        evidence.Line($"merge ui selftest: confirmed closed={closed} handedBack={handed != null} " +
+                      $"matchesWhatWasShown={handedMatches} removedNotHanded={removedNotHanded} " +
+                      $"handed=[{(handed == null ? "(nothing)" : string.Join(",", handed.Select(Path.GetFileName)))}] " +
+                      $"shown=[{string.Join(",", atConfirm.Select(Path.GetFileName))}] ({confirmDetail})");
+
+        // ⑦ 關掉之後可以再開，而且**取消不帶回任何順序**
+        confirmed = null;
+        MergeUi.Open(batch, order => confirmed = order, lines.Enqueue);
+        bool reopened = WaitFor(() => MergeUi.IsOpen, 8000);
+        bool reopenedPresent = false;
+        string reopenDetail = "(never asked)";
+        for (int attempt = 0; attempt < 20 && !reopenedPresent; attempt++)
+        {
+            reopenedPresent = MergeUi.SelfTestWindowPresent(3000, out reopenDetail, lines.Enqueue);
+            if (!reopenedPresent) Thread.Sleep(250);
+        }
+        // 再開之後的初始順序必須回到**來源順序**（新的視窗、新的開始；不是沿用上一輪排好的東西）。
+        string[] reopenedOrder = MergeUi.SelfTestOrder();
+        bool reopenOrderIsSource = reopenedOrder.SequenceEqual(batch, StringComparer.Ordinal);
+        evidence.Line($"merge ui selftest: the window can be opened again after a close: " +
+                      $"reopened={reopened} windowPresent={reopenedPresent} " +
+                      $"orderBackToSource={reopenOrderIsSource} state={MergeUi.SelfTestState()}");
+
+        MergeUi.SelfTestCancel(5000, out string cancelDetail, lines.Enqueue);
+        bool closedByCancel = WaitFor(() => !MergeUi.IsOpen, 3000);
+        bool cancelGaveNothing = confirmed == null;
+        evidence.Line($"merge ui selftest: cancel -> closed={closedByCancel} " +
+                      $"orderHandedBack={confirmed != null} ({cancelDetail})");
+
+        while (lines.TryDequeue(out string? buffered)) evidence.Line(buffered);
+
+        bool ok = opened && windowPresent && initialMatches && singleInstance
+                  && dragged && dragMatches && dragReturned
+                  && removePressed && removedGone && othersKept
+                  && leftCount == 1 && stillOne && noticeSaysWhy
+                  && closed && handedMatches && removedNotHanded
+                  && reopened && reopenedPresent && reopenOrderIsSource
+                  && closedByCancel && cancelGaveNothing;
+        evidence.Line($"merge ui selftest done: ok={ok} (opened={opened} windowPresent={windowPresent} " +
+                      $"initialOrderMatches={initialMatches} singleInstance={singleInstance} " +
+                      $"drag={dragged} dragSemantics={dragMatches} dragReturn={dragReturned} " +
+                      $"remove={removePressed} removedGone={removedGone} othersKept={othersKept} " +
+                      $"lastKept={leftCount == 1 && stillOne && noticeSaysWhy} " +
+                      $"confirmedClosed={closed} confirmedMatches={handedMatches} " +
+                      $"removedNotHanded={removedNotHanded} " +
+                      $"reopened={reopened} reopenedPresent={reopenedPresent} " +
+                      $"reopenOrderIsSource={reopenOrderIsSource} " +
+                      $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing})");
         return ok ? 0 : 1;
     }
 
