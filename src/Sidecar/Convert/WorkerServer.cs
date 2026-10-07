@@ -469,8 +469,11 @@ internal static class WorkerServer
         string given = job.cropRatio ?? "";
         if (given.Length > 0 && !CropRatios.IsCanonical(given))
         {
+            // 訊息列的是**合法值集合**（All，八個），不是按鈕列的五顆：`9:16`／`3:4`／
+            // `original-flipped` 沒有按鈕但**合法**——它們是裁切視窗的方向鈕產生的 id。
+            // 拿按鈕列來當「我聽得懂哪些」會在日誌上說出假話（明明支援卻說不支援）。
             log($"crop: unknown cropRatio '{given}' -> '{CropRatios.DefaultId}' " +
-                $"(this worker speaks {string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+                $"(this worker speaks {string.Join("/", CropRatios.All.Select(p => p.Id))})");
         }
 
         // 逐值防護：NaN／Infinity 會在 CropMath 的夾制裡變成 0（夾制本身就是那份規則），

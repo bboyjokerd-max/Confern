@@ -298,9 +298,134 @@ internal static class CropUi
         return ran;
     }
 
-    /// <summary>按下**真正的確認鈕**（與 Enter 走同一條路徑的是同一個方法）。</summary>
-    public static bool SelfTestConfirm(int timeoutMs, out string detail, Action<string> log)
+    /// <summary>
+    /// 按下**真正的方向鈕**（`--crop-ui-selftest` 用；正式路徑只有 Click 事件）。
+    /// 回傳的是「這顆鈕當時能不能按」——停用時回 false 而且沒有任何事情發生，
+    /// 這正是使用者按到一顆變灰的鈕時的情形。
+    /// </summary>
+    public static bool SelfTestToggleDirection(int timeoutMs, out string detail, Action<string> log)
     {
+        bool pressed = false;
+        string report = "(no direction button)";
+        bool ran = SettingsUi.RunOnUiThread(timeoutMs, log, "selftest toggle direction", out string failure, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return "(no crop window is open)";
+            pressed = window.SelfTestToggleDirection();
+            report = $"pressed={pressed} ratio={window.RatioId} directionButton='{window.DirectionButtonText}'";
+            return null;
+        });
+        detail = ran ? $"selftest: {report}" : $"selftest: {failure}";
+        Log(log, detail);
+        return ran && pressed;
+    }
+
+    /// <summary>
+    /// 比例列目前的**畫面狀態**：每一顆比例鈕的字、方向鈕的字與可用性。
+    /// 自測要釘住「被選中那顆鈕的標籤＝目前 ratio id 的 label」——期望值只能來自**產品自己**
+    /// （<see cref="CropWindow.RatioId"/> ＋ <see cref="CropRatios.LabelOf"/>），
+    /// 在腳本裡寫死「第三顆應該寫 9:16」是第二份規則。
+    /// </summary>
+    public static (string[] Labels, string DirectionText, bool DirectionEnabled, string RatioId, int Width, int Height)
+        SelfTestRatioRowState()
+    {
+        var labels = Array.Empty<string>();
+        string directionText = "";
+        bool directionEnabled = false;
+        string ratioId = "";
+        int width = 0, height = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest ratio row state", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            labels = window.RatioButtonLabels;
+            directionText = window.DirectionButtonText;
+            directionEnabled = window.DirectionButtonEnabled;
+            ratioId = window.RatioId;
+            width = window.ImageWidth;
+            height = window.ImageHeight;
+            return null;
+        });
+        return (labels, directionText, directionEnabled, ratioId, width, height);
+    }
+
+    /// <summary>
+    /// 方向鈕的**提示文字**（「為什麼停用」住的地方）。
+    /// 這一條存在本身就是那個修正的斷言：原因不可以住在按鈕標籤上（那會讓它被讀成第六個比例選項），
+    /// 但又不能不說——所以「提示非空」是一個必要條件，見 `--crop-ui-selftest` 的 ④d。
+    /// </summary>
+    public static string SelfTestDirectionButtonToolTip()
+    {
+        string tip = "";
+        SettingsUi.RunOnUiThread(5000, null, "selftest direction tooltip", out _, () =>
+        {
+            tip = _window?.DirectionButtonToolTip ?? "";
+            return null;
+        });
+        return tip;
+    }
+
+    /// <summary>方向鈕實際被配置到的寬度（自測要證明它與選中的預設無關）。</summary>
+    public static double SelfTestDirectionButtonWidth()
+    {
+        double width = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest direction width", out _, () =>
+        {
+            width = _window?.DirectionButtonWidthActual ?? 0;
+            return null;
+        });
+        return width;
+    }
+
+    /// <summary>
+    /// 停用時 ToolTip 還看不看得見（WPF 預設「看不到」，而「為什麼不能按」的原因只放在 ToolTip）。
+    /// 讀的是 WPF 自己的 `ToolTipService.ShowOnDisabled`，不是我們自己記的旗標。
+    /// </summary>
+    public static bool SelfTestDirectionToolTipShownWhenDisabled()
+    {
+        bool shown = false;
+        SettingsUi.RunOnUiThread(5000, null, "selftest direction tip on disabled", out _, () =>
+        {
+            shown = _window?.DirectionToolTipShownWhenDisabled ?? false;
+            return null;
+        });
+        return shown;
+    }
+
+    /// <summary>方向鈕要求的寬度（設計值；排版前的後備答案）。</summary>
+    public static double SelfTestDirectionButtonWidthConfigured()
+    {
+        double width = 0;
+        SettingsUi.RunOnUiThread(5000, null, "selftest direction width configured", out _, () =>
+        {
+            width = _window?.DirectionButtonWidthConfigured ?? 0;
+            return null;
+        });
+        return width;
+    }
+
+    /// <summary>
+    /// 比例列的**幾何量測**（見 <see cref="CropWindow.SelfTestRatioRowMetrics"/>）：
+    /// 「按鈕列還放得下嗎」的答案由視窗自己算，驗收腳本不量像素。
+    /// </summary>
+    public static (double RowWidth, double ConstraintWidth, double MaxRight, int ChildCount,
+                   double WindowWidth, bool Fit) SelfTestRatioRowMetrics()
+    {
+        double rowWidth = 0, constraint = 0, maxRight = 0, windowWidth = 0;
+        int children = 0;
+        bool fit = false;
+        SettingsUi.RunOnUiThread(5000, null, "selftest ratio row metrics", out _, () =>
+        {
+            CropWindow? window = _window;
+            if (window == null) return null;
+            (rowWidth, constraint, maxRight, children, windowWidth, fit) = window.SelfTestRatioRowMetrics();
+            return null;
+        });
+        return (rowWidth, constraint, maxRight, children, windowWidth, fit);
+    }
+
+    /// <summary>按下**真正的確認鈕**（與 Enter 走同一條路徑的是同一個方法）。</summary>
+    public static bool SelfTestConfirm(int timeoutMs, out string detail, Action<string> log)    {
         string report = "(nothing was confirmed)";
         bool ran = SettingsUi.RunOnUiThread(timeoutMs, log, "selftest confirm", out string failure, () =>
         {

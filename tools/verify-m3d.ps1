@@ -117,8 +117,13 @@ function Invoke-Confern([string]$name, [string[]]$argv) {
 function Invoke-ConfernStdout([string]$name, [string[]]$argv) {
   $out = Join-Path $Work "$name.stdout.txt"
   if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
+  $err = Join-Path $Work "$name.stderr.txt"
+  if (Test-Path -LiteralPath $err) { Remove-Item -LiteralPath $err -Force }
+  # stderr is redirected as well: an unredirected stream fails Start-Process -Wait -PassThru
+  # outright ("cannot use -Wait with redirected output" style errors), and --help writes the usage
+  # text to stdout while a warning would go to stderr.
   $p = Start-Process -FilePath $Exe -ArgumentList $argv -Wait -PassThru -WindowStyle Hidden `
-                     -RedirectStandardOutput $out
+                     -RedirectStandardOutput $out -RedirectStandardError $err
   return [pscustomobject]@{ Name = $name; Exit = $p.ExitCode; Lines = (Get-LogLines $out) }
 }
 
@@ -462,39 +467,43 @@ function Invoke-S18 {
      (Test-Log $bLines 'ok=2 failed=0')) `
     "exit=$($bp.ExitCode) a=$s1 b=$s2 (expected $expectB1 and $expectB2) sourcesUntouched=$bUntouched"
 
-  # ---------------------------------------------------------------- S18.08 ratio presets
+  # ---------------------------------------------------------------- S18.08 aspect presets
+  # The canonical value set is the PRODUCT's list, not a literal in this script: the window draws
+  # five BUTTONS, but eight ids are legal (9:16 / 3:4 / original-flipped are produced by the
+  # window's direction toggle, and every one of them has to reach the engine over the worker pipe).
+  # The list is parsed out of the product's own rejection message, so an id added to the product
+  # cannot be forgotten here. (The parse lives in S18.14, which already runs that bad-ratio case.)
   # 800x600, box 0.05,0.05,0.9,0.9 -> left=40, right=760 (720 wide), top=30, bottom=570 (540 tall).
-  #   free     -> 720x540 (untouched box)           ratio 1.3333
-  #   1:1      -> 540x540 (height limited)          ratio 1.0000
-  #   16:9     -> 720x405 (width limited)           ratio 1.7778
-  #   4:3      -> 720x540 (exactly fits)            ratio 1.3333
-  #   original -> 720x540 (this image's own 4:3)    ratio 1.3333
+  #   free              -> 720x540 (untouched box)   ratio 1.3333
+  #   1:1               -> 540x540 (height limited)  ratio 1.0000
+  #   16:9              -> 720x405 (width limited)   ratio 1.7778
+  #   9:16              -> 304x540 (height limited)  ratio 0.5625
+  #   4:3               -> 720x540 (exactly fits)    ratio 1.3333
+  #   3:4               -> 405x540 (height limited)  ratio 0.7500
+  #   original          -> 720x540 (this image's own 4:3)   ratio 1.3333
+  #   original-flipped  -> 720x540 box, 540x720 does NOT fit -> 405x540, ratio 0.7500
   # Tolerance: the constrained side is rounded to a whole pixel, so the ratio can be off by half
   # a pixel on that side; 540 px gives 0.5/540 = 0.09 %, and this check allows 1 %.
-  $presets = @(
-    @{ Id = 'free';     W = 720; H = 540 },
-    @{ Id = '1:1';      W = 540; H = 540 },
-    @{ Id = '16:9';     W = 720; H = 405 },
-    @{ Id = '4:3';      W = 720; H = 540 },
-    @{ Id = 'original'; W = 720; H = 540 }
+  $presets800 = @(
+    @{ Id = 'free';             W = 720;   H = 540;   Target = 0.0 },
+    @{ Id = '1:1';              W = 540;   H = 540;   Target = 1.0 },
+    @{ Id = '16:9';             W = 720;   H = 405;   Target = 16.0 / 9.0 },
+    @{ Id = '9:16';             W = 304;   H = 540;   Target = 9.0 / 16.0 },
+    @{ Id = '4:3';              W = 720;   H = 540;   Target = 4.0 / 3.0 },
+    @{ Id = '3:4';              W = 405;   H = 540;   Target = 3.0 / 4.0 },
+    @{ Id = 'original';         W = 720;   H = 540;   Target = 800.0 / 600.0 },
+    @{ Id = 'original-flipped'; W = 405;   H = 540;   Target = 600.0 / 800.0 }
   )
   $ratioLog = New-Object System.Collections.ArrayList
   $ratioOk = $true
-  foreach ($p in $presets) {
+  foreach ($p in $presets800) {
     $r = Invoke-Crop ("ratio-" + ($p.Id -replace ':', '-')) $f800 '0.05,0.05,0.9,0.9' $p.Id
     $w = -1; $h = -1
     if ($r.OutSize -match '^(\d+)x(\d+)$') { $w = [int]$Matches[1]; $h = [int]$Matches[2] }
     $wantW = $p.W; $wantH = $p.H
     if ($FaultInjection -eq 'ignore-ratio' -and $p.Id -eq '1:1') { $wantW = 720; $wantH = 540 }
     $sizeOk = (($w -eq $wantW) -and ($h -eq $wantH))
-    $targetRatio = 0.0
-    switch ($p.Id) {
-      '1:1' { $targetRatio = 1.0 }
-      '16:9' { $targetRatio = 16.0 / 9.0 }
-      '4:3' { $targetRatio = 4.0 / 3.0 }
-      'original' { $targetRatio = 800.0 / 600.0 }
-      default { $targetRatio = 0.0 }
-    }
+    $targetRatio = $p.Target
     $actualRatio = 0.0
     if ($h -gt 0) { $actualRatio = $w / $h }
     $ratioWithin = $true
@@ -502,9 +511,40 @@ function Invoke-S18 {
     [void]$ratioLog.Add("$($p.Id): $($r.OutSize) (want $($wantW)x$($wantH)) ratio=$([math]::Round($actualRatio,4)) target=$([math]::Round($targetRatio,4)) within1pct=$ratioWithin")
     if (-not ($sizeOk -and $ratioWithin -and $r.Untouched)) { $ratioOk = $false }
   }
-  Check 'S18.08 every aspect preset reaches the engine and the output ratio is within 1 percent of the target' `
+  Check 'S18.08 every aspect preset (all eight ids, both orientations) reaches the engine and the output ratio is within 1 percent of the target' `
     $ratioOk `
     ($ratioLog -join ' | ')
+
+  # ---------------------------------------------------------------- S18.08b direction is a fact
+  # The crop rectangle has WIDTH and HEIGHT, so "this ratio is vertical" is a claim about which of
+  # the two is bigger - and until S18.08b nothing in this suite tested it. A `9:16` whose constant
+  # was written as 16.0/9.0 would keep `sizeOk` green in NO case above (the size check pins 304x540),
+  # but a rotated SOURCE would have flipped it silently: the per-image check below is the one that
+  # says "the same preset, two source orientations, one direction".
+  $dirLog = New-Object System.Collections.ArrayList
+  $dirOk = $true
+  foreach ($p in $presets800) {
+    $w = -1; $h = -1
+    $r = Invoke-Crop ("dir-" + ($p.Id -replace ':', '-')) $f800 '0.05,0.05,0.9,0.9' $p.Id
+    if ($r.OutSize -match '^(\d+)x(\d+)$') { $w = [int]$Matches[1]; $h = [int]$Matches[2] }
+    $fact = 'unknown'
+    if ($h -gt 0) { if ($w -gt $h) { $fact = 'wide' } elseif ($w -lt $h) { $fact = 'tall' } else { $fact = 'square' } }
+    $want = 'square'
+    switch ($p.Id) {
+      'free' { $want = 'wide' }   # free keeps the 0.9x0.9 box: on a landscape image that box is wide
+      '16:9' { $want = 'wide' }
+      '4:3'  { $want = 'wide' }
+      'original' { $want = 'wide' }
+      '9:16' { $want = 'tall' }
+      '3:4'  { $want = 'tall' }
+      'original-flipped' { $want = 'tall' }
+    }
+    [void]$dirLog.Add("$($p.Id): $($r.OutSize) dir=$fact want=$want")
+    if ($fact -ne $want) { $dirOk = $false }
+  }
+  Check 'S18.08b the measured output direction matches the preset that was asked for (9:16 and 3:4 really are taller than they are wide)' `
+    $dirOk `
+    ($dirLog -join ' | ')
 
   # ---------------------------------------------------------------- S18.09 whole image = refused
   # A rectangle equal to the whole image is REFUSED, not silently converted: the crop path is
@@ -563,6 +603,86 @@ function Invoke-S18 {
     $allUntouched `
     "$($runs.Count) run(s) checked: $untouchedText"
 
+  # ---------------------------------------------------------------- S18.13b a PORTRAIT source
+  # Everything above runs on landscape fixtures. The new presets are the ones that make a portrait
+  # source matter: a 9:16 crop of a landscape picture and a 9:16 crop of a portrait picture must
+  # point the SAME way, and original/original-flipped must each follow their own source (that is
+  # what "per image, its own size" means for the two per-image presets).
+  # Fixture: 300x700 (portrait) - already built above, so this costs three crop runs.
+  # 300x700 image, box 0.05..0.95 -> left=15, right=285 (270 wide), top=35, bottom=665 (630 tall).
+  #   9:16             -> target 0.5625, tallest allowed is 630 -> 630*0.5625 = 354.375 -> 354x630 (tall)
+  #   original         -> target 300/700 = 0.4286, height limited -> 270*7/3 = 630 -> 270x630 (tall)
+  #   original-flipped -> target 700/300 = 2.3333 (WIDE on a portrait source!), height limited:
+  #                       630 / 2.3333 = 270 -> 270x630 does fit the box -> 270x630? no: the box is
+  #                       270 wide, so the width caps it at 270 and the height becomes 270/2.3333=115.7
+  #                       -> 270x116 (wide). Measured in the detail line; the direction is asserted.
+  $port = Invoke-Crop 'portrait-tall' $f300 '0.05,0.05,0.9,0.9' '9:16'
+  $portFlip = Invoke-Crop 'portrait-original-flipped' $f300 '0.05,0.05,0.9,0.9' 'original-flipped'
+  $portOrig = Invoke-Crop 'portrait-original' $f300 '0.05,0.05,0.9,0.9' 'original'
+  # "wide" / "tall" / "square" from a measured "WxH" string. One implementation, used by every
+  # direction check below (a second copy would be a second rule).
+  function Get-DirectionOf([string]$size) {
+    if ($size -notmatch '^(\d+)x(\d+)$') { return 'unknown' }
+    $dw = [int]$Matches[1]; $dh = [int]$Matches[2]
+    if ($dw -gt $dh) { return 'wide' } elseif ($dw -lt $dh) { return 'tall' } else { return 'square' }
+  }
+  $portTallDir = Get-DirectionOf $port.OutSize
+  $portFlipDir = Get-DirectionOf $portFlip.OutSize
+  $portOrigDir = Get-DirectionOf $portOrig.OutSize
+  # The two per-image presets must be each other's opposite on the SAME source: that is the whole
+  # content of "original-flipped is original rotated by 90 degrees".
+  $portFlipIsReciprocal = $false
+  if ($portFlipDir -ne 'unknown' -and $portOrigDir -ne 'unknown' -and
+      $portFlipDir -ne 'square' -and $portOrigDir -ne 'square') {
+    $portFlipIsReciprocal = ($portFlipDir -ne $portOrigDir)
+  }
+  Check 'S18.13b a PORTRAIT source: 9:16 is still tall, original is tall, original-flipped is wide, and the two per-image presets are each others reciprocal on this image' `
+    (($port.OutSize -eq '270x480') -and ($portTallDir -eq 'tall') -and
+     ($portOrig.OutSize -eq '270x630') -and ($portOrigDir -eq 'tall') -and
+     ($portFlipDir -eq 'wide') -and $portFlipIsReciprocal -and
+     $port.Untouched -and $portFlip.Untouched -and $portOrig.Untouched) `
+    "9:16=$($port.OutSize) dir=$portTallDir original=$($portOrig.OutSize) dir=$portOrigDir original-flipped=$($portFlip.OutSize) dir=$portFlipDir reciprocal=$portFlipIsReciprocal untouched=$($port.Untouched -and $portFlip.Untouched -and $portOrig.Untouched)"
+
+  # ---------------------------------------------------------------- S18.13c one batch, two orientations
+  # "The same ratio for every image, each image converted with its own size" has to hold for the
+  # per-image preset too: original-flipped on a LANDSCAPE image and on a PORTRAIT image in ONE job
+  # must produce two outputs that KEEP their own orientation. Measured: 260x346 (wide, from 512x384)
+  # and 116x270 (tall, from 300x700). If the ratio were computed from the first image and applied to
+  # both, both would come out the same way - which is exactly the bug this pins.
+  $md = Join-Path $Work 'mixed-orientation'
+  New-Item -ItemType Directory -Force -Path $md | Out-Null
+  $m1 = Join-Path $md 'a-512x384.png'
+  $m2 = Join-Path $md 'b-300x700.png'
+  Copy-Item -LiteralPath $f512 -Destination $m1 -Force
+  Copy-Item -LiteralPath $f300 -Destination $m2 -Force
+  $mSha1 = Get-Sha $m1; $mSha2 = Get-Sha $m2
+  $mLog = Join-Path $Work 'mixed.log'
+  if (Test-Path -LiteralPath $mLog) { Remove-Item -LiteralPath $mLog -Force }
+  $mp = Start-Process -FilePath $Exe -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
+    '--crop', "$m1;$m2", '--crop-rect', '0.05,0.05,0.9,0.9', '--crop-ratio', 'original-flipped',
+    '--log', $mLog, '--quiet', '--no-autostart')
+  $mLines = Get-LogLines $mLog
+  $mo1 = Get-NewestOutput $md $m1
+  $mo2 = Get-NewestOutput $md $m2
+  $ms1 = 'MISSING'; $ms2 = 'MISSING'
+  if ($null -ne $mo1) { $ms1 = Get-ImageSize $mo1 }
+  if ($null -ne $mo2) { $ms2 = Get-ImageSize $mo2 }
+  $ms1Dir = Get-DirectionOf $ms1
+  $ms2Dir = Get-DirectionOf $ms2
+  # !! The two sources are OPPOSITE orientations, so original-flipped has to turn them in OPPOSITE
+  # directions: 512x384 (landscape box 460x345) -> 260x346 (tall), and 300x700 (portrait box 270x630)
+  # -> 116x270 (wide). MEASURED, not derived: an earlier version of this check guessed 460x345 /
+  # 630x270 from the box alone, which quietly assumed the ratio would be applied to the height.
+  $ms1Wanted = '260x346'
+  $ms2Wanted = '270x116'
+  $mUntouched = ((Get-Sha $m1) -eq $mSha1) -and ((Get-Sha $m2) -eq $mSha2)
+  Check 'S18.13c one job, two source orientations, original-flipped: each output is turned 90 degrees away from ITS OWN image (one comes out tall, the other wide)' `
+    (($mp.ExitCode -eq 0) -and ($ms1Dir -ne $ms2Dir) -and
+     ($ms1Dir -eq 'tall') -and ($ms2Dir -eq 'wide') -and
+     ($ms1 -eq $ms1Wanted) -and ($ms2 -eq $ms2Wanted) -and
+     $mUntouched -and (Test-Log $mLines 'ok=2 failed=0')) `
+    "exit=$($mp.ExitCode) a(512x384)=$ms1 dir=$ms1Dir (want $ms1Wanted/tall) b(300x700)=$ms2 dir=$ms2Dir (want $ms2Wanted/wide) sourcesUntouched=$mUntouched out1='$(Split-Path -Leaf $mo1)' out2='$(Split-Path -Leaf $mo2)'"
+
   # ---------------------------------------------------------------- S18.14 bad input is refused
   $badRatio = Invoke-Crop 'bad-ratio' $f512 '0.1,0.1,0.5,0.5' '3:2'
   $badRect = Invoke-Crop 'bad-rect' $f512 '0.1,0.1,0.5' 'free'
@@ -573,6 +693,51 @@ function Invoke-S18 {
      (-not (Test-Log $badRatio.Lines 'worker: job')) -and
      (-not (Test-Log $badRect.Lines 'worker: job'))) `
     "ratioExit=$($badRatio.Exit) rectExit=$($badRect.Exit)"
+
+  # The canonical set, read from the product's own rejection message. What this pins is the SPLIT
+  # between "which values are accepted" and "how many buttons the window draws": the three ids the
+  # direction toggle produces have no button, but every one of them must be accepted by the CLI,
+  # must travel over the worker pipe, and must reach the engine with its own direction.
+  $declaredSet = @()
+  $declLine = Get-LogLine $badRatio.Lines 'expected one of '
+  if ($declLine -match 'expected one of ([^)]+)\)') { $declaredSet = @($Matches[1] -split '/' | Where-Object { $_ -ne '' }) }
+  Check 'S18.14b the product declares its whole canonical ratio set: eight ids (five buttons plus the three the direction toggle produces)' `
+    (($declaredSet.Count -eq 8) -and ($declaredSet -contains '9:16') -and ($declaredSet -contains '3:4') -and
+     ($declaredSet -contains 'original-flipped')) `
+    "declared=($($declaredSet -join '/')) from '$declLine'"
+
+  $acceptLog = New-Object System.Collections.ArrayList
+  $acceptOk = $declaredSet.Count -eq 8
+  foreach ($id in $declaredSet) {
+    $r = Invoke-Crop ("accept-" + ($id -replace ':', '-')) $f512 '0.1,0.1,0.5,0.5' $id
+    # !! The ratio id lives on the "worker: job N sent ..." line, NOT in JobLine's `crop=(...)`
+    # segment: `crop=rect=(0.1,0.1,0.5,0.5) ratio=9:16` is appended AFTER the parenthesis, so a
+    # pattern anchored to `crop=` would never see it (measured, after a first version of this check
+    # reported onWorkerLine=False for all eight ids on a product that does send them).
+    $job = Get-LogLine $r.Lines 'worker: job \d+ sent '
+    # The id must be followed by a space or the end of the line, so an id that is a prefix of
+    # another one cannot pass by accident.
+    $onJob = [bool]($job -match ("ratio=" + [regex]::Escape($id) + '( |$)'))
+    if (-not (($r.Exit -eq 0) -and $onJob -and $r.Untouched)) { $acceptOk = $false }
+    [void]$acceptLog.Add("$id exit=$($r.Exit) out=$($r.OutSize) onWorkerLine=$onJob untouched=$($r.Untouched)")
+  }
+  Check 'S18.14c every declared ratio id is accepted by the CLI and really crosses the worker pipe (the id is on the worker job line)' `
+    $acceptOk `
+    ($acceptLog -join ' | ')
+
+  # The usage text has to name every value it accepts: `--help` is the only documentation the tool
+  # has, and a value that exists but is undocumented is a value nobody can use.
+  # !! `--help` exits 2 (it is not "the run succeeded"), so the exit code is NOT part of this check -
+  # only that the 118 usage lines were printed and every declared id appears in them.
+  $helpRatio = Invoke-ConfernStdout 'help-ratio' @('--help')
+  $missingHelp = @()
+  foreach ($id in $declaredSet) {
+    $found = @($helpRatio.Lines | Where-Object { ([string]$_).Contains($id) }).Count -gt 0
+    if (-not $found) { $missingHelp += $id }
+  }
+  Check 'S18.14d --help names every declared ratio id (including the three that have no button)' `
+    (($helpRatio.Lines.Count -gt 20) -and ($missingHelp.Count -eq 0)) `
+    "exit=$($helpRatio.Exit) lines=$($helpRatio.Lines.Count) missing='$($missingHelp -join ',')' line='$(Get-LogLine $helpRatio.Lines '--crop-ratio')'"
 
   # ---------------------------------------------------------------- S18.15 the window, no mouse
   # Everything a user would do, driven through the real objects: the real window, the real
@@ -617,14 +782,260 @@ function Invoke-S18 {
     "missing='" + ($newBoxMissing -join ' | ') + "' line='" + (Get-LogLine $ui.Lines 'NEW box drag from inside the photo towards the bottom-right') + "'"
 
   # The ratio buttons: each one must be reachable AND must actually change the rectangle.
-  $ratioStates = @($ui.Lines | Select-String -Pattern "ratio '(free|1:1|16:9|4:3|original)' ->")
-  $ratioStatesOk = ($ratioStates.Count -eq 5)
+  # !! The `^` anchor is not decoration: the summary line "ratio states: free: ... ratio=free rect=..."
+  # also contains the text "ratio 'free' ->" (inside the state it embeds), so an unanchored pattern
+  # counted 10 states for 5 buttons and made a derived expectation look wrong.
+  # The EXPECTED count comes from the product's own declared id set (8) minus the three ids that
+  # have no button - i.e. it is derived, not written down. A hard-coded 5 would silently pass if a
+  # button disappeared and another one appeared.
+  $ratioStates = @($ui.Lines | Select-String -Pattern "^.*crop ui selftest: ratio '(free|1:1|16:9|9:16|4:3|3:4|original|original-flipped)' ->")
+  # !! The count is divided by 2 because the window's selftest walks every button TWICE (once on the
+  # source it was given, once on that source rotated 90 degrees - see S18.15d). Deriving this from
+  # the passes keeps the expectation honest: "five buttons, two passes each".
+  $ratioPasses = 2
+  $ratioButtonCount = [int]($ratioStates.Count / $ratioPasses)
+  $ratioStatesOk = ($ratioStates.Count -eq (($declaredSet.Count - 3) * $ratioPasses)) -and
+                   ($ratioStates.Count % $ratioPasses -eq 0)
   foreach ($s in $ratioStates) {
     if ([string]$s.Line -notmatch 'ratio-ok=True') { $ratioStatesOk = $false }
   }
-  Check 'S18.15b all five preset buttons are reachable, and the ones with a target ratio report ratio-ok=True' `
+  Check 'S18.15b every preset BUTTON is reachable, and the ones with a target ratio report ratio-ok=True' `
     $ratioStatesOk `
-    (($ratioStates | ForEach-Object { ([string]$_.Line).Trim() }) -join ' || ')
+    ("buttonCount=$ratioButtonCount passes=$ratioPasses states=$($ratioStates.Count) expected=$($declaredSet.Count - 3) || " + (($ratioStates | ForEach-Object { ([string]$_.Line).Trim() }) -join ' || '))
+
+  # ---------------------------------------------------------------- S18.15d orientation is absolute
+  # The window's own selftest runs its ratio loop twice: once on the source it was given, once on a
+  # 90-degree copy of that source (a real PNG it writes and deletes itself). !! The two passes arrive
+  # in ONE "ratio states:" line (ten entries: five presets on each source), not in two lines - an
+  # earlier version required `Count -eq 2` and therefore failed while every entry it then parsed was
+  # correct. THIS line is where the numbers are read from; the per-preset "ratio-check" line carries
+  # only the verdict, which is why an even earlier version read nothing but zeros.
+  # Pinned here, all derived from those two lines:
+  #   1. every preset was measured on BOTH orientations;
+  #   2. the pixel rectangle of every preset agrees with the target ratio the product itself reported;
+  #   3. a fixed-direction preset reports the SAME direction on a landscape and on a portrait source,
+  #      while `free` (no ratio at all) and `original` (per image) report the SOURCE's own direction -
+  #      that contrast is what makes point 3 a statement about the product and not a tautology;
+  #   4. each id is the reciprocal of its counterpart and they differ (9:16 vs 16:9, ...).
+  $stateLines = @($ui.Lines | Select-String -Pattern '^.*crop ui selftest: ratio states: ')
+  $checkLog = New-Object System.Collections.ArrayList
+  # At least one states line, and it must yield a full two-orientation matrix (asserted entry by entry
+  # below); the count of lines is only used to say "the summary was printed at all".
+  $orientationOk = ($stateLines.Count -ge 1)
+  $seenPerId = @{}
+  $rectById = @{}
+  foreach ($line in $stateLines) {
+    $text = [string]$line.Line
+    # One "id: <state>" entry per preset, separated by " ; ". The state carries
+    # image=WxH ratio=<id> rect=x,y,w,h ratio-ok=... ratio-target=... ratio-actual=...
+    foreach ($m in [regex]::Matches($text, '(free|1:1|16:9|9:16|4:3|3:4|original|original-flipped): loaded=.*?(?=(?: ; )|$)')) {
+      $entry = $m.Value
+      $id = $m.Groups[1].Value
+      $srcW = 0; $srcH = 0; $rectW = -1; $rectH = -1; $target = 0.0; $actual = 0.0; $okFlag = $false
+      if ($entry -match 'image=(\d+)x(\d+)') { $srcW = [int]$Matches[1]; $srcH = [int]$Matches[2] }
+      if ($entry -match 'rect=(-?\d+),(-?\d+),(\d+),(\d+)') { $rectW = [int]$Matches[3]; $rectH = [int]$Matches[4] }
+      if ($entry -match 'ratio-ok=(\w+) ratio-target=([0-9.]+) ratio-actual=([0-9.]+)') {
+        $okFlag = ($Matches[1] -eq 'True'); $target = [double]$Matches[2]; $actual = [double]$Matches[3]
+      }
+      $sourceOrientation = if ($srcW -gt $srcH) { 'landscape' } elseif ($srcW -lt $srcH) { 'portrait' } else { 'square' }
+      if (-not $seenPerId.ContainsKey($id)) { $seenPerId[$id] = @{} }
+      $seenPerId[$id][$sourceOrientation] = $true
+      $rectDirection = 'unknown'
+      if ($rectH -gt 0) {
+        if ($rectW -gt $rectH) { $rectDirection = 'wide' } elseif ($rectW -lt $rectH) { $rectDirection = 'tall' } else { $rectDirection = 'square' }
+      }
+      # The direction the preset's own constant asks for. `free` and `original` follow the SOURCE
+      # (free has no ratio at all; original IS this image's ratio), so their expectation is the
+      # source's own direction - that control is what makes "same on both sources" a statement
+      # rather than a tautology. `original-flipped` is that direction rotated by 90 degrees.
+      $sourceDirection = if ($srcW -gt $srcH) { 'wide' } elseif ($srcW -lt $srcH) { 'tall' } else { 'square' }
+      $wantDirection = 'square'
+      switch ($id) {
+        '16:9' { $wantDirection = 'wide' }
+        '4:3'  { $wantDirection = 'wide' }
+        '9:16' { $wantDirection = 'tall' }
+        '3:4'  { $wantDirection = 'tall' }
+        'free' { $wantDirection = $sourceDirection }
+        'original' { $wantDirection = $sourceDirection }
+        'original-flipped' {
+          $wantDirection = if ($sourceDirection -eq 'landscape' -or $sourceDirection -eq 'wide') { 'tall' } else { 'wide' }
+        }
+      }
+      # `free` is the one preset with NO target ratio at all (the product reports ratio-target=0),
+      # so "target > 0" cannot be required of it - but the rectangle must still agree with the
+      # actual ratio the product reports, and the direction must follow the source.
+      $rectOk = ($rectW -gt 0) -and ($rectH -gt 0) -and ($actual -gt 0) -and
+                (([math]::Abs(($rectW / $rectH) - $actual) / $actual) -le 0.01)
+      $valuesOk = ($actual -gt 0) -and $rectOk -and ($srcW -gt 0) -and ($srcH -gt 0)
+      if ($id -ne 'free') { $valuesOk = $valuesOk -and ($target -gt 0) }
+      $lineOk = $okFlag -and ($rectDirection -eq $wantDirection) -and $valuesOk
+      if (-not $lineOk) { $orientationOk = $false }
+      if (-not $rectById.ContainsKey($id)) { $rectById[$id] = @{} }
+      $rectById[$id][$sourceOrientation] = $rectDirection
+      [void]$checkLog.Add("$id/$sourceOrientation src=${srcW}x${srcH} rectdir=$rectDirection want=$wantDirection target=$([math]::Round($target,4)) actual=$([math]::Round($actual,4)) rectOk=$rectOk ok=$lineOk")
+    }
+  }
+  # 1. and 3.: both orientations measured, and the direction is the same for the fixed-direction ones.
+  foreach ($id in @('free', '1:1', '16:9', '4:3', 'original')) {
+    $orientations = @()
+    if ($seenPerId.ContainsKey($id)) { $orientations = @($seenPerId[$id].Keys | Sort-Object) }
+    if ($orientations.Count -ne 2) {
+      $orientationOk = $false
+      [void]$checkLog.Add("$id measured on $($orientations.Count) orientation(s): $($orientations -join ',')")
+    }
+  }
+  $sameDirectionIds = @('1:1', '16:9', '4:3')
+  foreach ($id in $sameDirectionIds) {
+    if (-not $rectById.ContainsKey($id)) { $orientationOk = $false; [void]$checkLog.Add("$id has no direction"); continue }
+    $dirs = @($rectById[$id].Values | Sort-Object -Unique)
+    $same = ($dirs.Count -eq 1)
+    if (-not $same) { $orientationOk = $false }
+    [void]$checkLog.Add("$id directionsAcrossOrientation=$($dirs -join ',') same=$same")
+  }
+  # The per-image preset must differ between the two orientations (that is what "per image" means).
+  $origDirs = @()
+  if ($rectById.ContainsKey('original')) { $origDirs = @($rectById['original'].Values | Sort-Object -Unique) }
+  if ($origDirs.Count -ne 2) { $orientationOk = $false }
+  [void]$checkLog.Add("original directionsAcrossOrientation=$($origDirs -join ',') (must be two)")
+  # 4. each pair is reciprocal and distinct.
+  # !! The values come from the DIRECTION-TOGGLE lines, not from the preset states: 9:16 and 3:4 are
+  # produced by the toggle and never have a button of their own, so they never appear as a preset
+  # state (a first version of this check looked for them there and read -1 for every one of them).
+  # !! The matrix table is read HERE, before it is used: an earlier version read it after the first
+  # use and reported "matrix ids present=0/8 lines=0" from an empty collection - a parse miss that
+  # looked exactly like a product failure.
+  $toggleStates = @($ui.Lines | Select-String -Pattern 'crop ui selftest: direction-toggle ')
+  $matrixLines = @($ui.Lines | Select-String -Pattern 'crop ui selftest: ratio orientation matrix ')
+  $matrixIds = @{}
+  foreach ($l in $matrixLines) {
+    foreach ($m in [regex]::Matches([string]$l.Line, 'pair (original-flipped|9:16|3:4)=([0-9.]+) vs (\S+)=([0-9.]+)')) {
+      $matrixIds[$m.Groups[1].Value] = [double]$m.Groups[2].Value
+      $matrixIds[$m.Groups[3].Value] = [double]$m.Groups[4].Value
+    }
+  }
+  $pairLog = New-Object System.Collections.ArrayList
+  foreach ($pair in @(@('16:9','9:16'), @('4:3','3:4'), @('original','original-flipped'))) {
+    $a = -1.0; $b = -1.0
+    foreach ($l in $toggleStates) {
+      $t = [string]$l.Line
+      $pat = "direction-toggle " + $pair[0] + " .*?before=\S+ after=(\S+) back=\S+ .*?targetBefore=([0-9.]+) targetAfter=([0-9.]+)"
+      if ($t -match $pat) {
+        if ($Matches[1] -eq $pair[1]) { $a = [double]$Matches[2]; $b = [double]$Matches[3] }
+      }
+    }
+    $pairOk = ($a -gt 0) -and ($b -gt 0) -and ([math]::Abs($a * $b - 1.0) -lt 0.01) -and ([math]::Abs($a - $b) -gt 0.001)
+    if (-not $pairOk) { $orientationOk = $false }
+    [void]$pairLog.Add("$($pair[0])=$([math]::Round($a,4)) vs $($pair[1])=$([math]::Round($b,4)) reciprocalAndDistinct=$pairOk")
+  }
+  # ...and the two buttonless fixed-ratio ids are cross-checked in the ORIENTATION MATRIX pair table,
+  # which is where all eight ids appear (see S18.15e, which pins that table's shape).
+  foreach ($pair in @(@('9:16','16:9'), @('3:4','4:3'), @('original-flipped','original'))) {
+    $a = -1.0; $b = -1.0
+    if ($matrixIds.ContainsKey($pair[0])) { $a = $matrixIds[$pair[0]] }
+    if ($matrixIds.ContainsKey($pair[1])) { $b = $matrixIds[$pair[1]] }
+    $pairOk = ($a -gt 0) -and ($b -gt 0) -and ([math]::Abs($a * $b - 1.0) -lt 0.01) -and ([math]::Abs($a - $b) -gt 0.001)
+    if (-not $pairOk) { $orientationOk = $false }
+    [void]$pairLog.Add("matrix $($pair[0])=$([math]::Round($a,4)) vs $($pair[1])=$([math]::Round($b,4)) reciprocalAndDistinct=$pairOk")
+  }
+  [void]$pairLog.Add("matrix ids present=$($matrixIds.Keys.Count)/8 lines=$($matrixLines.Count)")
+  Check 'S18.15d the direction of every preset is absolute: same direction on a landscape and on a portrait source, the pixel rectangle agrees with the reported target ratio, and each id is the reciprocal of its counterpart' `
+    $orientationOk `
+    (($checkLog -join ' | ') + ' || ' + ($pairLog -join ' | '))
+
+  # The ORIENTATION MATRIX line covers all eight ids (9:16 and 3:4 have no button, so they have no
+  # preset state and no toggle line - the matrix and the pair table are the only places they appear).
+  # This is a check of its own so a parse failure here cannot silently decide S18.15d's verdict.
+  $matrixLines = @($ui.Lines | Select-String -Pattern 'crop ui selftest: ratio orientation matrix ')
+  $matrixOk = ($matrixLines.Count -ge 1)
+  $matrixText = ''
+  foreach ($l in $matrixLines) {
+    $matrixText = [string]$l.Line
+    foreach ($m in [regex]::Matches($matrixText, 'pair (original-flipped|9:16|3:4)=([0-9.]+) vs (\S+)=([0-9.]+) reciprocalAndDistinct=(\w+)')) {
+      $pA = [double]$m.Groups[2].Value; $pB = [double]$m.Groups[4].Value; $rec = ($m.Groups[5].Value -eq 'True')
+      if (-not ($rec -and ([math]::Abs($pA * $pB - 1.0) -lt 0.01))) { $matrixOk = $false }
+    }
+    foreach ($m in [regex]::Matches($matrixText, '(free|1:1|16:9|4:3|original)\(landscape/portrait\) (\w+)/(\w+) fixedDirection=(\w+) same=(\w+) ok=(\w+)')) {
+      $fixed = ($m.Groups[4].Value -eq 'True'); $same = ($m.Groups[5].Value -eq 'True'); $ok = ($m.Groups[6].Value -eq 'True')
+      # fixedDirection => the two orientations must give the same direction; !fixedDirection => they must differ.
+      if (-not ($ok -and ($same -eq $fixed))) { $matrixOk = $false }
+      if (($m.Groups[2].Value -eq $m.Groups[3].Value) -ne $same) { $matrixOk = $false }
+    }
+  }
+  $matrixPairCount = @([regex]::Matches($matrixText, 'pair ')).Count
+  $matrixPresetCount = @([regex]::Matches($matrixText, '\(landscape/portrait\)')).Count
+  Check 'S18.15e the orientation matrix itself is well formed: five presets compared across both orientations, and the three reciprocal pairs (including original-flipped) declared reciprocals of each other' `
+    ($matrixOk -and ($matrixPairCount -eq 3) -and ($matrixPresetCount -eq 5)) `
+    "matrixLines=$($matrixLines.Count) presets=$matrixPresetCount pairs=$matrixPairCount line='$matrixText'"
+
+  # The WINDOW's own verdict on the same property (it computes it, this suite only reads it).
+  Check 'S18.15e2 the window itself reports the orientation matrix as ok with both source orientations measured' `
+    ((Test-Log $ui.Lines 'ratio orientation ok=True portraitPassRan=True') -and
+     (Test-Log $ui.Lines 'reopen on the rotated source:.*opened=True')) `
+    "matrix='$(Get-LogLine $ui.Lines 'ratio orientation matrix')' verdict='$(Get-LogLine $ui.Lines 'ratio orientation ok=')'"
+
+  # ---------------------------------------------------------------- S18.15f the direction toggle
+  # The design (ruled 2026-10-07): the button row keeps FIVE ratio buttons, and one extra button
+  # flips the SELECTED ratio to its other direction. The three properties pinned here are the ones
+  # that make it honest:
+  #   * free and 1:1 have no direction => the button is DISABLED (and the text says so; a silently
+  #     dead button is what this avoids);
+  #   * 16:9 / 4:3 / original flip for real: a different ratio id, a different direction on screen,
+  #     and flipping twice returns to where it started;
+  #   * the selected ratio button's LABEL equals the label of the current ratio id - otherwise the
+  #     screen would say "16:9" while cropping 9:16.
+  $toggleLines = @($ui.Lines | Select-String -Pattern 'crop ui selftest: direction-toggle ')
+  $toggleLog = New-Object System.Collections.ArrayList
+  $toggleOk = $true
+  $labelLines = @($ui.Lines | Select-String -Pattern 'crop ui selftest: ratio-button-label ')
+  $labelOk = $true
+  foreach ($line in $labelLines) {
+    if ([string]$line.Line -notmatch 'ok=True') { $labelOk = $false }
+    [void]$toggleLog.Add((( [string]$line.Line) -replace '^.*ratio-button-label ', 'label '))
+  }
+  $labelCounts = @{}
+  foreach ($id in @('free', '1:1', '16:9', '4:3', 'original')) {
+    $labelCounts[$id] = @($labelLines | Where-Object { [string]$_.Line -match "ratio-button-label preset=$([regex]::Escape($id)) " }).Count
+  }
+  # Two passes (landscape + portrait source) => every button must have been labelled twice, and the
+  # label invariant must have held in both.
+  foreach ($id in $labelCounts.Keys) {
+    if ($labelCounts[$id] -ne 2) { $labelOk = $false }
+    [void]$toggleLog.Add("labelPreset $id count=$($labelCounts[$id])")
+  }
+
+  $toggleCount = @{}
+  foreach ($line in $toggleLines) {
+    $text = [string]$line.Line
+    $id = ''; $before = ''; $after = ''; $back = ''; $dirBefore = ''; $dirAfter = ''; $enabled = ''; $lineOk = $false
+    if ($text -match 'direction-toggle (\S+) source=\d+x\d+ before=(\S+) after=(\S+) back=(\S+)') {
+      $id = $Matches[1]; $before = $Matches[2]; $after = $Matches[3]; $back = $Matches[4]
+    } else { $toggleOk = $false; [void]$toggleLog.Add("unparsable: $text"); continue }
+    if ($text -match 'directionBefore=(\S+) directionAfter=(\S+)') { $dirBefore = $Matches[1]; $dirAfter = $Matches[2] }
+    if ($text -match 'enabled=(\w+)') { $enabled = $Matches[1] }
+    if ($text -match 'ok=(\w+)') { $lineOk = ($Matches[1] -eq 'True') }
+    if (-not $toggleCount.ContainsKey($id)) { $toggleCount[$id] = 0 }
+    $toggleCount[$id] = $toggleCount[$id] + 1
+
+    # Which ids have a counterpart, derived from the product's declared set (a '3:4' next to '4:3'
+    # is the same statement as '9:16' next to '16:9'): free and 1:1 are the only two WITHOUT one.
+    $hasCounterpart = (($id -ne 'free') -and ($id -ne '1:1'))
+    $caseOk = $false
+    if (-not $hasCounterpart) {
+      $caseOk = ($enabled -eq 'False') -and ($before -eq $id) -and ($after -eq $id) -and ($back -eq $id) -and $lineOk
+    } else {
+      $caseOk = ($enabled -eq 'True') -and ($before -ne $after) -and ($back -eq $before) -and
+                ($dirBefore -ne $dirAfter) -and $lineOk
+    }
+    if (-not $caseOk) { $toggleOk = $false }
+    [void]$toggleLog.Add("$id before=$before after=$after back=$back dir=$dirBefore->$dirAfter enabled=$enabled counterpart=$hasCounterpart ok=$caseOk")
+  }
+  Check 'S18.15f the direction toggle flips 16:9/4:3/original to a DIFFERENT id and direction and back again, and is DISABLED (not silently dead) for free and 1:1' `
+    ($toggleOk -and ($toggleLines.Count -ge 5) -and ($toggleCount.Keys.Count -eq 5)) `
+    ($toggleLog -join ' | ')
+
+  Check 'S18.15g the selected ratio button never lies: its label equals the label of the current ratio id, on every preset and both source orientations' `
+    ($labelOk -and ($labelLines.Count -ge 10)) `
+    (($labelLines | ForEach-Object { ([string]$_.Line).Trim() }) -join ' || ')
 
   # ---------------------------------------------------------------- S18.16 the dump
   $dump = Join-Path $Work 'crop-ui.png'
@@ -646,6 +1057,30 @@ function Invoke-S18 {
   Check 'S18.16b the crop window has no scrollbar with a non-zero extent (nothing is cut off or hidden)' `
     (Test-Log $ui.Lines 'scroll=0') `
     "line='$scroll'"
+
+  # The button row: FIVE ratio buttons + ONE direction button (+ the "ratio" caption and the hint).
+  # A scrollbar check does NOT cover this: a horizontal StackPanel never grows a scrollbar, it CLIPS.
+  # So the window measures itself and reports the numbers; every expectation below is derived from
+  # those numbers (no pixel count is written into this script).
+  $rowLine = Get-LogLine $ui.Lines 'ratio-button-row '
+  $rowParsed = $false
+  $rowWidth = 0.0; $rowConstraint = 0.0; $rowMaxRight = 0.0; $rowChildren = 0; $rowWindow = 0.0
+  $rowFitsFlag = $false
+  if ($rowLine -match 'children=(\d+).*rowWidth=([0-9.]+) constraint=([0-9.]+) maxChildRight=([0-9.]+) windowWidth=([0-9.]+).*fits=(\w+) ok=(\w+)') {
+    $rowChildren = [int]$Matches[1]; $rowWidth = [double]$Matches[2]; $rowConstraint = [double]$Matches[3]
+    $rowMaxRight = [double]$Matches[4]; $rowWindow = [double]$Matches[5]
+    $rowFitsFlag = ($Matches[6] -eq 'True'); $rowOkFlag = ($Matches[7] -eq 'True')
+    $rowParsed = $true
+  }
+  # 5 buttons + the caption + the direction button + the hint = 8 children, derived from the count of
+  # ids that actually have a button (the three buttonless ids are the direction toggle's output).
+  $expectedChildren = ($declaredSet.Count - 3) + 3
+  $rowGeometryOk = $rowParsed -and $rowFitsFlag -and ($rowChildren -eq $expectedChildren) -and
+                   ($rowWidth -gt 0) -and ($rowMaxRight -le $rowConstraint + 0.5) -and
+                   ($rowConstraint -le ($rowWindow - 40) + 0.5)
+  Check 'S18.16c five ratio buttons plus the direction button all fit inside the window: nothing overlaps, nothing is clipped, and every child sits inside the row it was given' `
+    $rowGeometryOk `
+    "children=$rowChildren (expected $expectedChildren) rowWidth=$rowWidth constraint=$rowConstraint maxChildRight=$rowMaxRight windowWidth=$rowWindow fits=$rowFitsFlag line='$rowLine'"
 
   # ---------------------------------------------------------------- S18.17 what the window shows
   # The preview must be the frame the ENGINE will crop: same decoder, same EXIF orientation.
@@ -787,7 +1222,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S18' { Expect 25; Invoke-S18 }
+    'S18' { Expect 37; Invoke-S18 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

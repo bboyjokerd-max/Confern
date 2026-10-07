@@ -76,6 +76,26 @@ internal sealed class CropWindow : Window
     private RectangleShape _selectionBorder = new();
     private readonly List<RectangleShape> _handles = new();
 
+    // 比例列（自測要量它、也要讀每顆鈕當下的標籤）
+    private StackPanel? _ratioRow;
+    private Button? _directionButton;
+
+    /// <summary>方向鈕的固定寬度。**不隨選中的比例改變**——這是「那一列幾何穩定」的實作：
+    /// 標籤只有三種值（<see cref="DirectionLabelDisabled"/>、`方向：橫式`、`方向：直式`），
+    /// 而三者的自然寬度都小於這個值，所以整個按鈕列的寬度與選中的預設無關。</summary>
+    public const double DirectionButtonWidth = 96;
+
+    /// <summary>方向鈕的文字前綴（啟用時）：`方向：橫式` / `方向：直式`。</summary>
+    public const string DirectionLabelPrefix = "方向：";
+
+    /// <summary>方向鈕在「沒有方向可換」時的文字。**只是一個短標籤，不是原因**——
+    /// 原因在 ToolTip，理由見 <see cref="SyncDirectionButton"/>。</summary>
+    public const string DirectionLabelDisabled = "方向";
+
+    /// <summary>矩形現在是橫的還是直的（方向鈕的標籤就說這個）。</summary>
+    public const string DirectionWide = "橫式";
+    public const string DirectionTall = "直式";
+
     // 顯示對應（①↔②）
     private double _scale = 1;
     private double _imageLeft, _imageTop, _displayWidth, _displayHeight;
@@ -98,6 +118,48 @@ internal sealed class CropWindow : Window
 
     /// <summary>目前的比例預設 id。</summary>
     public string RatioId => _ratioId;
+
+    /// <summary>
+    /// 比例列上每一顆按鈕目前的**顯示標籤**（自測要釘住「按鈕上寫的字＝目前選的形式」）。
+    /// 一個按鈕的標籤會變：`16:9` 那顆在比例被切到 `9:16` 之後就寫 `9:16`——
+    /// 否則畫面上會出現「按鈕寫 16:9、實際裁成 9:16」這種假資訊。
+    /// </summary>
+    public string[] RatioButtonLabels
+    {
+        get
+        {
+            var labels = new List<string>();
+            foreach (CropRatioPreset preset in CropRatios.Presets)
+                labels.Add(_ratioButtons.TryGetValue(preset.Id, out ToggleButton? b) ? (b.Content as string) ?? "" : "");
+            return labels.ToArray();
+        }
+    }
+
+    /// <summary>方向切換鈕：目前的字、以及它是不是可用的（自由／1:1 沒有方向 ⇒ 停用）。</summary>
+    public string DirectionButtonText => _directionButton == null ? "" : (_directionButton.Content as string) ?? "";
+
+    /// <summary>方向鈕的提示文字（「為什麼停用」住在這裡，不是住在按鈕標籤上）。</summary>
+    public string DirectionButtonToolTip =>
+        _directionButton?.ToolTip is string s ? s : "";
+
+    /// <summary>
+    /// 停用時 ToolTip 還看不看得見？WPF **預設看不到**（見建立處的說明），而「為什麼不能按」的
+    /// 原因**只**放在 ToolTip 裡 ⇒ 這一格必須為 true，否則「不是靜默無效」那句話是假的。
+    /// 由 WPF 自己的屬性讀回，不是記一個我們自己設過的旗標。
+    /// </summary>
+    public bool DirectionToolTipShownWhenDisabled =>
+        _directionButton != null && ToolTipService.GetShowOnDisabled(_directionButton);
+
+    /// <summary>方向鈕實際被配置到的寬度（自測要證明它與選中的預設無關）。</summary>
+    public double DirectionButtonWidthActual => _directionButton?.ActualWidth ?? 0;
+
+    /// <summary>方向鈕要求的寬度（設計值；<see cref="DirectionButtonWidthActual"/> 還沒排版時可用）。</summary>
+    public double DirectionButtonWidthConfigured => _directionButton?.Width ?? 0;
+
+    /// <summary>方向鈕標籤的三種合法值。驗收腳本用它斷言「標籤一定是這三個之一」。</summary>
+    public static string[] DirectionLabelVocabulary =>
+        new[] { DirectionLabelDisabled, DirectionLabelPrefix + DirectionWide, DirectionLabelPrefix + DirectionTall };
+    public bool DirectionButtonEnabled => _directionButton is { IsEnabled: true };
 
     /// <summary>目前的矩形（影像像素）。</summary>
     public Int32Rect RectInPixels => _rect;
@@ -333,8 +395,39 @@ internal sealed class CropWindow : Window
             row.Children.Add(button);
         }
 
+        // 方向鈕：把**目前選中的那個比例**在它的兩個方向之間切換（16:9 ↔ 9:16、4:3 ↔ 3:4、
+        // 原比例 ↔ 原比例 90°）。為什麼是一顆鈕而不是把直式的 id 也擺成按鈕：
+        // 按鈕列是固定的視覺設計（五顆），而「方向」不是第二個獨立的選擇——它是**目前這個構圖**的
+        // 一個屬性（見 2026-10-07 使用者拍板的設計）。自由／1:1 沒有方向可言 ⇒ 這一顆**停用並變灰**，
+        // 而不是按下去沒反應（靜默無效比沒有這顆鈕更糟）。
+        _directionButton = new Button
+        {
+            Content = DirectionLabelDisabled, Width = DirectionButtonWidth, Height = 28,
+            Margin = new Thickness(12, 0, 8, 0),
+            Background = SettingsUi.StyleKit.SurfaceBg,
+            Foreground = SettingsUi.StyleKit.TextMain,
+            BorderBrush = SettingsUi.StyleKit.CardBorder,
+            FontFamily = SettingsUi.StyleKit.Font,
+            Template = SettingsUi.StyleKit.ButtonTemplate(),
+            Cursor = Cursors.Hand
+        };
+        _directionButton.Click += (_, _) => ToggleDirection();
+        // ⚠ WPF **預設不會對停用的控制項顯示 ToolTip**（`IsEnabled=false` 把滑鼠事件擋掉了），
+        //    而這顆鈕「為什麼不能按」的原因**只**放在 ToolTip 裡 ⇒ 不開這個開關，那個原因
+        //    就等於寫在使用者永遠看不到的地方，「不是靜默無效」那句話會變成假的
+        //    （2026-10-07：外部視覺模型看 dump PNG 時指出「變灰但畫面上完全沒有提示為什麼」，
+        //    查證後發現 WPF 的預設行為確實如此）。`ShowOnDisabled` 是 WPF 官方給這個情形的開關。
+        ToolTipService.SetShowOnDisabled(_directionButton, true);
+        row.Children.Add(_directionButton);
+
         var hint = new TextBlock
         {
+            // ⚠ 這一行文字**必須自己換行**（`MaxWidth`），因為比例列是橫向 StackPanel：
+            // StackPanel 不會生捲軸，它把放不下的東西**直接裁掉**。加了方向鈕之後這一列的量測
+            // 是 962 px 對上視窗內容寬 900 px——也就是說最後那 62 px 的說明文字在畫面上是**看不見的**
+            // （實測：`maxChildRight=962 > constraint=962`，見 `--crop-ui-selftest` 的
+            // `ratio-button-row` 那一行）。讓文字換行是唯一不必動到按鈕本身、也不必動凍結版面的做法。
+            MaxWidth = 250, TextWrapping = TextWrapping.Wrap,
             Text = "（同一比例會套用到這一批的每一張圖，每一張依自己的尺寸換算）",
             FontSize = 12, Margin = new Thickness(8, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center
@@ -344,6 +437,7 @@ internal sealed class CropWindow : Window
 
         Grid.SetRow(row, 3);
         root.Children.Add(row);
+        _ratioRow = row;
     }
 
     private void BuildNotice(Grid root)
@@ -415,10 +509,96 @@ internal sealed class CropWindow : Window
         Canvas.SetTop(handle, centreY - handle.Height / 2);
     }
 
+    /// <summary>
+    /// 讓按鈕列**說出真話**：①哪一顆是選中的；②**每一顆的字**是它現在代表的比例形式。
+    ///
+    /// ②是 2026-10-07 那個設計的關鍵：方向鈕會把 `16:9` 切成 `9:16`，而按鈕列上**沒有** `9:16`
+    /// 這一顆。若按鈕仍寫著 `16:9`，畫面就在說謊（使用者以為自己裁了 16:9，實際是 9:16）。
+    /// 所以「目前這個 id」要回寫到它所屬的那顆鈕上——`9:16` 寫在第三顆（`16:9` 的位置），
+    /// 因為那顆鈕代表的是「**這個構圖**」，而方向鈕決定它現在是哪一個方向。
+    /// </summary>
     private void SyncRatioButtons()
     {
+        string buttonId = CropRatios.ButtonIdOf(_ratioId);
         foreach ((string id, ToggleButton button) in _ratioButtons)
-            SettingsUi.StyleKit.SetToggleState(button, string.Equals(id, _ratioId, StringComparison.Ordinal));
+        {
+            bool selected = string.Equals(id, buttonId, StringComparison.Ordinal);
+            button.Content = selected ? CropRatios.LabelOf(_ratioId) : CropRatios.LabelOf(id);
+            SettingsUi.StyleKit.SetToggleState(button, selected);
+        }
+        SyncDirectionButton();
+    }
+
+    /// <summary>
+    /// 目前**畫面上那個矩形**是橫的還是直的（方向鈕的標籤就說這個）。
+    /// 由矩形自己（<see cref="_rect"/>）決定，不看比例 id：矩形才是使用者眼睛看到的東西，
+    /// 而標籤的職責是描述它。正方形（1:1）永遠走不到這裡——它沒有對應方向，鈕是停用的。
+    /// </summary>
+    private string CurrentRectDirectionLabel() =>
+        _rect.Width > _rect.Height ? DirectionWide : DirectionTall;
+
+    /// <summary>
+    /// 方向鈕的兩個狀態。停用時**換掉顏色**而不是只靠 <c>IsEnabled</c>：這個視窗是深底，
+    /// 而 <c>IsEnabled=false</c> 在自繪範本下不會自己去改字的顏色（設定頁的開關也是同一條紀律：
+    /// 「變灰」必須看得出來）。
+    ///
+    /// ⚠ **標籤是一個固定的方向字串，不是「為什麼不能按」的原因**（2026-10-07 修正）。
+    /// 先前這裡寫的是 `{目前比例}（沒有方向可翻）`，那是**把原因放進按鈕標籤**，代價有兩個：
+    ///   ① 它站在五顆比例鈕中間，讀起來像**第六個比例選項**（外部視覺模型獨立看 dump PNG 時
+    ///      就是這樣讀的：把停用時的 `自由（沒有方向可翻）` 當成「自由」的重複選項，完全沒看出
+    ///      那是方向控制）；
+    ///   ② 標籤長度隨選中的比例變動（`自由…` 與 `原比例 → 原比例 90°` 差很多），那一列的幾何
+    ///      於是不穩定。
+    /// 現在：啟用＝`方向：橫式`／`方向：直式`（同為 5 個字），停用＝`方向`（2 個字，只是變灰），
+    /// **寬度固定**（見 <see cref="DirectionButtonWidth"/>），原因移到 <c>ToolTip</c>——滑鼠移上去
+    /// 才顯示，**不佔版面寬度**。也就是說「不靜默」這條紀律仍然成立，只是換了媒介。
+    /// 這一顆鈕的**文字永遠不出現任何比例標籤**，所以它不可能被讀成比例鈕。
+    /// </summary>
+    private void SyncDirectionButton()
+    {
+        if (_directionButton == null) return;
+        if (CropRatios.Counterpart(_ratioId) is not null)
+        {
+            string direction = CurrentRectDirectionLabel();
+            _directionButton.Content = DirectionLabelPrefix + direction;
+            _directionButton.IsEnabled = true;
+            _directionButton.ToolTip = $"目前的構圖是{direction}。按下去換成另一個方向" +
+                                       $"（{CropRatios.LabelOf(_ratioId)} ↔ {CropRatios.LabelOf(CropRatios.Counterpart(_ratioId))}）。";
+            _directionButton.Background = SettingsUi.StyleKit.SurfaceBg;
+            _directionButton.Foreground = SettingsUi.StyleKit.TextMain;
+            _directionButton.BorderBrush = SettingsUi.StyleKit.SecondaryBorder;
+            _directionButton.Cursor = Cursors.Hand;
+        }
+        else
+        {
+            _directionButton.Content = DirectionLabelDisabled;
+            _directionButton.IsEnabled = false;
+            // 原因在提示裡（移上去才顯示）：沒有一個字進到按鈕標籤，列寬因此與選中的比例無關。
+            _directionButton.ToolTip = $"{CropRatios.LabelOf(_ratioId)}沒有方向可以換——" +
+                                       "只有 16:9／4:3／原比例 這一類有兩個方向。";
+            _directionButton.Background = SettingsUi.StyleKit.SurfaceBg;
+            _directionButton.Foreground = SettingsUi.StyleKit.TextFaint;
+            _directionButton.BorderBrush = SettingsUi.StyleKit.CardBorder;
+            _directionButton.Cursor = Cursors.Arrow;
+        }
+    }
+
+    /// <summary>
+    /// 方向鈕：把目前的比例換成它的**另一個方向**，矩形當場重新收斂、按鈕列跟著改字。
+    /// 沒有對應方向時（自由／1:1）**什麼都不做**並保持停用——這一顆鈕的停用狀態本身就是那個答案。
+    /// </summary>
+    private void ToggleDirection()
+    {
+        try
+        {
+            if (CropRatios.Counterpart(_ratioId) is not { } other) return;
+            SelectRatio(other);
+        }
+        catch (Exception ex)
+        {
+            Notice($"切換方向時發生未預期的錯誤（{ex.GetType().Name}）——已忽略");
+            _log?.Invoke($"crop ui: ToggleDirection threw {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>畫面座標 → 影像像素座標（①→②）。超出畫布一律夾進影像內。</summary>
@@ -899,7 +1079,7 @@ internal sealed class CropWindow : Window
                $"hwnd={(source != null ? "0x" + source.Handle.ToInt64().ToString("X") : "(none)")} " +
                $"image={_imageWidth}x{_imageHeight} ratio={_ratioId} " +
                $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height} " +
-               $"ratio-ok={ratio.Ok} ratio-target={ratio.target:0.####} ratio-actual={ratio.actual:0.####} " +
+               $"ratio-ok={ratio.Ok} ratio-target={ratio.target:0.######} ratio-actual={ratio.actual:0.######} " +
                $"normalized={CropMath.ToNormalized(_rect, _imageWidth, _imageHeight, _ratioId).Describe()} " +
                $"stage={StageWidthPx}x{StageHeightPx} confirmed={(Result != null)} " +
                $"scroll={ScrollableExtentCount()} " +
@@ -953,9 +1133,51 @@ internal sealed class CropWindow : Window
     /// <summary>自測：按下**真正的比例鈕**（走它自己的 Click 處理常式，不是呼叫 SelectRatio）。</summary>
     public bool SelfTestSelectRatio(string id)
     {
-        if (!_ratioButtons.TryGetValue(CropRatios.CanonicalId(id), out ToggleButton? button)) return false;
+        string buttonId = CropRatios.ButtonIdOf(id);
+        if (!_ratioButtons.TryGetValue(buttonId, out ToggleButton? button)) return false;
         button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         return true;
+    }
+
+    /// <summary>
+    /// 自測：按下**真正的方向鈕**。停用時回 false 並什麼都不做——與使用者按到一顆變灰的鈕
+    /// 完全同一條路（WPF 對停用的按鈕不會派送 Click）。回傳的是「這顆鈕當時能不能按」。
+    /// </summary>
+    public bool SelfTestToggleDirection()
+    {
+        if (_directionButton is not { IsEnabled: true }) return false;
+        _directionButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        return true;
+    }
+
+    /// <summary>
+    /// 自測：比例列的**幾何量測**——由視窗自己算，不讓驗收腳本量像素。
+    ///
+    /// 這一組數字回答的是「按鈕列還放得下嗎」：<c>maxRight</c> 是**實際畫在視窗上**的
+    /// 最右緣（子元素相對這一列的 X ＋ 自己的寬度），<c>fit</c> 則是「它有沒有超出列被配置到的寬度」。
+    /// 只斷言「沒有捲軸」不夠：<c>StackPanel</c> **不會**生捲軸，它會把放不下的東西**裁掉**，
+    /// 而裁掉在截圖上看得出來、在腳本裡讀不出來。所以這裡把「有沒有被裁」變成一個布林值。
+    /// </summary>
+    public (double RowWidth, double ConstraintWidth, double MaxRight, int ChildCount, double WindowWidth, bool Fit)
+        SelfTestRatioRowMetrics()
+    {
+        if (_ratioRow == null) return (0, 0, 0, 0, ActualWidth, false);
+        StackPanel row = _ratioRow;
+        double maxRight = 0;
+        foreach (UIElement child in row.Children)
+        {
+            if (child is not FrameworkElement element) continue;
+            double left = 0;
+            try { left = element.TransformToAncestor(row).Transform(new Point(0, 0)).X; }
+            catch (InvalidOperationException) { /* 還沒進視覺樹 ⇒ 用 0 */ }
+            maxRight = Math.Max(maxRight, left + element.ActualWidth);
+        }
+        double windowWidth = ActualWidth > 0 ? ActualWidth : Width;
+        // 「放得下」＝最右緣沒有超出這一列被配置到的寬度，而且窗框本身也容得下這一列
+        // （後者是窗寬被改小、而列還是想要更寬時的唯一偵測點）。
+        double contentWidth = Math.Max(0, windowWidth - 40);   // 與 root 的 Margin(20) 同一個來源
+        bool fit = row.ActualWidth > 0 && maxRight <= row.ActualWidth + 0.5 && row.ActualWidth <= contentWidth + 0.5;
+        return (row.ActualWidth, row.ActualWidth, maxRight, row.Children.Count, windowWidth, fit);
     }
 
     /// <summary>自測：目前那一行提示文字（退化輸入的處置就是顯示提示，所以它必須可被斷言）。</summary>

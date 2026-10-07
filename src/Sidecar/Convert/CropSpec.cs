@@ -8,8 +8,17 @@ namespace Sidecar;
 /// 裁切視窗的按鈕列、worker 協議上的 <c>cropRatio</c> 欄位、以及引擎每一張圖各自換算的那一步
 /// 全部讀它。三處各寫一份清單的話，遲早會出現「視窗畫得出來、引擎不認得」的組合。
 ///
-/// ⚠ <see cref="IdFree"/> 是預設，也是**舊封包的缺席語意**：一個不帶 <c>cropRatio</c> 的
+/// ⚠ 它有**兩份清單**，而且兩份回答的是不同的問題：
+///   · <see cref="CropRatios.Presets"/>＝**按鈕列**（五顆，畫面只能放這麼多）；
+///   · <see cref="CropRatios.All"/>＝**合法值集合**（七個，含方向鈕切出來的兩個直式 id）。
+/// 驗證與「認不得的值」訊息讀 <see cref="CropRatios.All"/>；畫按鈕讀
+/// <see cref="CropRatios.Presets"/>。
+///
+/// ⚠ <see cref="CropRatios.IdFree"/> 是預設，也是**舊封包的缺席語意**：一個不帶 <c>cropRatio</c> 的
 /// crop 工作＝自由裁切（只有使用者拖的那個正規化矩形，沒有比例約束）。
+///
+/// ⚠ 每一個比例都是**絕對**的：`16:9` 永遠是寬的、`9:16` 永遠是高的，兩者在直式照片與橫式
+/// 照片上給出同一種方向。方向是**預設值自己的性質**，不是來源影像的性質。
 /// </summary>
 /// <param name="Id">穩定識別碼。會進 worker 協議與日誌，**不得就地改字**。</param>
 /// <param name="Label">按鈕上的字（zh-Hant，比照圓心膠囊與設定頁）。</param>
@@ -30,15 +39,43 @@ internal static class CropRatios
     /// <summary>寬螢幕。</summary>
     public const string IdWide = "16:9";
 
+    /// <summary>
+    /// 直式影片（<see cref="IdWide"/> 的直式版）。2026-10-07 使用者要求：「裁切成功，目前只有直式
+    /// 比例，也加上橫式的」——實測更正：當時的 16:9／4:3 都是**常數的橫式**，缺的其實是直式。
+    /// 這兩個 id 因此是「同一種構圖的兩個方向」，不是兩種不同的構圖。
+    /// </summary>
+    public const string IdTall = "9:16";
+
     /// <summary>相機的經典比例。</summary>
     public const string IdClassic = "4:3";
+
+    /// <summary>直式相機比例（<see cref="IdClassic"/> 的直式版）。</summary>
+    public const string IdClassicTall = "3:4";
 
     /// <summary>原比例：這一張圖自己的長寬比（所以它**逐張不同**，見 <see cref="TargetRatio"/>）。</summary>
     public const string IdOriginal = "original";
 
+    /// <summary>
+    /// 「原比例轉 90 度」：同一張圖的高 ÷ 寬。**逐張不同，而且不看固定方向**——直式照片得到
+    /// 橫式結果、橫式照片得到直式結果（2026-10-07 使用者拍板「原比例也一起做」）。
+    ///
+    /// ⚠ 名字刻意**不叫** <c>original-tall</c> 之類：它在直式來源上得到的是橫的，
+    /// 任何暗示固定方向的名字都會在日誌、CLI 與 UI 上說謊。
+    /// </summary>
+    public const string IdOriginalFlipped = "original-flipped";
+
     public const string DefaultId = IdFree;
 
-    /// <summary>五個正規值，順序＝按鈕列由左到右的順序。</summary>
+    /// <summary>
+    /// **按鈕列**的五顆，順序＝由左到右。⚠ 這**不是**「可接受的值集合」（那是 <see cref="All"/>
+    /// ——`9:16`／`3:4`／`original-flipped` 是正規值但沒有自己的按鈕，它們是「方向鈕」從
+    /// `16:9`／`4:3`／`original` 切過去的結果）。
+    /// 兩件事分開的理由：把「按鈕有幾顆」當成「哪些值合法」，會讓「切過去之後的那個 id」
+    /// 在下一次驗證時變成非法值（日誌上大聲喊「認不得」、引擎卻明明支援它）。
+    ///
+    /// 排序：「自由」最左（預設值／缺席語意）、「原比例」最右（唯一的**逐張**比例），
+    /// 中間三顆是絕對比例。方向鈕緊跟在這一列的最右邊（見 <c>CropWindow.BuildRatioRow</c>）。
+    /// </summary>
     public static readonly CropRatioPreset[] Presets =
     {
         new(IdFree, "自由"),
@@ -48,10 +85,70 @@ internal static class CropRatios
         new(IdOriginal, "原比例")
     };
 
+    /// <summary>
+    /// 全部八個正規值（＝**合法值集合**，也是「有哪些比例」的完整清單）：按鈕列的五顆
+    /// ＋三個只由方向鈕產生的 id。驗證（CLI／worker／日誌）與「認不得的值」訊息一律讀這一個。
+    /// </summary>
+    public static readonly CropRatioPreset[] All =
+    {
+        new(IdFree, "自由"),
+        new(IdSquare, "1:1"),
+        new(IdWide, "16:9"),
+        new(IdTall, "9:16"),
+        new(IdClassic, "4:3"),
+        new(IdClassicTall, "3:4"),
+        new(IdOriginal, "原比例"),
+        new(IdOriginalFlipped, "原比例 90°")
+    };
+
+    /// <summary>
+    /// 方向的成對成員。切換鈕就是「在同一個構圖的兩邊來回」，所以它必須是**對稱**的
+    /// （<c>Counterpart(Counterpart(x)) == x</c>），而 <c>free</c>／<c>1:1</c> 刻意不在表裡。
+    /// </summary>
+    private static readonly (string A, string B)[] DirectionPairs =
+    {
+        (IdWide, IdTall),
+        (IdClassic, IdClassicTall),
+        (IdOriginal, IdOriginalFlipped)
+    };
+
+    /// <summary>
+    /// 這個 id 的**另一個方向**；沒有對應方向（自由／1:1）回 <c>null</c>。
+    ///
+    /// 回 null 而不是「原樣回自己」：那會讓「切了但沒變」看起來像切成功，而呼叫端要判斷的
+    /// 正是「這顆鈕該不該停用」。兩種沒有方向的理由不同——自由沒有比例可談、1:1 是自己的鏡像
+    /// （轉 90 度還是同一張正方形）。
+    /// </summary>
+    public static string? Counterpart(string? id)
+    {
+        string canonical = CanonicalId(id);
+        foreach ((string a, string b) in DirectionPairs)
+        {
+            if (canonical == a) return b;
+            if (canonical == b) return a;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 這個 id **由按鈕列上的哪一顆鈕代表**（＝它自己，或它的另一個方向）。
+    ///
+    /// 為什麼需要它：`9:16`／`3:4`／`original-flipped` 沒有自己的按鈕，它們是方向鈕從
+    /// `16:9`／`4:3`／`original` 切出來的。自測要按「某一顆鈕」時，唯一正確的來源就是這條對應
+    /// ——在測試裡自己寫「`9:16` 就按第三顆」是第二份規則，產品改了順序它就紅在錯的地方。
+    /// </summary>
+    public static string ButtonIdOf(string? id)
+    {
+        string canonical = CanonicalId(id);
+        foreach (CropRatioPreset p in Presets)
+            if (p.Id == canonical) return p.Id;
+        return Counterpart(canonical) ?? DefaultId;
+    }
+
     /// <summary>任意字串 → 正規 id；認不得的（含 null／空）回 <see cref="DefaultId"/>。</summary>
     public static string CanonicalId(string? text)
     {
-        foreach (CropRatioPreset p in Presets)
+        foreach (CropRatioPreset p in All)
             if (string.Equals(p.Id, (text ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return p.Id;
         return DefaultId;
     }
@@ -60,7 +157,7 @@ internal static class CropRatios
     public static bool IsCanonical(string? text)
     {
         string t = (text ?? "").Trim();
-        foreach (CropRatioPreset p in Presets)
+        foreach (CropRatioPreset p in All)
             if (string.Equals(p.Id, t, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }
@@ -69,7 +166,7 @@ internal static class CropRatios
     public static string LabelOf(string? id)
     {
         string canonical = CanonicalId(id);
-        foreach (CropRatioPreset p in Presets)
+        foreach (CropRatioPreset p in All)
             if (p.Id == canonical) return p.Label;
         return IdFree;
     }
@@ -78,19 +175,28 @@ internal static class CropRatios
     /// 這個比例預設在**這一張圖**上對應的目標長寬比（寬 ÷ 高，像素空間）。
     /// <c>null</c>＝這個預設不做任何比例約束（<see cref="IdFree"/>）。
     ///
-    /// ⚠ <see cref="IdOriginal"/> 的答案**逐張不同**——那正是「原比例」的意思，
-    /// 而且它是「批次＝同一比例」裡唯一一個刻意逐張變動的預設。其餘三個是常數。
+    /// ⚠ <see cref="IdOriginal"/> 與 <see cref="IdOriginalFlipped"/> 的答案**逐張不同**——那正是
+    /// 「原比例」的意思，而且它們是「批次＝同一比例」裡唯一刻意逐張變動的預設（後者是同一張圖轉
+    /// 90 度，所以在直式照片上得到橫式、在橫式照片上得到直式：**不帶固定方向**）。
+    ///
+    /// ⚠ 其餘六個都是**常數**，而且刻意**不看影像方向**：`9:16` 就是一張直式的圖，
+    /// 不管來源是直式還是橫式照片都一樣（同一顆比例套用到整個批次，每一張各自換算）。
+    /// 「依來源自動翻轉」是**另一個**功能（「自動：直式來源就裁直式」），不是這裡；
+    /// 把方向併進預設值會讓同一個 id 在批次裡對不同來源給出不同方向，
+    /// 那正是 2026-10-06 拍板的「批次＝同一比例」要排除的事。
     /// </summary>
     public static double? TargetRatio(string? id, int imageWidth, int imageHeight)
     {
+        bool usable = imageWidth > 0 && imageHeight > 0;
         switch (CanonicalId(id))
         {
             case IdSquare: return 1.0;
             case IdWide: return 16.0 / 9.0;
+            case IdTall: return 9.0 / 16.0;
             case IdClassic: return 4.0 / 3.0;
-            case IdOriginal: return imageWidth > 0 && imageHeight > 0
-                ? (double)imageWidth / imageHeight
-                : null;
+            case IdClassicTall: return 3.0 / 4.0;
+            case IdOriginal: return usable ? (double)imageWidth / imageHeight : null;
+            case IdOriginalFlipped: return usable ? (double)imageHeight / imageWidth : null;
             default: return null;      // free
         }
     }

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.Reflection;
 
 namespace Sidecar;
@@ -339,7 +340,7 @@ internal sealed class Options
                                     This is the no-mouse seam: it is what dragging in the crop window
                                     would have produced, so the whole path can be verified without
                                     touching the user's mouse
-          --crop-ratio <id>         aspect preset for --crop: free | 1:1 | 16:9 | 4:3 | original
+          --crop-ratio <id>         aspect preset for --crop: free | 1:1 | 16:9 | 9:16 | 4:3 | 3:4 | original | original-flipped
                                     (default free)
           --crop-ui-selftest        open the crop window, set a rectangle programmatically, drag with
                                     synthetic coordinates, confirm, close and reopen (no screen, no mouse)
@@ -521,8 +522,13 @@ internal sealed class Options
     /// </summary>
     public string CropRect = "";
     /// <summary>
-    /// `--crop-ratio &lt;id&gt;`：比例預設（`free`／`1:1`／`16:9`／`4:3`／`original`，
-    /// 見 <see cref="CropRatios"/>）。空＝`free`。認不得的值會被拒絕並說出來（不靜默退回）。
+    /// `--crop-ratio &lt;id&gt;`：比例預設（`free`／`1:1`／`16:9`／`9:16`／`4:3`／`3:4`／
+    /// `original`／`original-flipped`，見 <see cref="CropRatios"/>）。空＝`free`。
+    /// 認不得的值會被拒絕並說出來（不靜默退回）。
+    ///
+    /// ⚠ 這裡列的是 **<see cref="CropRatios.All"/>（合法值集合）**，不是按鈕列的
+    /// <see cref="CropRatios.Presets"/>：`9:16` 等三個直式 id 沒有自己的按鈕（它們是視窗上
+    /// 「方向」鈕切出來的），但它們**是**合法的命令列值與合法的 worker 值。
     /// </summary>
     public string CropRatio = "";
     /// <summary>
@@ -1886,7 +1892,7 @@ internal static class App
         {
             // 認不得的比例**不靜默退回 free**：那會讓「1:1」這種打錯字變成一條看起來成功的裁切。
             evidence.Line($"--crop: unknown --crop-ratio '{opt.CropRatio}' " +
-                          $"(expected one of {string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+                          $"(expected one of {string.Join("/", CropRatios.All.Select(p => p.Id))})");
             evidence.Line("--crop FAILED (nothing was sent to the worker)");
             return 2;
         }
@@ -2299,7 +2305,7 @@ internal static class App
                 if (cliRatio.Length > 0 && !CropRatios.IsCanonical(cliRatio))
                 {
                     evidence.Line($"ENTER: crop refused (--crop-ratio '{cliRatio}' is not one of " +
-                                  $"{string.Join("/", CropRatios.Presets.Select(p => p.Id))})");
+                                  $"{string.Join("/", CropRatios.All.Select(p => p.Id))})");
                     return false;
                 }
                 CropSpec spec = fromCli with { RatioId = CropRatios.CanonicalId(cliRatio) };
@@ -3187,24 +3193,419 @@ internal static class App
                       $"handlesResize={resizeOk} " +
                       $"(resize: right-grow={rightOk} left-shrink={leftOk} corner-grow={cornerOk})");
 
-        // ④ 每一個比例鈕都真的按得到，而且按下去之後矩形真的符合那個比例
-        var ratioResults = new List<string>();
+        // ④ 每一個比例鈕都真的按得到，而且按下去之後矩形真的符合那個比例。
+        //
+        // ⚠ 2026-10-07 擴充（使用者：「裁切成功，目前只有直式比例，也加上橫式的」）。
+        // 原本這一格只斷言 `ratio-ok=True`，而那個旗標是**產品自己說自己對不對**
+        // （矩形的寬高比 vs 它自己回報的 target）——一個把 `9:16` 定義成 `16.0/9.0` 的 bug
+        // 會讓產品與自己一致，這一格照樣綠。所以現在每一顆比例另外被三件事釘住：
+        //   ①**方向**：9:16 ⇒ 高 > 寬；16:9 ⇒ 寬 > 高；4:3 ⇒ 寬 > 高；3:4 ⇒ 高 > 寬；1:1 ⇒ 相等；
+        //   ②**數值**：產品回報的 `ratio-target` 與矩形自己的寬高比（`rect=` 的像素值）相符；
+        //   ③**絕對性**：同一顆比例在直式來源與橫式來源上必須給出**同一個方向**——這是本次真正
+        //     新增的性質（比例不隨影像方向翻轉），所以迴圈會跑兩輪（橫式來源＋直式來源）。
+        // 期望值全部由**產品自報值**推導：方向的分類是量的（rect 的像素值），
+        // 而「這顆比例該朝哪邊」由 `CropRatios` 自己的常數決定；夾具尺寸在這裡只當標籤。
+        var ratioLines = new List<string>();
+        var perOrientation = new List<(string Orientation, string PresetId, string Direction, bool Ok)>();
         bool ratiosOk = true;
+
+        bool RunRatioLoop(string passLabel)
+        {
+            (int passW, int passH) = CropUi.SelfTestImageSizePx();
+            // ⚠ 來源方向由**量到的尺寸**決定（寫死夾具尺寸正是本專案兩次假綠的成因）。
+            string sourceOrientation = OrientationOfSource(passW, passH);
+            foreach (CropRatioPreset preset in CropRatios.Presets)
+            {
+                // 先選一次（讓狀態行裡的按鈕選擇就定位），再給它一個大的自由框，再選一次：
+                // 這樣「比例鈕真的改到了矩形」才看得出來（否則會出現「框本來就剛好是 1:1，
+                // 所以按不按都對」那種假綠燈）。
+                CropUi.SelfTestSelectRatio(preset.Id, 5000, out string ratioDetail, lines.Enqueue);
+                CropUi.SelfTestSetRect(0.05, 0.05, 0.90, 0.90, 5000, out _, lines.Enqueue);
+                CropUi.SelfTestSelectRatio(preset.Id, 5000, out ratioDetail, lines.Enqueue);
+                string state = CropUi.SelfTestState();
+                ratioLines.Add($"{preset.Id}: {state}");
+                evidence.Line($"crop ui selftest: ratio '{preset.Id}' -> {state}");
+
+                (bool hasTarget, double target) = StateNumber(state, "ratio-target");
+                (bool hasActual, double actual) = StateNumber(state, "ratio-actual");
+                (bool hasRect, int rectW, int rectH) = StateRectPx(state);
+                string direction = hasActual ? DirectionOfRatio(actual) : "unknown";
+
+                bool ok = true;
+                string why = "";
+                if (preset.Id == CropRatios.DefaultId)
+                {
+                    // 「自由」不該改動矩形：它沒有目標比例（target=0），而且矩形就是剛剛那個 0.9×0.9
+                    // ⇒ 0.9×0.9 的框在兩種方向上都是寬的（框比圖小，兩邊都被縮到 0.9）。
+                    if (hasTarget && target != 0)
+                    {
+                        ok = false;
+                        why = $"free must not have a target ratio, got {target:0.####}";
+                    }
+                }
+                else
+                {
+                    if (!hasTarget || target <= 0)
+                    {
+                        ok = false;
+                        why = "the preset reported no target ratio";
+                    }
+                    else
+                    {
+                        // ② 數值：矩形自己的寬高比（像素）必須與回報的 target 相符。
+                        // 1 % 容差：最後一步是整數取整，半個像素在幾百 px 上是 0.1 % 等級。
+                        double rectRatio = hasRect && rectH > 0 ? (double)rectW / rectH : 0;
+                        bool rectMatches = hasRect && rectH > 0 &&
+                                           Math.Abs(rectRatio - target) / target <= 0.01;
+                        // ① 方向：由 **rect 的像素值**分類（`actual` 只是同一個東西的另一種寫法，
+                        // 兩個都驗，因為它們分開壞掉的樣子不同）。
+                        bool actualTall = actual < 1 - 0.005, actualWide = actual > 1 + 0.005;
+                        bool rectTall = rectRatio < 1 - 0.005, rectWide = rectRatio > 1 + 0.005;
+                        bool directionHolds = preset.Id switch
+                        {
+                            CropRatios.IdTall or CropRatios.IdClassicTall =>
+                                actualTall && rectTall && !actualWide && !rectWide,
+                            CropRatios.IdSquare => !actualTall && !actualWide && !rectTall && !rectWide,
+                            CropRatios.IdOriginal => true,      // 逐張：方向跟來源走，由下面的跨輪比較釘住
+                            _ => actualWide && rectWide && !actualTall && !rectTall
+                        };
+                        if (!state.Contains("ratio-ok=True", StringComparison.Ordinal) ||
+                            !rectMatches || !directionHolds || direction == "unknown")
+                        {
+                            ok = false;
+                            why = $"ratio-ok={state.Contains("ratio-ok=True", StringComparison.Ordinal)} " +
+                                  $"rectMatchesTarget={rectMatches} directionHolds={directionHolds} " +
+                                  $"actual={actual:0.####} target={target:0.####} " +
+                                  $"rect={rectW}x{rectH} direction={direction}";
+                        }
+                    }
+                }
+                perOrientation.Add((sourceOrientation, preset.Id, direction, ok));
+                // 「畫面上不可以說謊」：被選中那顆比例鈕的字必須等於**目前 ratio id 的 label**
+                // （期望值由產品自報的 RatioId ＋ LabelOf 推導，這裡不寫死任何字串）。
+                (string[] presetLabels, _, _, string shownRatioId, _, _) = CropUi.SelfTestRatioRowState();
+                string shownButtonId = CropRatios.ButtonIdOf(shownRatioId);
+                int shownIndex = Array.FindIndex(CropRatios.Presets, p => p.Id == shownButtonId);
+                string shownLabel = shownIndex >= 0 && presetLabels.Length == CropRatios.Presets.Length
+                    ? presetLabels[shownIndex] : "(no button)";
+                bool labelHonestHere = string.Equals(shownLabel, CropRatios.LabelOf(shownRatioId), StringComparison.Ordinal) &&
+                                       AllLabelsAreExpected(presetLabels);
+                evidence.Line($"crop ui selftest: ratio-button-label preset={preset.Id} " +
+                              $"selectedRatio={shownRatioId} button={shownButtonId} " +
+                              $"labelShown='{shownLabel}' labelExpected='{CropRatios.LabelOf(shownRatioId)}' " +
+                              $"labels='{string.Join("|", presetLabels)}' ok={labelHonestHere}");
+                if (!labelHonestHere) ratiosOk = false;
+                evidence.Line($"crop ui selftest: ratio-check {preset.Id} orientation={sourceOrientation} " +
+                              $"source={passW}x{passH} direction={direction} ok={ok}" +
+                              (why.Length > 0 ? $" ({why})" : "") + $" ({ratioDetail})");
+                if (!ok) ratiosOk = false;
+            }
+            return true;
+        }
+
+        // 第一輪：使用者給的來源（`--crop-source`）。夾具尺寸不寫死，方向由量到的尺寸分類。
+        RunRatioLoop("landscape/source");
+
+        // ④b **第二輪：同一顆比例、另一種方向的來源**。
+        //
+        // 這是本次真正要釘住的新性質：「比例是絕對的，不隨影像方向翻轉」。只有一輪來源的話，
+        // 一個「依來源翻轉」的實作（例如 16:9 在直式來源上變成直的）照樣全綠——因為沒有任何一格
+        // 比對過兩種來源。第二輪的來源是**來源自己轉 90 度**的副本（真檔案、真解碼），
+        // 所以「直式來源」不是自測嘴上說的，是量出來的。
+        string rotatedPath = "";
+        string rotateDetail = "(not run)";
+        bool portraitRun = false;
+        try
+        {
+            if (!TryCreateRotatedCopy(source, out rotatedPath, out rotateDetail))
+            {
+                evidence.Line($"crop ui selftest: rotation pass SKIPPED ({rotateDetail})");
+                ratiosOk = false;
+            }
+            else
+            {
+                evidence.Line($"crop ui selftest: rotation pass fixture: {rotateDetail}");
+                CropUi.Close();
+                bool closedForRotation = WaitFor(() => !CropUi.IsOpen, 5000);
+                string[] rotatedBatch = { rotatedPath };
+                CropUi.Open(rotatedBatch, _ => { }, lines.Enqueue);
+                bool rotatedOpen = WaitFor(() => CropUi.IsOpen, 8000) && CropUi.SelfTestWindowPresent(3000, out _, lines.Enqueue);
+                (int rotW, int rotH) = CropUi.SelfTestImageSizePx();
+                evidence.Line($"crop ui selftest: reopen on the rotated source: " +
+                              $"closedFirst={closedForRotation} opened={rotatedOpen} image={rotW}x{rotH} " +
+                              $"orientation={OrientationOfSource(rotW, rotH)}");
+                if (!closedForRotation || !rotatedOpen)
+                {
+                    ratiosOk = false;
+                }
+                else
+                {
+                    RunRatioLoop("rotated/source");
+                    portraitRun = true;
+                }
+                // 回到使用者原本那一張：下面 ⑤ 之後的每一格（全圖拒絕、確認、再開、取消）都以
+                // 「開窗時矩形＝整張圖」為前提，而那個前提只有在這裡重新開一次之後才成立。
+                CropUi.Close();
+                bool closedAfterRotation = WaitFor(() => !CropUi.IsOpen, 5000);
+                CropUi.Open(batch, spec => confirmed = spec, lines.Enqueue);
+                bool reopenedOriginal = WaitFor(() => CropUi.IsOpen, 8000) &&
+                                        CropUi.SelfTestWindowPresent(3000, out _, lines.Enqueue);
+                (int backW, int backH) = CropUi.SelfTestImageSizePx();
+                evidence.Line($"crop ui selftest: reopened the original source after the rotation pass: " +
+                              $"closed={closedAfterRotation} reopened={reopenedOriginal} " +
+                              $"image={backW}x{backH}");
+                if (!closedAfterRotation || !reopenedOriginal) ratiosOk = false;
+            }
+        }
+        finally
+        {
+            // 自測造出來的檔案自己收拾：留下來會在使用者的暫存目錄裡慢慢累積，
+            // 而且它們看起來像真正的照片（見本專案對「殘檔」的紀律）。
+            if (rotatedPath.Length > 0)
+            {
+                try { if (File.Exists(rotatedPath)) File.Delete(rotatedPath); }
+                catch (Exception ex) { lines.Enqueue($"crop ui selftest: could not delete {rotatedPath} ({ex.GetType().Name})"); }
+            }
+        }
+
+        // ④c 兩個方向的一致性（跨輪比較，**只看產品自報的方向**）：
+        //   ① 同一顆比例在兩種來源上必須給出**同一個方向**（1:1 一律 square）；
+        //   ② 兩個直式 id 必須比它們的橫式版**相反**（9:16 是 tall 而 16:9 是 wide）——
+        //      這一條抓的是「兩個 id 其實回同一個值」；
+        //   ③ 兩個 id 的 target 必須**不同**（同上，但看數字）；
+        //   ④ 「原比例」逐張：兩種來源上的方向必須不同（它就是同一張照片的比例）；
+        //      而 `original-flipped` 在兩種來源上也必須不同（而且與 original 相反）。
+        var orientationDetail = new List<string>();
+        bool orientationOk = portraitRun;
         foreach (CropRatioPreset preset in CropRatios.Presets)
         {
-            CropUi.SelfTestSelectRatio(preset.Id, 5000, out string ratioDetail, lines.Enqueue);
-            // 先給它一個大的自由框，再按比例鈕：這樣「比例鈕真的改到了矩形」才看得出來
-            // （否則會出現「框本來就剛好是 1:1，所以按不按都對」那種假綠燈）。
-            CropUi.SelfTestSetRect(0.05, 0.05, 0.90, 0.90, 5000, out _, lines.Enqueue);
-            CropUi.SelfTestSelectRatio(preset.Id, 5000, out ratioDetail, lines.Enqueue);
-            string state = CropUi.SelfTestState();
-            ratioResults.Add($"{preset.Id}: {state}");
-            evidence.Line($"crop ui selftest: ratio '{preset.Id}' -> {state}");
-            // 「自由」不該改動矩形；其餘的比例必須讓矩形的比例接近目標值。
-            // 容差 1 %：換算的最後一步是取整（見 CropMath 的邊界取整），最多差半個像素。
-            if (preset.Id != CropRatios.DefaultId && !state.Contains("ratio-ok=True", StringComparison.Ordinal))
-                ratiosOk = false;
+            var pair = perOrientation.Where(p => p.PresetId == preset.Id).ToList();
+            if (pair.Count != 2)
+            {
+                orientationOk = false;
+                orientationDetail.Add($"{preset.Id}: expected two passes, got {pair.Count}");
+                continue;
+            }
+            string a = pair[0].Direction, b = pair[1].Direction;
+            string sources = $"{pair[0].Orientation}/{pair[1].Orientation}";
+            // 「原比例」刻意逐張 ⇒ 方向跟來源走，在兩種來源上**就該不同**（正方形來源除外）。
+            // 「自由」沒有任何目標比例 ⇒ 它沒有方向可言（方向全部來自使用者拖的那個框），
+            // 所以它也不受「同一顆比例在兩種來源上同方向」這條規則約束——把它算進去會讓
+            // 這一格紅在一件正確的事情上，而那種紅比不驗更糟（它教人忽略這一格）。
+            bool directionIsFixed = preset.Id != CropRatios.IdFree && preset.Id != CropRatios.IdOriginal;
+            bool sameDirectionOk = !directionIsFixed
+                ? (pair[0].Orientation == "square" || pair[1].Orientation == "square" || a != b)
+                : string.Equals(a, b, StringComparison.Ordinal);
+            orientationDetail.Add($"{preset.Id}({sources}) {a}/{b} " +
+                                  $"fixedDirection={directionIsFixed} " +
+                                  $"same={string.Equals(a, b, StringComparison.Ordinal)} ok={sameDirectionOk}");
+            if (!sameDirectionOk) orientationOk = false;
         }
+        // 直式 id 與它的橫式版必須是**相反**的兩種方向。
+        foreach ((string tallId, string wideId) in
+                 new[] { (CropRatios.IdTall, CropRatios.IdWide),
+                         (CropRatios.IdClassicTall, CropRatios.IdClassic),
+                         (CropRatios.IdOriginalFlipped, CropRatios.IdOriginal) })
+        {
+            (bool tallHas, double tallTarget) = CropRatios.TargetRatio(tallId, 1234, 5678) is { } tt
+                ? (true, tt) : (false, 0);
+            (bool wideHas, double wideTarget) = CropRatios.TargetRatio(wideId, 1234, 5678) is { } wt
+                ? (true, wt) : (false, 0);
+            bool opposite = tallHas && wideHas && Math.Abs(tallTarget * wideTarget - 1.0) < 1e-9 &&
+                            Math.Abs(tallTarget - wideTarget) > 1e-6;
+            orientationDetail.Add($"pair {tallId}={tallTarget:0.######} vs {wideId}={wideTarget:0.######} " +
+                                  $"reciprocalAndDistinct={opposite}");
+            if (!opposite) orientationOk = false;
+        }
+        evidence.Line($"crop ui selftest: ratio orientation matrix (same preset, two source orientations): " +
+                      string.Join(" ; ", orientationDetail));
+        evidence.Line($"crop ui selftest: ratio orientation ok={orientationOk} portraitPassRan={portraitRun}");
+        if (!orientationOk) ratiosOk = false;
+
+        // ④d 方向鈕（2026-10-07 的設計）：把目前的比例在它的兩個方向之間切換。
+        // 釘住四件事：①自由／1:1 **停用**（沒有方向可翻）、其餘**可用**；
+        // ②切一次真的換成 counterpart（id 與方向都變，而且兩者不同）；
+        // ③切兩次回到原狀（可逆）；④**畫面上不可以說謊**——被選中那顆比例鈕的字
+        //   必須等於目前 ratio id 的 label（期望值由產品自報的 RatioId 推導）。
+        bool directionOk = true;
+        // 每一種選中的比例量到的「方向鈕標籤／寬度」與提示文字都記在這裡，迴圈結束後比對是否一致。
+        var geometryByPreset = new Dictionary<string, string>(StringComparer.Ordinal);
+        var geometryTips = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (CropRatioPreset preset in CropRatios.Presets)
+        {
+            CropUi.SelfTestSelectRatio(preset.Id, 5000, out _, lines.Enqueue);
+            CropUi.SelfTestSetRect(0.05, 0.05, 0.90, 0.90, 5000, out _, lines.Enqueue);
+            CropUi.SelfTestSelectRatio(preset.Id, 5000, out _, lines.Enqueue);
+            string before = CropUi.SelfTestState();
+            (bool bHasTarget, double bTarget) = StateNumber(before, "ratio-target");
+            (bool bHasActual, double bActual) = StateNumber(before, "ratio-actual");
+            string? expectedCounterpart = CropRatios.Counterpart(preset.Id);
+            (string[] labelsBefore, string dirTextBefore, bool dirEnabled, string ratioIdBefore, int w, int h) =
+                CropUi.SelfTestRatioRowState();
+            bool pressed = CropUi.SelfTestToggleDirection(5000, out string toggleDetail, lines.Enqueue);
+            string after = CropUi.SelfTestState();
+            (bool aHasTarget, double aTarget) = StateNumber(after, "ratio-target");
+            (bool aHasActual, double aActual) = StateNumber(after, "ratio-actual");
+            (string[] labelsAfter, string dirTextAfter, bool dirEnabledAfter, string ratioIdAfter, _, _) =
+                CropUi.SelfTestRatioRowState();
+            bool pressedAgain = CropUi.SelfTestToggleDirection(5000, out string toggleBackDetail, lines.Enqueue);
+            (string[] labelsBack, _, _, string ratioIdBack, _, _) = CropUi.SelfTestRatioRowState();
+
+            // ④「畫面上不可以說謊」：選中那顆鈕的字＝目前 id 的 label。兩個方向都驗。
+            string selectedLabelAfter = CropRatios.ButtonIdOf(ratioIdAfter) is { } bia &&
+                                        labelsAfter.Length == CropRatios.Presets.Length
+                ? labelsAfter[Array.FindIndex(CropRatios.Presets, p => p.Id == bia)]
+                : "(no button)";
+            bool labelHonest = expectedCounterpart == null ||
+                               (string.Equals(selectedLabelAfter, CropRatios.LabelOf(ratioIdAfter), StringComparison.Ordinal) &&
+                                string.Equals(CropRatios.LabelOf(ratioIdAfter), CropRatios.LabelOf(expectedCounterpart), StringComparison.Ordinal));
+            bool labelHonestBack = labelsBack.Length == CropRatios.Presets.Length &&
+                                   string.Equals(labelsBack[Array.FindIndex(CropRatios.Presets,
+                                                       p => p.Id == CropRatios.ButtonIdOf(ratioIdBack))],
+                                                 CropRatios.LabelOf(ratioIdBack), StringComparison.Ordinal);
+            // ②切一次：id 換成 counterpart，而且**兩個方向真的不同**。
+            bool switched = expectedCounterpart is { } want &&
+                            string.Equals(ratioIdAfter, want, StringComparison.Ordinal) &&
+                            string.Equals(ratioIdBefore, preset.Id, StringComparison.Ordinal) &&
+                            aHasActual && DirectionOfRatio(aActual) != DirectionOfRatio(bActual);
+            bool targetsFlipped = aHasTarget && bHasTarget && Math.Abs(aTarget * bTarget - 1.0) < 1e-6;
+            // ③切兩次回到原狀。
+            bool reversible = pressedAgain && string.Equals(ratioIdBack, preset.Id, StringComparison.Ordinal);
+            // ①停用／可用。
+            bool enabledAsExpected = expectedCounterpart == null ? !dirEnabled : dirEnabled;
+            // ⑤ **方向鈕的標籤**（2026-10-07 修正）。先前這裡要求「切換鈕的字含有目前形式的 label」，
+            //    那正是外部視覺模型把停用時的字讀成**第六個比例選項**的原因（字裡真的有一個比例名）。
+            //    現在的契約剛好相反：標籤**永遠不含任何比例名**，只說方向，而且停用時是一個常數。
+            (bool rectFound, int rectW, int rectH) = StateRectPx(before);
+            string rectDirection = rectW > rectH ? "wide" : "tall";
+            bool labelIsVocabulary = Array.IndexOf(CropWindow.DirectionLabelVocabulary, dirTextBefore) >= 0;
+            // 「不含任何比例名」用**產品自己的標籤字彙**來檢查（CropRatios.All 的每一個 label），
+            // 而不是只挑幾顆按鈕：`9:16`／`原比例 90°` 這些沒有按鈕的 id 也算比例名。
+            bool labelHasNoRatioName = true;
+            foreach (CropRatioPreset anyPreset in CropRatios.All)
+                if (dirTextBefore.Contains(anyPreset.Label, StringComparison.Ordinal) ||
+                    dirTextAfter.Contains(anyPreset.Label, StringComparison.Ordinal))
+                    labelHasNoRatioName = false;
+            // 停用時：**短而固定的標籤**，而且它必須**不等於任何一顆比例鈕的字**——這一條直接擋掉
+            // 「被讀成比例鈕」那個缺陷。原因住在 ToolTip（不佔寬度的媒介），而且一定要有。
+            bool disabledLabelOk = expectedCounterpart != null ||
+                                   (string.Equals(dirTextBefore, CropWindow.DirectionLabelDisabled, StringComparison.Ordinal) &&
+                                    labelHasNoRatioName &&
+                                    !Array.Exists(labelsBefore, l => string.Equals(l, dirTextBefore, StringComparison.Ordinal)));
+            // 可用時：標籤＝`方向：` ＋ **矩形量出來的方向**（橫式／直式）。期望值來自矩形的實際像素，
+            // 不是寫死的字串，所以「標籤說橫式、矩形其實是直的」會紅。
+            bool enabledLabelOk = expectedCounterpart == null ||
+                                  (string.Equals(dirTextBefore, CropWindow.DirectionLabelPrefix +
+                                                                 (rectDirection == "wide"
+                                                                      ? CropWindow.DirectionWide
+                                                                      : CropWindow.DirectionTall),
+                                                  StringComparison.Ordinal) &&
+                                   labelHasNoRatioName);
+            // ⚠ WPF **預設不對停用的控制項顯示 ToolTip**，而這顆鈕「為什麼不能按」的原因**只**放在
+            //    ToolTip 裡 ⇒ 不開 `ShowOnDisabled`，那個原因就寫在使用者永遠看不到的地方，
+            //    「不是靜默無效」會變成假的（2026-10-07：外部視覺模型看 dump PNG 時指出「變灰但
+            //    畫面上完全沒有提示為什麼」，查證後 WPF 預設行為確實如此）。
+            bool tipShownOnDisabled = CropUi.SelfTestDirectionToolTipShownWhenDisabled();
+            bool dirLabelOk = labelIsVocabulary && disabledLabelOk && enabledLabelOk && tipShownOnDisabled &&
+                              dirTextBefore.Length > 0 && dirTextAfter.Length > 0;
+            // ⚠ 寬度用**配置值**（`Width`）而不是 `ActualWidth`：實測發現第一次排版前 `ActualWidth`
+            //    會是 0（同一顆鈕在下一個預設就量到 96），那是**量測時機**而不是寬度不穩定。
+            //    「與選中的預設無關」講的是這顆鈕被要求多寬，而配置值是常數、不受排版時機影響。
+            //    實際配置到的寬度另外記在幾何行裡（`actual=`），讓「有沒有被排版過」看得見。
+            double dirButtonWidth = CropUi.SelfTestDirectionButtonWidthConfigured();
+            bool dirWidthOk = Math.Abs(dirButtonWidth - CropWindow.DirectionButtonWidth) < 0.5;
+            // 每一顆預設（＝每一種選中的比例）量到的標籤與寬度都記下來，迴圈結束後比對。
+            geometryByPreset[preset.Id] = $"{dirTextBefore}|w={dirButtonWidth:0.###}" +
+                                          $"|actual={CropUi.SelfTestDirectionButtonWidth():0.###}";
+            geometryTips[preset.Id] = CropUi.SelfTestDirectionButtonToolTip();
+            bool toggleOk = enabledAsExpected && (expectedCounterpart == null
+                        ? (!pressed && !pressedAgain && string.Equals(ratioIdAfter, preset.Id, StringComparison.Ordinal) &&
+                           labelHonestBack)
+                        : (switched && targetsFlipped && reversible && labelHonest && labelHonestBack)) &&
+                      dirLabelOk && dirWidthOk && dirEnabled == dirEnabledAfter;
+            evidence.Line($"crop ui selftest: direction-toggle {preset.Id} source={w}x{h} " +
+                          $"before={ratioIdBefore} after={ratioIdAfter} back={ratioIdBack} " +
+                          $"targetBefore={bTarget:0.########} targetAfter={aTarget:0.########} " +
+                          $"targetProduct={(bHasTarget && aHasTarget ? bTarget * aTarget : 0):0.########} " +
+                          $"hasTarget={(bHasTarget && aHasTarget)} " +
+                          $"directionBefore={DirectionOfRatio(bActual)} directionAfter={DirectionOfRatio(aActual)} " +
+                          $"labelsBefore='{string.Join("|", labelsBefore)}' labelsAfter='{string.Join("|", labelsAfter)}' " +
+                          $"selectedLabel='{selectedLabelAfter}' expectedLabel='{CropRatios.LabelOf(ratioIdAfter)}' " +
+                          $"dirTextBefore='{dirTextBefore}' dirTextAfter='{dirTextAfter}' " +
+                          $"rectDirection={rectDirection} labelInVocabulary={labelIsVocabulary} " +
+                          $"labelHasNoRatioName={labelHasNoRatioName} disabledLabelOk={disabledLabelOk} " +
+                          $"enabledLabelOk={enabledLabelOk} dirLabelOk={dirLabelOk} " +
+                          $"dirButtonWidth={dirButtonWidth:0.###} " +
+                          $"dirButtonWidthActual={CropUi.SelfTestDirectionButtonWidth():0.###} " +
+                          $"dirTipChars={CropUi.SelfTestDirectionButtonToolTip().Length} " +
+                          $"tipOnDisabled={tipShownOnDisabled} " +
+                          $"enabled={dirEnabled} enabledAfter={dirEnabledAfter} pressed={pressed} " +
+                          $"pressedAgain={pressedAgain} switched={switched} targetsFlipped={targetsFlipped} " +
+                          $"reversible={reversible} labelHonest={labelHonest} labelHonestBack={labelHonestBack} " +
+                          $"ok={toggleOk} ({toggleDetail}) ({toggleBackDetail})");
+            if (!toggleOk) directionOk = false;
+        }
+
+        // ④d-2 那一列的**幾何穩定性**：方向鈕的標籤與寬度必須與「選中的是哪一個預設」無關。
+        // 先前停用時的字是 `{比例}（沒有方向可翻）`、啟用時是 `{比例} → {另一比例}`——兩種狀態的字長
+        // 差很多，而字長會改變按鈕的自然寬，所以整列寬度會隨著選中的比例跳動（外部視覺模型獨立看
+        // dump PNG 時也指出那顆鈕「比其他比例鈕寬一截」）。這一塊把「寬度與標籤都不隨預設變動」變成
+        // 一個可斷言的布林值：逐一在五個預設下量，全部必須相同。
+        // 值的格式是 `{標籤}|w={配置寬}|actual={實際寬}`（見下面每個預設的寫入處）。
+        // ⚠ **標籤本來就該隨方向變**（`方向：橫式` / `方向：直式`），所以「幾何穩定」只比對 `|`
+        //    之後的寬度部分。早先這裡拿整串比對，等於要求標籤在五個預設下都相同——那是把
+        //    **正確的行為判成紅**（2026-10-07：產品行為正確、斷言寫錯，害 m3d S18.15/S18.20 假紅）。
+        //    「標籤與寬度都不隨預設變動」拆成兩件事：寬度看這裡，標籤看下面的 disabledLabelIsOneValue
+        //    （停用時只准有一個值）＋每個預設自己的 labelIsVocabulary／labelHasNoRatioName。
+        static string GeometryPart(string value)
+        {
+            int bar = value.IndexOf('|');
+            return bar < 0 ? value : value.Substring(bar);
+        }
+        var distinctGeometry = new HashSet<string>(
+            geometryByPreset.Values.Select(GeometryPart), StringComparer.Ordinal);
+        bool geometryStable = geometryByPreset.Count == CropRatios.Presets.Length && distinctGeometry.Count == 1;
+        // 停用時的字**只能有一個值**：`free` 與 `1:1` 是不同的預設，但它們的停用標籤必須完全相同
+        // （先前一個是 `自由（沒有方向可翻）`、另一個是 `1:1（沒有方向可翻）`——同一個狀態卻兩種字）。
+        var disabledLabels = new HashSet<string>(StringComparer.Ordinal);
+        var enabledLabels = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CropRatioPreset p in CropRatios.Presets)
+        {
+            if (!geometryByPreset.TryGetValue(p.Id, out string? geometry)) continue;
+            // ⚠ 分隔符是 `|`，不是 `/`。早先這裡寫 `Split('/')`，取到的是**整串**
+            //    `方向|w=96|actual=96`，於是跟 `DirectionLabelDisabled`（`方向`）永遠不相等，
+            //    讓 `disabledLabelIsOneValue` 恆為 false（產品行為其實完全正確，2026-10-07）。
+            string label = geometry.Split('|')[0];
+            if (CropRatios.Counterpart(p.Id) == null) disabledLabels.Add(label);
+            else enabledLabels.Add(label);
+        }
+        bool disabledLabelIsOneValue = disabledLabels.Count == 1 &&
+                                       string.Equals(disabledLabels.First(), CropWindow.DirectionLabelDisabled,
+                                                     StringComparison.Ordinal) &&
+                                       !enabledLabels.Contains(CropWindow.DirectionLabelDisabled);
+        evidence.Line($"crop ui selftest: direction-button-geometry presets={geometryByPreset.Count} " +
+                      $"distinct={distinctGeometry.Count} disabledLabels={disabledLabels.Count} " +
+                      $"enabledLabels={enabledLabels.Count} disabledLabelIsOneValue={disabledLabelIsOneValue} " +
+                      $"geometryStable={geometryStable} " +
+                      string.Join(" ; ", geometryByPreset.Select(kv => $"{kv.Key}={kv.Value}")));
+        evidence.Line($"crop ui selftest: direction button geometry stable={geometryStable && disabledLabelIsOneValue}");
+        if (!(geometryStable && disabledLabelIsOneValue)) directionOk = false;
+
+        evidence.Line($"crop ui selftest: direction toggle ok={directionOk}");
+        if (!directionOk) ratiosOk = false;
+
+        // ④e 比例列的幾何：**五顆比例鈕 ＋ 一顆方向鈕**還放得下嗎？
+        // 「沒有捲軸」不足以回答它——StackPanel 不會生捲軸，它把放不下的東西**裁掉**。
+        // 所以由視窗自己報「最右緣 vs 這一列被配置到的寬度」，腳本不量像素。
+        (double rowWidthPx, double rowConstraintPx, double rowMaxRightPx, int rowChildren,
+         double windowWidthPx, bool rowFits) = CropUi.SelfTestRatioRowMetrics();
+        bool rowLayoutOk = rowFits && rowChildren == CropRatios.Presets.Length + 3 && rowWidthPx > 0;
+        evidence.Line($"crop ui selftest: ratio-button-row children={rowChildren} " +
+                      $"(presets={CropRatios.Presets.Length} + label + direction + hint) " +
+                      $"rowWidth={rowWidthPx:0.##} constraint={rowConstraintPx:0.##} " +
+                      $"maxChildRight={rowMaxRightPx:0.##} windowWidth={windowWidthPx:0.##} " +
+                      $"contentWidth={windowWidthPx - 40:0.##} fits={rowFits} ok={rowLayoutOk}");
+        if (!rowLayoutOk) ratiosOk = false;
 
         // ⑤ 退化輸入之一：整張圖 → **當場拒絕**並顯示提示（不可以帶著它去寫檔）。
         // 這一格的關鍵是「拒絕之後視窗還開著、而且沒有東西被交回去」——只看「有沒有印出拒絕」
@@ -3294,13 +3695,122 @@ internal static class App
                       $"confirmedClosed={closed} confirmedMatches={handedOverMatches} " +
                       $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing} " +
                       $"reopened={reopened} reopenedPresent={reopenedPresent})");
-        evidence.Line("crop ui selftest: ratio states: " + string.Join(" ; ", ratioResults));
+        evidence.Line("crop ui selftest: ratio states: " + string.Join(" ; ", ratioLines));
         return ok ? 0 : 1;
     }
 
-    /// <summary>有界等待（自測用）。回傳「時間內變成 true」。</summary>
-    private static bool WaitFor(Func<bool> condition, int timeoutMs)
+    /// <summary>
+    /// 比例列上的每一顆鈕都寫著「某一個正規比例的 label」嗎？
+    ///
+    /// 這一條補的是「標籤變成空字串／變成按鈕 id／變成任何不在清單裡的東西」——
+    /// 只比對**被選中那一顆**的話，其餘四顆壞掉（例如被清成空白）沒有任何一格看得見。
+    /// 期望值仍然只有一個來源：<see cref="CropRatios.All"/> 的 label。
+    /// </summary>
+    private static bool AllLabelsAreExpected(string[] labels)
     {
+        if (labels.Length != CropRatios.Presets.Length) return false;
+        var allowed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CropRatioPreset preset in CropRatios.All) allowed.Add(preset.Label);
+        foreach (string label in labels)
+            if (!allowed.Contains(label)) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// 從自測狀態行裡刮出一個 <c>name=value</c>（找不到回 <c>(false, 0)</c>）。
+    /// 這是**讀產品自己報的數字**，不是自己再算一次：狀態行由 <see cref="CropWindow.SelfTestState"/>
+    /// 產生，而它裡面的 <c>ratio-target</c>／<c>ratio-actual</c> 就是引擎那一格用的同一組值。
+    /// 在自測裡自己算一次比例會變成第二份規則——它與產品不一致時，那一格會紅在測試的算式上。
+    /// </summary>
+    private static (bool Found, double Value) StateNumber(string state, string name)
+    {
+        // ⚠ 尾巴的 `(?![0-9A-Za-z_-])` 不是裝飾：狀態行裡同時有 `ratio-target=…` 與
+        // `ratio-target-ok=…`，少了這一段界線，`ratio-target` 會**先**命中後面那一個欄位，
+        // 於是每一次都讀到 0（實測就是這樣：`targetsFlipped` 全紅、而產品的值其實是對的）。
+        var match = System.Text.RegularExpressions.Regex.Match(
+            state, System.Text.RegularExpressions.Regex.Escape(name) + @"=(-?[0-9]+(?:\.[0-9]+)?)(?![0-9A-Za-z_-])",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!match.Success) return (false, 0);
+        return (true, double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// 從自測狀態行裡刮出矩形（影像像素）<c>rect=x,y,w,h</c>。找不到回 <c>(false, 0, 0)</c>。
+    /// 用它而不是 <see cref="CropUi.SelfTestRectPx"/> 是因為狀態行與那一組數字是**同一次讀取**
+    /// （兩次讀取之間矩形可能被別的東西改動，那一格就會紅在時序上）。
+    /// </summary>
+    private static (bool Found, int Width, int Height) StateRectPx(string state)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            state, @"rect=(-?\d+),(-?\d+),(\d+),(\d+)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!match.Success) return (false, 0, 0);
+        return (true,
+                int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture),
+                int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// 「來源是直式還是橫式」——由**量到的尺寸**分類，不是由參數決定。
+    /// 這一格的全部意義是「同一顆比例在兩種來源上方向一致」，所以來源自己的方向必須是**量出來的**
+    /// （寫死的來源尺寸正是本專案假綠兩次的原因）。
+    /// </summary>
+    private static string OrientationOfSource(int width, int height) =>
+        width > 0 && height > 0 ? (width > height ? "landscape" : width < height ? "portrait" : "square")
+                                : "unknown";
+
+    /// <summary>
+    /// 一個比例在畫面座標上的**方向類別**：高 &gt; 寬＝直、寬 &gt; 高＝橫、其餘＝方。
+    /// 用類別而不是數字，是因為要斷言的性質是「它朝著哪一邊」；數值本身由
+    /// <c>ratio-target</c>／<c>rect</c> 那兩條斷言釘住（見 ④ 的說明）。
+    /// </summary>
+    private static string DirectionOfRatio(double ratio)
+    {
+        const double epsilon = 0.005;      // 1:1 只可能來自一個被取整過的像素框，容忍半個像素的抖動
+        if (ratio > 1 + epsilon) return "wide";
+        if (ratio < 1 - epsilon) return "tall";
+        return "square";
+    }
+
+    /// <summary>
+    /// 造一張「來源轉 90 度」的副本（**只為了自測的比例迴圈**）。
+    ///
+    /// 為什麼要真的產生一張圖而不是「假裝尺寸換過來」：比例迴圈走的是**真視窗、真解碼**
+    /// （<see cref="CropUi.Open"/> → <c>ConversionEngine.DecodeFirstFrame</c>），而視窗報的
+    /// 影像尺寸來自那個解碼結果。自測若自己去改一個尺寸變數，驗到的就是那個變數，不是產品。
+    /// 用 PNG（無損）且不帶 EXIF：這一格要驗的是方向，不該被重新編碼或 EXIF 的變數干擾。
+    /// 輸出落在系統暫存目錄，**呼叫端負責刪掉**；不碰來源、也不碰使用者的任何設定。
+    /// </summary>
+    private static bool TryCreateRotatedCopy(string source, out string path, out string detail)
+    {
+        path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                      $"{ProductInfo.Slug}-selftest-rotated-{Guid.NewGuid():N}.png");
+        detail = "(not run)";
+        try
+        {
+            (System.Windows.Media.Imaging.BitmapSource frame, _) = ConversionEngine.DecodeFirstFrame(source);
+            int orientation = ConversionEngine.ReadOrientation(frame);
+            if (orientation >= 2) frame = ConversionEngine.ApplyOrientation(frame, orientation);
+            int beforeW = frame.PixelWidth, beforeH = frame.PixelHeight;
+            var rotated = new System.Windows.Media.Imaging.TransformedBitmap(
+                frame, new System.Windows.Media.RotateTransform(90));
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rotated));
+            using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+                encoder.Save(stream);
+            detail = $"{System.IO.Path.GetFileName(source)} {beforeW}x{beforeH} + 90 deg -> " +
+                     $"{rotated.PixelWidth}x{rotated.PixelHeight} (EXIF={orientation}) at {path}";
+            return File.Exists(path);
+        }
+        catch (Exception ex)
+        {
+            detail = $"could not build the rotated copy ({ex.GetType().Name}: {ex.Message})";
+            return false;
+        }
+    }
+
+    /// <summary>有界等待（自測用）。回傳「時間內變成 true」。</summary>
+    private static bool WaitFor(Func<bool> condition, int timeoutMs)    {
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
