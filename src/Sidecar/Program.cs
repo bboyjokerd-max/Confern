@@ -619,10 +619,14 @@ internal sealed class Options
     /// （見 `fixtures/pdf/README.md`），而這一條把那個序列印成**固定、可被 regex 反解**的格式：
     ///
     /// <code>
-    /// merge-pdf inspect: file=&lt;name&gt; pages=&lt;N&gt; ok=True
     /// merge-pdf inspect: page=&lt;n&gt; size=&lt;w&gt;x&lt;h&gt; rotate=&lt;deg&gt; contents=&lt;bytes&gt; sha=&lt;12 hex&gt;
-    /// merge-pdf inspect done: file=&lt;name&gt; pages=&lt;N&gt; ok=True
+    /// merge-pdf inspect: file=&lt;name&gt; pages=&lt;N&gt; read=&lt;N&gt; ok=True
+    /// merge-pdf inspect done: file=&lt;name&gt; pages=&lt;N&gt; read=&lt;N&gt; ok=True
     /// </code>
+    ///
+    /// ⚠ `pages=` 是文件**自己宣稱**的頁數（`PageCount`），`read=` 是**真的唸完**的頁數——
+    /// 兩者只有全部成功時才相等。分開印是因為它們會在壞檔上不一致，而那個不一致正是
+    /// #388 的形狀（見 <see cref="MergePdfInspectPdf"/> 內的說明）。
     ///
     /// ⚠ 尺寸印**一個小數位**（`Point` 的原始值是 double；`XUnit.FromPoint(200).Point` 可能是
     /// 199.99999…）。四捨五入到小數一位讓 fixture 的期望值可以寫成人看得懂的数字，
@@ -2304,8 +2308,16 @@ internal static class App
             using PdfSharp.Pdf.PdfDocument doc =
                 PdfSharp.Pdf.IO.PdfReader.Open(LongPath.Prepare(path),
                                                PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
-            evidence.Line($"merge-pdf inspect: file={name} pages={doc.PageCount} ok=True");
-            for (int i = 0; i < doc.PageCount; i++)
+            int declared = doc.PageCount;
+            int read = 0;
+            // ⚠ **`ok=True` 不可以印在讀完每一頁之前。**
+            // 2026-10-07 實測：`fx-broken-page-tree.pdf` 的 `PageCount` 說 1，而
+            // `doc.Pages[0]` 會丟 NullReferenceException——那正是 #388 的形狀
+            // （**開得起來、碰到頁面才炸**）。先印 `pages=1 ok=True` 會讓那一行看起來像
+            // 「這是一份好好的 1 頁文件」，而下一個讀者（人或套件）就會拿一個假的事實去比對。
+            // 所以順序改成：先把每一頁唸完（`read` 逐頁增加），**全部唸完才**宣告成功。
+            // 失敗那一行帶 `read=<n>`，讓「唸了幾頁才炸」是一個看得到的事實。
+            for (int i = 0; i < declared; i++)
             {
                 PdfSharp.Pdf.PdfPage page = doc.Pages[i];
                 byte[] contents = PageContentBytes(page);
@@ -2321,14 +2333,16 @@ internal static class App
                 evidence.Line($"merge-pdf inspect: page={i + 1} " +
                               $"size={page.Width.Point:0.#}x{page.Height.Point:0.#} " +
                               $"rotate={page.Rotate} contents={contents.Length} sha={sha}");
+                read++;
             }
-            evidence.Line($"merge-pdf inspect done: file={name} pages={doc.PageCount} ok=True");
+            evidence.Line($"merge-pdf inspect: file={name} pages={declared} read={read} ok=True");
+            evidence.Line($"merge-pdf inspect done: file={name} pages={declared} read={read} ok=True");
             return 0;
         }
         catch (Exception ex)
         {
             evidence.Line($"merge-pdf inspect: file={name} failed {ex.GetType().Name}: {ex.Message}");
-            evidence.Line($"merge-pdf inspect done: file={name} pages=0 ok=False");
+            evidence.Line($"merge-pdf inspect done: file={name} pages=0 read=0 ok=False");
             return 3;
         }
     }
@@ -2435,6 +2449,17 @@ internal static class App
                           $"line='{snapshot.Line}'");
             foreach (string failure in snapshot.Failures)
                 evidence.Line($"merge-pdf failure: {failure}");
+            // 「為什麼」＝ stage 與真正的例外型別。它**不是**使用者訊息的一部分（那一句刻意
+            // 只說「無法合併這個 PDF」），但使用者 2026-10-07 的裁定是「明確說出是哪個檔、
+            // **為什麼**」，所以它必須是一條驗收讀得到的行——只在 worker 日誌裡不算數
+            // （診斷的 stdout 才是斷言對象）。
+            //
+            // ⚠ **只在失敗時印**（2026-10-07 實測踩到）：成功的結果也會帶 `Detail`（那是
+            // 「3 file(s), 6 page(s), 4461B in 148 ms -> …」這種摘要），所以不加條件的話
+            // 成功的那一輪也會印一行 `merge-pdf why:`，而它的內容與「為什麼失敗」無關。
+            // 那會讓驗收拿一個假的事實去比對（而且它看起來完全合理）。
+            if (snapshot.Failed > 0 && snapshot.LastDetail != null)
+                evidence.Line($"merge-pdf why: {snapshot.LastDetail}");
 
             // 輸出檔名取自**跑完之後在來源資料夾裡找到的那一個新檔**（見 LatestMergeOutputOf：
             // 它不自己組名字，因為命名規則只有 NamingPolicy 一份）。套件會拿這一個路徑

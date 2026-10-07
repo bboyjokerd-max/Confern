@@ -28,6 +28,21 @@ internal sealed record ConversionSnapshot(int Done, int Total, string? Current, 
     /// </summary>
     public string? QrText { get; init; }
 
+    /// <summary>
+    /// 最後一個結果的**詳細原因**（`WorkerMessage.detail`，2026-10-07 隨工具 `merge-pdf` 進快照）。
+    ///
+    /// **為什麼需要它**：`Failures` 裡放的是規格 §7.1 的**使用者訊息**（`fx-broken.pdf（第 2 個檔）
+    /// 無法合併這個 PDF`）——那是一句給人看的話，而它刻意不含 stage 與例外型別。診斷要斷言的是
+    /// 「明確說出是哪個檔、**為什麼**」（使用者 2026-10-07 的原話），而「為什麼」＝
+    /// `stage AddPage (page 1/1): NullReferenceException: ...` 這一串，它**原本只寫在 worker 的
+    /// 日誌裡，過不了管道**（實測：`--merge-pdf` 的日誌看不到它）。
+    /// 少了它，驗收就只能憑「訊息裡有檔名」推論失敗原因，那正是「只相信 ok=True」的另一種寫法。
+    ///
+    /// 缺席語意與 <see cref="QrText"/> 一對一：`null` ＝「這個結果沒有詳細原因」，
+    /// 其餘每一個 op 的行為都不變。
+    /// </summary>
+    public string? LastDetail { get; init; }
+
     public bool Running => !Finished;
 
     /// <summary>輪盤收起處顯示的**那一行**（規格 §4.4／§7.3）。</summary>
@@ -180,7 +195,8 @@ internal sealed class ConversionClient : IDisposable
                                                    "轉檔服務中斷", current.FailureFiles)
                 {
                     // 管道在 summary 之前就斷了也要留住已經收到的產物（理由見 Summary 那一格）。
-                    QrText = current.QrText
+                    QrText = current.QrText,
+                    LastDetail = current.LastDetail
                 };
             }
         };
@@ -289,7 +305,10 @@ internal sealed class ConversionClient : IDisposable
                     // 工具 read-qr 的產物：**原封不動**（不 trim、不截斷）。
                     // 這個欄位是產物本身而不是排版，呼叫端要斷言的是「worker 解出來的每一個字元」
                     // 有沒有原樣到達 UI；在這裡加工一次，兩端就不可能逐字元相同了。
-                    QrText = message.text
+                    QrText = message.text,
+                    // 詳細原因同樣**原封不動**帶過來（見 LastDetail 的說明）：它是「為什麼失敗」的
+                    // 唯一跨管道來源，在這一端加工一次，驗收要斷言的那串字就不再是 worker 說的那一串。
+                    LastDetail = message.detail
                 };
                 _log($"worker result: ok={message.ok} output={message.outputPath ?? "-"} " +
                      $"error={message.errorCode} message={message.message}");
@@ -306,7 +325,8 @@ internal sealed class ConversionClient : IDisposable
                                                    message.okCount, message.failedCount, failures,
                                                    null, failureFiles)
                 {
-                    QrText = current.QrText
+                    QrText = current.QrText,
+                    LastDetail = current.LastDetail
                 };
                 _log($"worker summary: ✓ {message.okCount} / ✗ {message.failedCount}");
                 break;
@@ -318,7 +338,8 @@ internal sealed class ConversionClient : IDisposable
                                                        ? "轉檔服務版本不符" : "轉檔服務錯誤",
                                                    failureFiles)
                 {
-                    QrText = current.QrText
+                    QrText = current.QrText,
+                    LastDetail = current.LastDetail
                 };
                 break;
         }

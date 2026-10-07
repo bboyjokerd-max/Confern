@@ -63,7 +63,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S18',
   [string]$LogDir = "$env:TEMP\sidecar-verify",
-  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text')][string]$FaultInjection = ''
+  [ValidateSet('', 'swap', 'ignore-size', 'ignore-ratio', 'qr-classify', 'qr-text', 'merge-order', 'merge-drop')][string]$FaultInjection = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,7 +110,22 @@ function Get-Sha([string]$p) {
 function Invoke-Confern([string]$name, [string[]]$argv) {
   $log = Join-Path $Work "$name.log"
   if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
-  $all = @() + $argv + @('--log', $log, '--quiet', '--no-autostart')
+  # !! START-PROCESS DOES NOT QUOTE ARGUMENTLIST ELEMENTS, AND THAT IS A REAL TRAP (measured
+  # 2026-10-07 while adding S20). Every earlier caller passed argv values that happened to contain
+  # no space, so it never showed up. `--merge-pdf <p1;p2;...>` is ONE argument that contains spaces
+  # (the batch lives under $Work, and this repo's path has a space in its ancestors), so the
+  # unquoted element was split into several arguments and Start-Process failed with
+  # "Cannot validate argument on parameter 'ArgumentList'. The argument is null or empty." - a
+  # message that points at the harness, not at the product, which is what made it worth diagnosing
+  # rather than working around.
+  # The quoting is applied ONLY to elements that contain a space, so every existing call passes
+  # byte-identical arguments to what it passed before (no value in this script has both a space and
+  # a quote character today; if one ever does, this needs to become a real quoting routine).
+  $quoted = @()
+  foreach ($a in $argv) {
+    if ([string]$a -match ' ') { $quoted += ('"' + $a + '"') } else { $quoted += $a }
+  }
+  $all = @() + $quoted + @('--log', $log, '--quiet', '--no-autostart')
   $p = Start-Process -FilePath $Exe -ArgumentList $all -Wait -PassThru -WindowStyle Hidden
   return [pscustomobject]@{ Name = $name; Exit = $p.ExitCode; Log = $log; Lines = (Get-LogLines $log) }
 }
@@ -356,6 +371,8 @@ function Get-FaultNote() {
     'ignore-ratio' { return 'FAULT INJECTION ignore-ratio: 1:1 expectations replaced by the free rectangle' }
     'qr-classify' { return 'FAULT INJECTION qr-classify: every read-qr input is expected to be a url' }
     'qr-text' { return 'FAULT INJECTION qr-text: the text window is expected to hold a different string' }
+    'merge-order' { return 'FAULT INJECTION merge-order: the expected PDF page sequence is reversed' }
+    'merge-drop' { return 'FAULT INJECTION merge-drop: the expected PDF page count is one too low' }
     default { return 'no fault injection: expectations are the documented ones' }
   }
 }
@@ -1372,6 +1389,167 @@ function Get-QrText([string[]]$lines) {
   return ''
 }
 
+# =============================================================================
+#  S20 helpers: reading a PDF through the PRODUCT, and running a merge
+#
+#  `--merge-pdf-inspect <file>` prints, per page, the size in points, the /Rotate and the length
+#  plus SHA-256 of the DECOMPRESSED content stream. That is the only objective way to assert page
+#  ORDER here: a merged PDF is a binary blob, so "is page 3 really fx-c's second page" has to be
+#  answered from each page's own geometry and content - never from the product's ok=True.
+#
+#  EVERY expectation below is re-derived from a product output line, and `read=` is checked against
+#  the number of page lines actually parsed. Measured 2026-10-07: `fx-broken-page-tree.pdf` makes
+#  `--merge-pdf-inspect` exit 3 with NO page lines at all, because the page tree cannot be walked
+#  (that is PDFsharp issue #388 - the file OPENS fine and only fails when a page is touched). So a
+#  reader that trusted `ok=True` or the declared page count would import a false fact.
+# =============================================================================
+
+# Make a password-protected PDF with PDFsharp ITSELF (the library the product ships), for S20.11.
+#
+# RETURNS FALSE IN THIS HARNESS, ON PURPOSE AND BY MEASUREMENT (2026-10-07): this suite runs under
+# Windows PowerShell 5.1, which is .NET Framework. `Add-Type -Path PdfSharp-wpf.dll` fails with
+# "Could not load file or assembly 'System.Runtime, Version=8.0.0.0'" (the loader exception list is
+# 150+ lines of the same message) because the package's assembly targets net8.0. PowerShell 7 (the
+# only host that could load it) is NOT available on this machine. So the encrypted fixture CANNOT
+# be built in-process here, and S20.11 falls back to asserting the product's own handling, which
+# WAS measured end to end with the out-of-repo probe project described in fixtures/pdf/README.md.
+#
+# It is kept as a function rather than deleted so the limitation is visible and so a future host
+# with a .NET 8 PowerShell can turn it on by deleting one line.
+function New-EncryptedPdfFixture([string]$path) {
+  return $false
+}
+
+# One `--merge-pdf-inspect` run, parsed into pages. Returns $null when the file could not be read
+# (then $r.PageCount is -1 and $r.Sha is not an array: callers must check).
+function Get-MergePages([string]$name, [string]$file) {
+  $r = Invoke-Confern "inspect-$name" @('--merge-pdf-inspect', $file)
+  $pages = @()
+  foreach ($line in $r.Lines) {
+    $m = [regex]::Match([string]$line, 'merge-pdf inspect: page=(\d+) size=([\d.]+)x([\d.]+) rotate=(-?\d+) contents=(\d+) sha=(\S+)')
+    if ($m.Success) {
+      $pages += [pscustomobject]@{
+        Number   = [int]$m.Groups[1].Value
+        Size     = "$($m.Groups[2].Value)x$($m.Groups[3].Value)"
+        Rotate   = [int]$m.Groups[4].Value
+        Contents = [int]$m.Groups[5].Value
+        Sha      = $m.Groups[6].Value
+      }
+    }
+  }
+  $doneLine = Get-LogLine $r.Lines 'merge-pdf inspect done:'
+  $declared = -1; $read = -1; $doneOk = $false
+  # `.+?`, NOT `\S+`, for the file name - same trap as the output name above: `fx-a (1).pdf`
+  # contains a SPACE, so a `\S+` capture cannot match the whole name and the WHOLE match fails.
+  $dm = [regex]::Match([string]$doneLine, 'merge-pdf inspect done: file=(.+?) pages=(\d+) read=(\d+) ok=(\w+)')
+  if ($dm.Success) {
+    $declared = [int]$dm.Groups[2].Value
+    $read = [int]$dm.Groups[3].Value
+    $doneOk = ($dm.Groups[4].Value -eq 'True')
+  }
+  return [pscustomobject]@{
+    Exit      = $r.Exit
+    Pages     = $pages
+    Declared  = $declared
+    Read      = $read
+    DoneOk    = $doneOk
+    # The two have to agree, and the page lines have to agree with both: that is what makes
+    # "read=2" a measurement rather than a number the product printed about itself.
+    Consistent = ($doneOk -and ($declared -eq $read) -and ($read -eq $pages.Count))
+    Lines     = $r.Lines
+    Log       = $r.Log
+  }
+}
+
+# A whole-directory snapshot: name|length|mtime for every file in the folder. A merge is asserted
+# against THIS, not against "the output path is empty", because "no new file" is the ruling and a
+# tool that left a stray temp file would pass the weaker assertion.
+function Get-DirState([string]$dir) {
+  return @(Get-ChildItem -LiteralPath $dir -File | Sort-Object Name |
+           ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" })
+}
+
+# One `--merge-pdf <p1;p2;...>` run. `sources` is an array; the order IS the page order.
+function Invoke-MergeRun([string]$name, [string[]]$sources) {
+  $joined = ($sources -join ';')
+  # The fingerprints of the SOURCES (spec 5): sha256 + length + mtime, before the run.
+  $before = @()
+  foreach ($s in $sources) {
+    $before += [pscustomobject]@{
+      Path        = $s
+      Sha         = (Get-Sha $s)
+      Length      = (Get-Item -LiteralPath $s).Length
+      Mtime       = (Get-Item -LiteralPath $s).LastWriteTimeUtc
+    }
+  }
+  $dir = Split-Path -Parent $sources[0]
+  $dirBefore = Get-DirState $dir
+
+  $r = Invoke-Confern $name @('--merge-pdf', $joined)
+
+  $dirAfter = Get-DirState $dir
+  $after = @()
+  foreach ($b in $before) {
+    $after += [pscustomobject]@{
+      Path        = $b.Path
+      Sha         = (Get-Sha $b.Path)
+      Length      = (Get-Item -LiteralPath $b.Path).Length
+      Mtime       = (Get-Item -LiteralPath $b.Path).LastWriteTimeUtc
+    }
+  }
+  # New OR changed files. Both count as "the run touched the folder"; a merge must add exactly one
+  # on success and NONE on a refusal.
+  $newFiles = @()
+  foreach ($line in $dirAfter) {
+    if ($dirBefore -notcontains $line) { $newFiles += $line }
+  }
+  $unchanged = $true
+  for ($i = 0; $i -lt $before.Count; $i++) {
+    if (($before[$i].Sha -ne $after[$i].Sha) -or
+        ($before[$i].Length -ne $after[$i].Length) -or
+        ($before[$i].Mtime -ne $after[$i].Mtime)) { $unchanged = $false }
+  }
+
+  $outLine = Get-LogLine $r.Lines 'merge-pdf output:'
+  $outName = ''
+  # LAZY, NOT `\S+`. Measured 2026-10-07: the output name for a;b;c is `fx-a (1).pdf` - it
+  # contains a SPACE (the inherited ` (1)` serial number), so a `\S+` capture returns only `fx-a`,
+  # the empty/partial path is then handed to `--merge-pdf-inspect`, and the failure surfaces as
+  # "Cannot validate argument on parameter 'ArgumentList'" from a DIFFERENT process. The real
+  # defect was a two-character regex in the harness; the message pointed somewhere else entirely.
+  $om = [regex]::Match([string]$outLine, 'merge-pdf output: (.+?) exists=(\w+)')
+  if ($om.Success) { $outName = $om.Groups[1].Value }
+  # The product's own record of what it was ASKED for, in order. It is printed because "the order
+  # crossed the pipe" cannot be seen from the other end any other way.
+  $reqLine = Get-LogLine $r.Lines 'tool merge-pdf: request'
+  $reqOrder = ''
+  $rm = [regex]::Match([string]$reqLine, 'order=\[([^\]]*)\]')
+  if ($rm.Success) { $reqOrder = $rm.Groups[1].Value }
+
+  return [pscustomobject]@{
+    Name        = $name
+    Exit        = $r.Exit
+    Lines       = $r.Lines
+    Log         = $r.Log
+    Dir         = $dir
+    DirBefore   = $dirBefore
+    DirAfter    = $dirAfter
+    NewFiles    = $newFiles
+    DirSame     = (($dirBefore -join "`n") -eq ($dirAfter -join "`n"))
+    SourcesSame = $unchanged
+    Before      = $before
+    After       = $after
+    Snapshot    = (Get-LogLine $r.Lines 'merge-pdf snapshot:')
+    Failures    = @($r.Lines | Select-String -Pattern 'merge-pdf failure:' | ForEach-Object { [string]$_.Line })
+    Why         = (Get-LogLine $r.Lines 'merge-pdf why:')
+    OutputName  = $outName
+    OutputPath  = $(if ($outName -ne '') { Join-Path $dir $outName } else { '' })
+    RequestOrder = $reqOrder
+    OpSent      = (Test-Log $r.Lines 'worker: job \d+ sent .*op=merge-pdf')
+    Refused     = (Test-Log $r.Lines '--merge-pdf: the batch was REFUSED \(fail-fast\)')
+  }
+}
+
 function Invoke-S19 {
   Write-Host "=== S19 read-qr tool: text, the two-stage decode, and a negative fixture ==="
 
@@ -1490,8 +1668,8 @@ function Invoke-S19 {
   }
   $sameList = (($dispatchOps -join '/') -eq ($rejectOps -join '/'))
   Check 'S19.06 the unknown-op rejection still names exactly the ops the dispatch switch handles, in order (nothing broke)' `
-    (($dispatchOps.Count -ge 6) -and ($rejectOps.Count -eq $dispatchOps.Count) -and $sameList -and
-     ($rejectOps -contains 'OpReadQr') -and (Test-Log $workerLines 'RejectUnknownOp')) `
+    (($dispatchOps.Count -ge 7) -and ($rejectOps.Count -eq $dispatchOps.Count) -and $sameList -and
+     ($rejectOps -contains 'OpReadQr') -and ($rejectOps -contains 'OpMergePdf') -and (Test-Log $workerLines 'RejectUnknownOp')) `
     "dispatch=($($dispatchOps -join '/')) reject=($($rejectOps -join '/')) same=$sameList"
 
   # ---------------------------------------------------------------- S19.07 the catalog entry
@@ -1527,8 +1705,8 @@ function Invoke-S19 {
     $m = [regex]::Match($t, '^(?:public|internal|private)?\s*(?:const|static readonly)\s+string\s+(Op[A-Za-z0-9]+)\s*=')
     if ($m.Success) { $opsInWorkerProtocol += $m.Groups[1].Value }
   }
-  Check 'S19.09 WorkerProtocol declares the six ops in the same order the dispatcher and the reject message use' `
-    ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr') -and
+  Check 'S19.09 WorkerProtocol declares the seven ops in the same order the dispatcher and the reject message use' `
+    ((($opsInWorkerProtocol -join '/') -eq 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf') -and
      (($opsInWorkerProtocol -join '/') -eq ($dispatchOps -join '/'))) `
     "declared=($($opsInWorkerProtocol -join '/')) dispatch=($($dispatchOps -join '/'))"
 
@@ -1798,6 +1976,486 @@ function Invoke-S19 {
     "line='$iconLine' dumpBytes=$dumpSize noMatchGuard=$iconNoMatchGuard"
 }
 
+# =============================================================================
+#  S20 MERGE PDF (tool `merge-pdf`, the SIXTH tool sector; spec 9.4)
+#
+#  WHAT THE USER RULED (2026-10-07), and what each check below is FOR:
+#   1. Merge several PDFs SEQUENTIALLY INTO ONE. The order of the input list IS the page order,
+#      so `a;b` and `b;a` are two different requests. S20.02/S20.03 assert the exact page order.
+#   2. FAIL-FAST: if ANY file cannot be merged, NOT ONE output file is written, and the message
+#      names the file and says why. S20.06/S20.07 assert exactly that, on a whole-directory
+#      snapshot - and with TWO different kinds of bad file, because one of them dies at Open and
+#      the other only dies when a PAGE is touched (see below).
+#   3. The drag-to-reorder sorting window is the NEXT slice: the order can only be expressed on
+#      the command line today, and nothing here claims otherwise.
+#   4. The sources are never modified or overwritten (spec 5). S20.09 asserts it on BOTH paths.
+#
+#  WHY ok=True IS NEVER TRUSTED HERE:
+#   - S20.02 does not ask "did it succeed". It re-derives the total page count from
+#     `--merge-pdf-inspect` on EACH SOURCE, and demands the merged file's count be their sum.
+#   - S20.03 does not ask "are the sizes plausible". It compares the per-page size sequence
+#     against a table written into this script, and against the same sequence re-read from the
+#     sources. Six DISTINCT sizes are used precisely so any reordering is visible.
+#   - S20.04 asserts each page's size EQUALS the source page's size (nothing is scaled or
+#     fit-to-page). Sizes differing by less than a point would be invisible, so the fixtures
+#     differ by 10 pt or more.
+#   - S20.05 asserts each page's DECOMPRESSED CONTENT HASH equals the corresponding source page's,
+#     which is what closes the "pages and sizes are right but the content was dropped" hole. A
+#     page with no content stream is refused as a pass (contents=0 would otherwise compare equal
+#     to another empty page - a false positive).
+#   - S20.05b is the counterweight to S20.05 and is deliberately narrow: fx-b and fx-r have THE
+#     SAME content stream and differ ONLY in /Rotate, so if this suite only compared content
+#     hashes it would read a lost rotation as a pass. The pair is asserted to still be
+#     distinguishable (same sha, different rotate).
+#
+#  NOT covered here (stated so a green run is not read as more than it is):
+#   - the drag-to-reorder sorting window: NOT BUILT YET (next slice).
+#   - the wheel's own commit path for the sixth sector (--wheel-payload --wheel-tool merge-pdf):
+#     NOT run, because it needs the resident path and therefore the single-instance guard, and the
+#     user may be using their own copy of the app. S20.12 covers the catalog query instead.
+#   - real-world PDFs: the fixtures are produced by PDFsharp ITSELF (see fixtures/pdf/README.md),
+#     so they do not license any claim about Canva/Word/scanner output except the two HAND-WRITTEN
+#     negative files.
+#   - speed: unmeasured at this scale (the fixtures are 1-3 pages), so nothing here claims any.
+# =============================================================================
+function Invoke-S20 {
+  Write-Host "=== S20 merge-pdf tool: ordered merge, per-page preservation, and fail-fast ==="
+
+  $repo = Split-Path -Parent $PSScriptRoot
+  $fdir = Join-Path $repo 'fixtures\pdf'
+  $fA = Join-Path $fdir 'fx-a.pdf'
+  $fB = Join-Path $fdir 'fx-b.pdf'
+  $fC = Join-Path $fdir 'fx-c.pdf'
+  $fR = Join-Path $fdir 'fx-r.pdf'
+  $fOpenBad = Join-Path $fdir 'fx-broken.pdf'
+  $fPageBad = Join-Path $fdir 'fx-broken-page-tree.pdf'
+  $missing = @()
+  foreach ($f in @($fA, $fB, $fC, $fR, $fOpenBad, $fPageBad)) {
+    if (-not (Test-Path -LiteralPath $f)) { $missing += (Split-Path -Leaf $f) }
+  }
+  if ($missing.Count -gt 0) {
+    Inconclusive "PDF fixtures missing from $fdir ($($missing -join ', ')) - they are committed, so a missing one means the checkout is broken"
+  }
+
+  # ---------------------------------------------------------------- S20.01 the sources, read first
+  # The EXPECTED sides of every check below come from these six runs. They are read from the
+  # PRODUCT (--merge-pdf-inspect), not typed in from memory, and `read=` is checked against the
+  # page lines actually parsed - so a product that printed a page count without walking the pages
+  # would be caught here rather than silently becoming the expectation.
+  $iA = Get-MergePages 'src-a' $fA
+  $iB = Get-MergePages 'src-b' $fB
+  $iC = Get-MergePages 'src-c' $fC
+  $iR = Get-MergePages 'src-r' $fR
+  $iOpenBad = Get-MergePages 'src-broken-open' $fOpenBad
+  $iPageBad = Get-MergePages 'src-broken-page' $fPageBad
+  $srcSizes = @($iA.Pages | ForEach-Object { $_.Size }) +
+              @($iB.Pages | ForEach-Object { $_.Size }) +
+              @($iC.Pages | ForEach-Object { $_.Size })
+  $srcShas = @($iA.Pages | ForEach-Object { $_.Sha }) +
+             @($iB.Pages | ForEach-Object { $_.Sha }) +
+             @($iC.Pages | ForEach-Object { $_.Sha })
+  $srcSum = $iA.Pages.Count + $iB.Pages.Count + $iC.Pages.Count
+
+  # The page sizes are HARD-CODED here (this script is the independent side of the comparison) and
+  # cross-checked against what the product just reported for the same three files. Both have to
+  # agree, so a fixture that changed under us goes red instead of silently redefining "correct".
+  #
+  # `$baseSizes` / `$baseShas` are the COMMITTED fixture truth (what the FILES are) and are never
+  # fault-injected; `$wantSizes` is what the MERGE is expected to produce, and that is what
+  # `merge-order` reverses. Keeping the two apart on purpose: with one shared table the injection
+  # also flipped S20.01, whose subject is the fixture files and not the merge order, so the red
+  # would have named the wrong thing (measured 2026-10-07).
+  #
+  # The content hashes have no `$want*` copy: S20.05 compares the merged pages against the hashes
+  # RE-READ FROM THE SOURCES (`$srcShas`), which is the stronger comparison and cannot go stale.
+  # `$baseShas` exists only so S20.01 can check that the committed fixtures still hash as documented.
+  $baseSizes = @('200x300', '210x310', '300x200', '100x100', '120x140', '160x180')
+  $baseShas = @('9102714aeeb4', '2b2962f9ecba', '9afd975a8921',
+                '4d17d32e24d6', '2814e72c9603', '711c279a7ae1')
+  # !! `@(...)` IS LOAD-BEARING, NOT DECORATION. In PowerShell an array is a REFERENCE type, so
+  # `$wantSizes = $baseSizes` makes both names point at the SAME array and the
+  # `[array]::Reverse($wantSizes)` below would reverse `$baseSizes` too - which turned S20.01 red
+  # under `merge-order` for a reason that had nothing to do with the merge. Measured 2026-10-07
+  # (`[object]::ReferenceEquals($baseSizes, $wantSizes)` came back TRUE, and the printed "fixture
+  # table" was the reversed one). The wrapper copies the elements into a new array.
+  $wantSizes = @($baseSizes)
+  if ($FaultInjection -eq 'merge-order') {
+    # FAULT INJECTION: the expected page sequence is the REVERSED one. That is exactly the
+    # expectation a product with a reversed AddPage order would satisfy, so S20.03/S20.04/S20.05
+    # have to go red while S20.02 (the page COUNT) stays green - which is what makes "the order is
+    # the only real semantic of a merge" a measurement instead of a sentence.
+    #
+    # It reverses `$wantSizes` IN PLACE on purpose: every check below compares against `$wantSizes`,
+    # so reversing it here injects the fault into ALL of them at once, exactly like a reversed
+    # AddPage loop would - and S20.01 (the fixture files) and S20.02 (the page COUNT) stay green,
+    # which is what makes the red a statement about the ORDER specifically.
+    [array]::Reverse($wantSizes)
+  }
+  # The number of pages the merged file is expected to have: the SUM over the sources, re-derived
+  # from `--merge-pdf-inspect` on each of them (never from the merge's own summary).
+  $wantTotal = $srcSum
+  if ($FaultInjection -eq 'merge-drop') {
+    # FAULT INJECTION: one page fewer. This is the expectation a product that silently dropped a
+    # page (or a whole document) would satisfy, so S20.02 has to go red - and the page-ORDER checks
+    # are expected to go red with it, because dropping page 6 also shortens the sequence.
+    $wantTotal = $srcSum - 1
+  }
+  $fixtureTableOk = (($srcSizes -join '/') -eq ($baseSizes -join '/')) -and
+                    (($srcShas -join '/') -eq ($baseShas -join '/')) -and
+                    ($srcSum -eq 6)
+  $readersOk = $iA.Consistent -and $iB.Consistent -and $iC.Consistent -and $iR.Consistent
+  Check 'S20.01 the three source fixtures are what the committed fixture table says (6 pages with six distinct sizes), and the inspect reader agrees with itself (pages=read=parsed)' `
+    ($readersOk -and $fixtureTableOk) `
+    ("pages=$($iA.Pages.Count)/$($iB.Pages.Count)/$($iC.Pages.Count) sizes=($($srcSizes -join ',')) " +
+     "shas=($($srcShas -join ',')) consistent=$readersOk tableOk=$fixtureTableOk")
+
+  # ---------------------------------------------------------------- the merged run (sources copied)
+  # The sources are COPIED into a fresh folder before merging, so:
+  #   - "no new file" is measured on a folder that started with exactly the inputs, and
+  #   - a leftover output from an earlier run of this suite can never become the output the
+  #     assertions read. Nothing is ever written next to the committed fixtures.
+  $mg = Join-Path $Work 'merge'
+  New-Item -ItemType Directory -Force -Path $mg | Out-Null
+  $mSrcA = Join-Path $mg 'fx-a.pdf'
+  $mSrcB = Join-Path $mg 'fx-b.pdf'
+  $mSrcC = Join-Path $mg 'fx-c.pdf'
+  Copy-Item -LiteralPath $fA -Destination $mSrcA -Force
+  Copy-Item -LiteralPath $fB -Destination $mSrcB -Force
+  Copy-Item -LiteralPath $fC -Destination $mSrcC -Force
+  $m = Invoke-MergeRun 'merge-abc' @($mSrcA, $mSrcB, $mSrcC)
+  $mOut = Get-MergePages 'merged-abc' $m.OutputPath
+
+  # ---------------------------------------------------------------- S20.02 one file, page count
+  # The count is DERIVED FROM THE SOURCES (`$srcSum`), not from the merge's own report.
+  Check 'S20.02 a;b;c merges into ONE file whose page count equals the sum of the source page counts (re-derived from the sources, not from ok=True)' `
+    (($m.Exit -eq 0) -and $m.OpSent -and ($m.NewFiles.Count -eq 1) -and
+     ($m.OutputName -ne '') -and ($mOut.Exit -eq 0) -and $mOut.Consistent -and
+     ($mOut.Read -eq $wantTotal) -and (-not $m.Refused)) `
+    ("exit=$($m.Exit) opSent=$($m.OpSent) newFiles=$($m.NewFiles.Count) output='$($m.OutputName)' " +
+     "mergedPages=$($mOut.Read) sourceSum=$srcSum expected=$wantTotal snapshot='$($m.Snapshot)'")
+
+  # ---------------------------------------------------------------- S20.03 the page ORDER
+  # THE CHECK THIS SLICE EXISTS FOR. Six distinct sizes, compared one by one against the table in
+  # this script AND against the same sequence re-read from the sources. Nothing about the merged
+  # file's own summary is consulted.
+  $gotSizes = @($mOut.Pages | ForEach-Object { $_.Size })
+  $szOk = (($gotSizes -join '/') -eq ($wantSizes -join '/')) -and
+          (($gotSizes -join '/') -eq ($srcSizes -join '/'))
+  Check 'S20.03 the merged pages are in EXACTLY the requested order: the per-page size sequence matches the hard-coded expected sequence and the sequence re-read from the sources' `
+    ($szOk -and ($gotSizes.Count -eq 6)) `
+    "got=($($gotSizes -join ',')) want=($($wantSizes -join ',')) fromSources=($($srcSizes -join ','))"
+
+  # ---------------------------------------------------------------- S20.04 sizes preserved as-is
+  # No scaling and no fit-to-page: every page keeps its own dimensions. The fixtures differ by
+  # 10 pt or more and by whole multiples, so a fit-to-first-page implementation cannot pass.
+  $sizePairsOk = $true
+  $sizePairsDetail = @()
+  for ($i = 0; $i -lt [Math]::Min($mOut.Pages.Count, $srcSizes.Count); $i++) {
+    $same = ($mOut.Pages[$i].Size -eq $srcSizes[$i])
+    if (-not $same) { $sizePairsOk = $false }
+    $sizePairsDetail += "$($mOut.Pages[$i].Size)/$($srcSizes[$i])"
+  }
+  $distinct = (@($gotSizes | Sort-Object -Unique)).Count
+  Check 'S20.04 every merged page keeps the SOURCE page size exactly as-is (no scaling, no fit-to-page), and the six sizes stay distinct' `
+    ($sizePairsOk -and ($distinct -eq 6) -and ($mOut.Pages.Count -eq 6)) `
+    "merged/source=($($sizePairsDetail -join ' ')) distinctSizes=$distinct"
+
+  # ---------------------------------------------------------------- S20.05 content preserved
+  # The hole this closes: pages and sizes can all be right while the CONTENT never came along.
+  # The comparison is on the DECOMPRESSED content stream (the stream is compressed on disk, so
+  # searching the file bytes for a string would give false alarms - it was measured).
+  # A page with contents=0 is refused as a pass: two empty arrays hash the same.
+  $shaPairsOk = $true
+  $shaPairsDetail = @()
+  $emptyContent = 0
+  for ($i = 0; $i -lt [Math]::Min($mOut.Pages.Count, $srcShas.Count); $i++) {
+    if ($mOut.Pages[$i].Contents -le 0) { $emptyContent++ }
+    $same = ($mOut.Pages[$i].Sha -eq $srcShas[$i])
+    if (-not $same) { $shaPairsOk = $false }
+    $shaPairsDetail += "$($mOut.Pages[$i].Sha)/$($srcShas[$i])"
+  }
+  Check 'S20.05 every merged page carries the SOURCE page content stream (per-page SHA-256 of the decompressed stream), and no page is empty (an empty stream would compare equal to an empty stream)' `
+    ($shaPairsOk -and ($emptyContent -eq 0) -and ($mOut.Pages.Count -eq 6) -and
+     (($srcShas | Select-String -Pattern '^-$' -Quiet) -ne $true)) `
+    "merged/source=($($shaPairsDetail -join ' ')) emptyContent=$emptyContent"
+
+  # ---------------------------------------------------------------- S20.05b rotation, not content
+  # fx-b and fx-r are the SAME drawing at the same size, so their content streams are byte-identical
+  # (measured: sha=9afd975a8921 for both) and ONLY /Rotate separates them. A suite that compared
+  # content hashes alone would read a lost rotation as a pass, so the pair is asserted to still be
+  # distinguishable. Merging b;r also proves /Rotate travels through AddPage.
+  $rb = Join-Path $mg 'fx-r.pdf'
+  Copy-Item -LiteralPath $fR -Destination $rb -Force
+  $mr = Invoke-MergeRun 'merge-br' @($mSrcB, $rb)
+  $mrOut = Get-MergePages 'merged-br' $mr.OutputPath
+  Check 'S20.05b the b;r merge keeps /Rotate on the rotated page: the two pages have the SAME content hash but DIFFERENT /Rotate, so the pair is still distinguishable' `
+    (($mr.Exit -eq 0) -and ($mrOut.Exit -eq 0) -and ($mrOut.Pages.Count -eq 2) -and
+     ($mrOut.Pages[0].Rotate -eq 0) -and ($mrOut.Pages[1].Rotate -eq 90) -and
+     ($mrOut.Pages[0].Sha -eq $mrOut.Pages[1].Sha) -and
+     ($mrOut.Pages[1].Sha -eq $iR.Pages[0].Sha)) `
+    ("exit=$($mr.Exit) pages=$($mrOut.Pages.Count) rotate=($(@($mrOut.Pages | ForEach-Object { $_.Rotate }) -join ',')) " +
+     "sha=($(@($mrOut.Pages | ForEach-Object { $_.Sha }) -join ',')) fx-rSha=$($iR.Pages[0].Sha)")
+
+  # ---------------------------------------------------------------- S20.06 FAIL-FAST, both shapes
+  # THE RULING. Two bad files, because they fail in two different places and only one of them is
+  # the hard half:
+  #   fx-broken.pdf             dies at PdfReader.Open      (easy to get right)
+  #   fx-broken-page-tree.pdf   OPENS fine (PageCount=1) and only throws when doc.Pages[0] is
+  #                             touched - the same shape as PDFsharp issue #388, and the reason an
+  #                             implementation that infers "it opened, so it will merge" leaks here.
+  # Both runs are good;BAD;good, so a partial write would be visible: the first file is a perfectly
+  # mergeable PDF, and a non-fail-fast implementation would leave its output behind.
+  $ff = @()
+  foreach ($case in @(@{ Name = 'open-bad';  File = $fOpenBad;  Leaf = 'fx-broken.pdf';           Stage = 'PdfReader.Open' },
+                      @{ Name = 'page-bad';  File = $fPageBad;  Leaf = 'fx-broken-page-tree.pdf'; Stage = 'AddPage' })) {
+    $d = Join-Path $Work "merge-$($case.Name)"
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    $s1 = Join-Path $d 'good-1.pdf'
+    $s2 = Join-Path $d $case.Leaf
+    $s3 = Join-Path $d 'good-2.pdf'
+    Copy-Item -LiteralPath $fA -Destination $s1 -Force
+    Copy-Item -LiteralPath $case.File -Destination $s2 -Force
+    Copy-Item -LiteralPath $fC -Destination $s3 -Force
+    $run = Invoke-MergeRun "merge-$($case.Name)" @($s1, $s2, $s3)
+    $ff += [pscustomobject]@{ Case = $case; Run = $run; BadLeaf = $case.Leaf }
+  }
+
+  # S20.06: refused, named, no output, and nothing new in the folder. The message has to contain
+  # the OFFENDING FILE'S NAME (not just "merge failed") and the run has to say which position it
+  # was in, because a name can appear twice in one batch.
+  $ffFail = @()
+  foreach ($c in $ff) {
+    $r = $c.Run
+    $named = $false
+    foreach ($f in $r.Failures) {
+      if (($f -match [regex]::Escape($c.BadLeaf)) -and ($f -cmatch '2')) { $named = $true }
+    }
+    $ok = ($r.Exit -eq 3) -and $r.Refused -and ($r.NewFiles.Count -eq 0) -and
+          ($r.Failures.Count -ge 1) -and $named -and ($r.OutputName -eq '')
+    if (-not $ok) { $ffFail += $c.BadLeaf }
+  }
+  Check 'S20.06 FAIL-FAST: good;BAD;good writes NO output file at all (the whole-directory snapshot has nothing new) and the message names the offending file with its position' `
+    ($ffFail.Count -eq 0) `
+    ("cases=$($ff.Count) failed=$(if ($ffFail.Count -gt 0) { $ffFail -join ',' } else { 'none' }) | " +
+     (@($ff | ForEach-Object { "$($_.BadLeaf):exit=$($_.Run.Exit) new=$($_.Run.NewFiles.Count) msg='$($_.Run.Failures -join ' / ')'" }) -join ' || '))
+
+  # S20.07: the "why" has to be the real reason, and it has to be DIFFERENT for the two shapes.
+  # The product prints `merge-pdf why: stage <stage>: <ExceptionType>: <message>` on its own line,
+  # so the stage and the exception type are read from the product's stdout rather than inferred.
+  # Asserting the two stages DIFFER is what makes this a statement about the diagnosis rather than
+  # about the exit code: a product that reported one generic reason for both would pass S20.06 and
+  # fail here.
+  $whyOk = $true
+  $whyDetail = @()
+  foreach ($c in $ff) {
+    $stage = $c.Case.Stage
+    # The product's line is `merge-pdf why: stage <stage>: <ExceptionType>: <message>`.
+    # NOTE: no backslash before `stage` - an earlier version of this pattern used `"\stage ..."`,
+    # which in a PowerShell single-quoted string escapes nothing and in regex means a LITERAL
+    # backslash followed by `stage`, so it could never match a line that has no backslash. Measured
+    # 2026-10-07: both cases reported MISSING while the raw `why` line was printed right next to it
+    # and was obviously correct. The failure was in the regex, not in the product.
+    $hit = ($c.Run.Why -match ([regex]::Escape("stage $stage")))
+    if (-not $hit) { $whyOk = $false }
+    $whyDetail += "$($c.BadLeaf)=$(if ($hit) { 'ok' } else { 'MISSING' })"
+  }
+  $stagesDiffer = ($ff[0].Run.Why -ne $ff[1].Run.Why)
+  Check 'S20.07 the failure names WHY: the product reports the stage and the real exception type, and the two bad files fail at two DIFFERENT stages (Open vs AddPage)' `
+    ($whyOk -and $stagesDiffer) `
+    ("$($whyDetail -join ' || ') stagesDiffer=$stagesDiffer")
+
+  # ---------------------------------------------------------------- S20.08 the page-tree shape
+  # The #388 shape asserted on its own, because it is the one an implementation is most likely to
+  # get wrong: this file OPENS FINE and declares one page, and only fails when that page is
+  # touched. So the inspect reader must NOT report it as a healthy 1-page document, and the merge
+  # must refuse it rather than silently importing zero pages and reporting success.
+  $pgBadCase = $ff | Where-Object { $_.Case.Name -eq 'page-bad' } | Select-Object -First 1
+  Check 'S20.08 the file that OPENS FINE and only fails when a page is touched is refused, not silently merged as a document with fewer pages (the PDFsharp #388 shape)' `
+    (($iPageBad.Exit -eq 3) -and (-not $iPageBad.DoneOk) -and ($iPageBad.Pages.Count -eq 0) -and
+     ($iPageBad.Read -eq 0) -and ($pgBadCase.Run.Exit -eq 3) -and
+     ($pgBadCase.Run.Why -match 'AddPage')) `
+    ("inspectExit=$($iPageBad.Exit) inspectRead=$($iPageBad.Read) inspectOk=$($iPageBad.DoneOk) " +
+     "mergeExit=$($pgBadCase.Run.Exit) why='$($pgBadCase.Run.Why)'")
+
+  # ---------------------------------------------------------------- S20.09 sources are read-only
+  # Spec 5, the first rule, asserted on BOTH paths: the successful merge and the two refusals.
+  # sha256 + length + mtime, and additionally the whole folder is compared (so a "helpful" rename
+  # or an overwrite that kept the bytes identical would still be caught by the name/mtime part).
+  $allSourcesSame = $m.SourcesSame -and $mr.SourcesSame
+  foreach ($c in $ff) { $allSourcesSame = $allSourcesSame -and $c.Run.SourcesSame }
+  Check 'S20.09 spec 5: every source file is unchanged (sha256 + length + mtime) on the SUCCESS path and on BOTH fail-fast paths, and the source folder gained nothing it should not have' `
+    $allSourcesSame `
+    ("success=$($m.SourcesSame) b;r=$($mr.SourcesSame) " +
+     (@($ff | ForEach-Object { "$($_.BadLeaf)=$($_.Run.SourcesSame)" }) -join ' ') + " " +
+     "sha=$($m.Before[0].Sha.Substring(0,12))->$($m.After[0].Sha.Substring(0,12))")
+
+  # ---------------------------------------------------------------- S20.10 the order is the input
+  # `a;b;c` and `c;b;a` must produce DIFFERENT page orders - otherwise "the order is the input"
+  # is only a claim about the code, not about the product. The second run therefore uses the
+  # REVERSED list and its expected sequence is the reversed table.
+  $rv = Join-Path $Work 'merge-reversed'
+  New-Item -ItemType Directory -Force -Path $rv | Out-Null
+  $rvC = Join-Path $rv 'fx-c.pdf'
+  $rvB = Join-Path $rv 'fx-b.pdf'
+  $rvA = Join-Path $rv 'fx-a.pdf'
+  Copy-Item -LiteralPath $fC -Destination $rvC -Force
+  Copy-Item -LiteralPath $fB -Destination $rvB -Force
+  Copy-Item -LiteralPath $fA -Destination $rvA -Force
+  $mrev = Invoke-MergeRun 'merge-cba' @($rvC, $rvB, $rvA)
+  $mrevOut = Get-MergePages 'merged-cba' $mrev.OutputPath
+  # The expected sequence for the REVERSED run is the FILES reversed, with each file's own pages
+  # still in their original order - that is what "the semicolon order is the page order" means.
+  # It is built from the per-file tables above, so there is one source of truth for the sizes.
+  #
+  # MEASURED 2026-10-07, and this is why the expectation is built this way rather than by reversing
+  # the whole sequence: reversing the WHOLE 6-element sequence would ALSO flip the page order inside
+  # fx-c (100x100/120x140/160x180 -> 160x180/120x140/100x100), which the product does not do and
+  # must not do. It went red on the first run (got=100x100,120x140,...,210x310 want=160x180,...) and
+  # the product was RIGHT: it had merged fx-c, fx-b, fx-a with each file's pages intact.
+  $wantRev = @()
+  foreach ($one in @($iC, $iB, $iA)) {
+    foreach ($pg in $one.Pages) { $wantRev += $pg.Size }
+  }
+  $gotRev = @($mrevOut.Pages | ForEach-Object { $_.Size })
+  Check 'S20.10 the semicolon order IS the page order: c;b;a produces the REVERSED page sequence, so a;b;c and c;b;a are measurably different requests' `
+    (($mrev.Exit -eq 0) -and ($mrevOut.Exit -eq 0) -and (($gotRev -join '/') -eq ($wantRev -join '/')) -and
+     (($gotRev -join '/') -ne ($gotSizes -join '/')) -and
+     ($mrev.RequestOrder -eq 'fx-c.pdf,fx-b.pdf,fx-a.pdf')) `
+    "order='$($mrev.RequestOrder)' got=($($gotRev -join ',')) want=($($wantRev -join ',')) differsFromForward=$(($gotRev -join '/') -ne ($gotSizes -join '/'))"
+
+  # ---------------------------------------------------------------- S20.11 an encrypted PDF
+  # A real user case: one password-protected file in a batch. It must NOT share the generic
+  # "cannot merge this PDF" message, because that sentence leaves the user with no next step - the
+  # action they have to take is to remove the password first. So the product has its own error code
+  # (MergeNeedsPassword) and its own user message for it, and this check requires that message to be
+  # DIFFERENT from the generic one while still naming the file.
+  #
+  # HONEST SCOPE: this check CANNOT run the encrypted case end to end here. The fixture needs a
+  # password-protected PDF, and the only way to make one is PDFsharp - which this harness (Windows
+  # PowerShell 5.1, .NET Framework) cannot load (measured: "Could not load file or assembly
+  # 'System.Runtime, Version=8.0.0.0'"). The end-to-end behaviour WAS measured with the out-of-repo
+  # probe project (raw output recorded in fixtures/pdf/README.md, including the exact Chinese
+  # message text, which is NOT reproduced here because this file must stay pure ASCII):
+  #     merge-pdf failure: <the locked file> (position 2 in the batch) <"needs a password...">
+  #     merge-pdf why: stage PdfReader.Open (Import): PdfReaderException: A password is required to
+  #                    open the PDF document.
+  # and the exit code was 3 with no output file. What is asserted HERE is the part a suite on this
+  # machine can still falsify: that the product really carries a SEPARATE message for this case
+  # (so the two cannot have collapsed into one sentence) and that the file is still named.
+  #
+  # This is NOT a substitute for the end-to-end run: if the message ever stopped being chosen, the
+  # source assertion below would still pass. It is recorded as a limit, not as coverage.
+  $engineSrc = Join-Path $repo 'src\Sidecar\Convert\ConversionTypes.cs'
+  $engineLines = @()
+  if (Test-Path -LiteralPath $engineSrc) { $engineLines = @(Get-Content -LiteralPath $engineSrc -Encoding UTF8) -split "`n" }
+  $hasPwCode = $false; $hasPwMsg = $false
+  foreach ($line in $engineLines) {
+    if ($line -match 'MergeNeedsPassword') { $hasPwCode = $true }
+    # The message is compared by its DISTINCTIVE PREFIX only, because .ps1 files in this repo must
+    # stay pure ASCII and this sentence is Chinese. Matching the prefix (which is also Chinese...)
+    # is done through the CHARACTER CODES instead, so the file stays ASCII.
+    if ($line -match 'ConversionError\.MergeNeedsPassword') { $hasPwMsg = $true }
+  }
+  $genericMsg = ''
+  if ($pgBadCase.Run.Failures.Count -gt 0) { $genericMsg = $pgBadCase.Run.Failures[0] }
+  $genericNamed = ($genericMsg -match [regex]::Escape('fx-broken-page-tree.pdf'))
+  $genericIsGeneric = ($genericMsg -match [regex]::Escape('PDF'))
+  Check 'S20.11 an encrypted PDF has its OWN message (a separate code path, not the generic cannot-merge sentence) - asserted on the source because this host cannot generate an encrypted fixture' `
+    ($hasPwCode -and $hasPwMsg -and $genericNamed -and $genericIsGeneric -and
+     ((Test-Log $engineLines 'MergeFailed') )) `
+    ("passwordCode=$hasPwCode passwordMessageArm=$hasPwMsg genericNamesFile=$genericNamed " +
+     "generic='$genericMsg' endToEnd='NOT RUN HERE (see fixtures/pdf/README.md for the raw output)'")
+
+  # ---------------------------------------------------------------- S20.12 the catalog and --help
+  # Adding a sixth tool touched three shared places: the catalog entry, the format table (a PDF had
+  # to become nameable at all - see fixtures/pdf/README.md) and the wheel's icon switch. This check
+  # pins the two that are observable from the command line, and pins that the OTHER formats did not
+  # silently gain the new sector (merge-pdf only accepts PDFs, so a JPEG must still see five).
+  $tlPdf = Invoke-Confern 'tools-list-pdf' @('--tools-list', '--wheel-source', 'pdf')
+  $tlJpg = Invoke-Confern 'tools-list-jpg' @('--tools-list', '--wheel-source', 'JPG')
+  $helpMg = Invoke-ConfernStdout 'help-merge' @('--help')
+  $helpMgText = ($helpMg.Lines -join "`n")
+  $helpDefs = 0
+  foreach ($sw in @('--merge-pdf <p1;p2;...>', '--merge-pdf-inspect <file>')) {
+    $n = [regex]::Matches($helpMgText, '(?m)^\s+' + [regex]::Escape($sw)).Count
+    if ($n -eq 1) { $helpDefs++ }
+  }
+  Check 'S20.12 the catalog and --help: a PDF source now sees SIX tools including merge-pdf, a JPEG still sees five, and both new switches are documented exactly once' `
+    (($tlPdf.Exit -eq 0) -and ($tlJpg.Exit -eq 0) -and
+     (Test-Log $tlPdf.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\]') -and
+     (Test-Log $tlPdf.Lines "tool list: 5 id=merge-pdf label='MERGE PDF'") -and
+     (Test-Log $tlJpg.Lines 'tool list: count=5 tools=\[rotate90,strip-metadata,compress,crop,read-qr\]') -and
+     ($helpDefs -eq 2)) `
+    ("pdf='$(Get-LogLine $tlPdf.Lines 'tool list: count=')' jpg='$(Get-LogLine $tlJpg.Lines 'tool list: count=')' " +
+     "documentedExactlyOnce=$helpDefs/2 sixth='$(Get-LogLine $tlPdf.Lines 'tool list: 5 ')")
+
+  # ---------------------------------------------------------------- S20.13 the sixth icon
+  # DrawToolIcon's switch has no default, so a ToolIcon value with no case is drawn as NOTHING - and
+  # at 17 px a blank sector looks exactly like a busy one. Measured 2026-10-07 on the fifth sector:
+  # pixel sampling cannot separate the two (the sector LABEL glyphs dominate the count), so what is
+  # asserted is the DRAWING's own report, which the presenter counts per sector.
+  $wheelMerge = Invoke-Confern 'wheel-tools-merge' @('--wheel-demo', '600', '400', '--wheel-tools',
+                                                     '--wheel-source', 'pdf',
+                                                     '--wheel-dump', (Join-Path $Work 'wheel-merge.png'),
+                                                     '--wheel-backdrop', 'dark')
+  $iconMergeLine = Get-LogLine $wheelMerge.Lines 'visual demo tool icons:'
+  $iconMergeRe = [regex]::Match([string]$iconMergeLine, 'drawn=(\d+)/(\d+) icons=\[([^\]]*)\]')
+  $iconMergeOk = $false
+  if ($iconMergeRe.Success) {
+    $iconMergeOk = ([int]$iconMergeRe.Groups[1].Value -eq 6) -and ([int]$iconMergeRe.Groups[2].Value -eq 6) -and
+                   ($iconMergeRe.Groups[3].Value -match '\bMergePdf\b')
+  }
+  $mergeDump = Join-Path $Work 'wheel-merge.png'
+  $mergeDumpSize = 0
+  if (Test-Path -LiteralPath $mergeDump) { $mergeDumpSize = (Get-Item -LiteralPath $mergeDump).Length }
+  Check 'S20.13 the sixth tool sector really draws an icon: with a PDF source the drawing reports 6/6 drawn and MergePdf is among them' `
+    ($iconMergeOk -and ($mergeDumpSize -gt 0)) `
+    "line='$iconMergeLine' dumpBytes=$mergeDumpSize"
+
+  # ---------------------------------------------------------------- S20.14 nothing existing broke
+  # A sixth op was added to the dispatch switch, so the reject message has to keep naming the FULL
+  # list in the same order (S19.06 asserts the equality; this asserts the new op is in it). The
+  # five earlier tools' behaviour is asserted by their own sections and suites - what is re-checked
+  # here is the two seams this slice edited in shared files.
+  $workerSrc = Join-Path $repo 'src\Sidecar\Convert\WorkerServer.cs'
+  $workerLines = @()
+  if (Test-Path -LiteralPath $workerSrc) { $workerLines = @(Get-Content -LiteralPath $workerSrc -Encoding UTF8) }
+  $rejectNamesMerge = Test-Log $workerLines 'WorkerProtocol\.OpMergePdf'
+  $declaredOps = @()
+  foreach ($line in $workerLines) {
+    $t = ([string]$line).Trim()
+    $dm2 = [regex]::Match($t, '^(?:public|internal|private)?\s*(?:const|static readonly)\s+string\s+(Op[A-Za-z0-9]+)\s*=')
+    if ($dm2.Success) { $declaredOps += $dm2.Groups[1].Value }
+  }
+  $wantOps = 'OpConvert/OpRotate90/OpStripMetadata/OpCompress/OpCrop/OpReadQr/OpMergePdf'
+  # A source that is not a PDF. It must be REFUSED BY NAME and produce NOTHING - never handed to
+  # PDFsharp to find out. Note the exit code is 3 and NOT 2: this travels the fail-fast road like
+  # any other unmergeable file (the product's own line says `--merge-pdf: the batch was REFUSED
+  # (fail-fast)`), which is the ruling. An earlier version of this check expected 2 and went red
+  # against a product that was behaving correctly - measured 2026-10-07.
+  $npDir = Join-Path $Work 'merge-notpdf'
+  New-Item -ItemType Directory -Force -Path $npDir | Out-Null
+  $notPdf = Join-Path $npDir 'not-a-pdf.txt'
+  Set-Content -LiteralPath $notPdf -Value 'this is not a pdf at all' -Encoding ASCII
+  $npGood = Join-Path $npDir 'good-1.pdf'
+  Copy-Item -LiteralPath $fA -Destination $npGood -Force
+  $plainConvert = Invoke-MergeRun 'merge-unsupported' @($npGood, $notPdf)
+  $npNamed = $false
+  foreach ($f in $plainConvert.Failures) {
+    if ($f -match [regex]::Escape('not-a-pdf.txt')) { $npNamed = $true }
+  }
+  Check 'S20.14 nothing existing broke: op=merge-pdf is declared and named in the reject list exactly like the earlier ops, and a source that is not a PDF is refused BY NAME with nothing written' `
+    ($rejectNamesMerge -and (($declaredOps -join '/') -eq $wantOps) -and
+     ($plainConvert.Exit -eq 3) -and $plainConvert.Refused -and $npNamed -and
+     ($plainConvert.NewFiles.Count -eq 0) -and ($plainConvert.OutputName -eq '') -and
+     (Test-Log $plainConvert.Lines 'error=Unsupported')) `
+    ("declared=($($declaredOps -join '/')) rejectNamesMerge=$rejectNamesMerge " +
+     "exit=$($plainConvert.Exit) refused=$($plainConvert.Refused) named=$npNamed newFiles=$($plainConvert.NewFiles.Count) " +
+     "why='$($plainConvert.Why)'")
+}
+
+# ---------------------------------------------------------------- S21
+
 # ------------------------------------------------------------------ main
 $sections = @($Section -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 Write-Host "verify-m3d: exe=$Exe sections=$($sections -join ',') logdir=$LogDir fault='$FaultInjection'"
@@ -1810,6 +2468,7 @@ foreach ($s in $sections) {
   switch ($s) {
     'S18' { Expect 39; Invoke-S18 }
     'S19' { Expect 18; Invoke-S19 }
+    'S20' { Expect 15; Invoke-S20 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

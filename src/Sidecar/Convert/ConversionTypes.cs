@@ -224,11 +224,18 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 合併（`merge-pdf`）的訊息**必定**帶位置與檔名：使用者 2026-10-07 裁定 fail-fast 的
         // 原話是「整批不產出，明確說出是哪個檔、為什麼」。位置在檔名前面，因為「哪一個」在
         // 一批有序的輸入裡首先是「第幾個」（同一個檔名可以在批次裡出現兩次）。
-        // `position <= 0` ＝ 這個結果不屬於一批有序的輸入 ⇒ 退回既有的純原因訊息，
-        // 所以其餘工具的訊息逐字元不變（`m1d`／`m1f` 斷言的就是那些字）。
-        // ⚠ MergeNeedsPassword 走**同一條**組裝規則（一樣要指名是哪個檔），所以兩者共用這一臂
-        // ——分成兩臂會讓「加密檔的訊息忘了帶檔名」變成一個看起來通過的缺口。
-        if (error is ConversionError.MergeFailed or ConversionError.MergeNeedsPassword && position > 0)
+        //
+        // ⚠ 判準是 **`position > 0`（＝這個結果屬於一批有序的輸入），不是錯誤碼**。
+        // 這一條原先是 `error is MergeFailed or MergeNeedsPassword && position > 0`，**漏掉了**
+        // 批次前檢會回的 `Unsupported`（「這個檔不是 PDF」）與 `SourceMissing`（檔案在合併前不
+        // 見了）：2026-10-07 實測 `--merge-pdf good.pdf;not-a-pdf.txt` 的使用者訊息只有
+        // 「不支援的格式」，**沒有說出是哪個檔**——一句沒有下一步的訊息，正是使用者裁定要避免
+        // 的那種。錯誤碼會一直增加，`position > 0` 不會。
+        //
+        // `position <= 0` ＝ 這個結果不屬於一批有序的輸入 ⇒ 退回既有的純原因訊息，所以其餘
+        // 工具的訊息逐字元不變（`m1d`／`m1f` 斷言的就是那些字）。已確認全 repo 只有 `MergeFail`
+        // 會填入正數的 Position（`ConversionEngine.cs`），單檔工具一律留 0。
+        if (position > 0)
             return $"{FileNameOf(sourcePath)}（第 {position} 個檔） {reason}";
         // 只有 DecodeFailed 的規格訊息帶檔名（先有「哪個檔案」才讀得懂「無法解碼」）；
         // 其餘是純原因，使用者在清單那一列本來就看得到檔名。

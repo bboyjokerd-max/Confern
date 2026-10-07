@@ -474,6 +474,11 @@ function Invoke-S17 {
   # ---------------------------------------------------------------- the worker
   # The wheel's tool layer, committed for real: this is the only path that puts the op into
   # a job packet and sends it down the pipe (spec 9.1).
+  # NOTE (2026-10-07): the tool list is still FIVE here, and that is the expected result, not a
+  # stale assertion. `ToolCatalog.ToolsFor` only offers `merge-pdf` for a PDF source, and this
+  # payload is a JPEG, so the sixth tool is correctly absent. It is asserted that way on purpose:
+  # it is the check that catches "the new sector leaked into every format". m3d S20.12 asserts the
+  # other side (a PDF source sees six, a JPEG still sees five).
   $wd = Join-Path $Work 'worker'
   New-Item -ItemType Directory -Force -Path $wd | Out-Null
   $wOut = Join-Path $wd 'out'

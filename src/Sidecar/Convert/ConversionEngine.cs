@@ -921,6 +921,15 @@ internal sealed class ConversionEngine
         //    這一步刻意與其他工具的第一段同形（它們也是先看 AtomicWriter.Exists 與格式表）。
         foreach (string path in paths)
         {
+            // ⚠ **`FormatOfPath` 回的是「格式名」，不是副檔名。** 格式表裡那一列是
+            //    `("PDF", new[] { "pdf" }, PdfCategory)`：**左邊的 `"PDF"` 才是這個方法的回傳值**
+            //    （右邊的 `"pdf"` 只是它接受的副檔名）。2026-10-07 這一刀第一次跑 `--merge-pdf`
+            //    就是死在這裡——寫成 `is not "pdf"` 會讓**每一份合法的 PDF** 都被判成
+            //    「不支援的格式」（實測症狀：`worker result: ok=False error=Unsupported
+            //    message=不支援的格式`，而檔本身完全正常）。
+            //    這一條之所以值得寫下來：**兩個字串長得像、而且只差大小寫**，所以它讀起來
+            //    像對的；而症狀（一次都不成功）又很容易被誤讀成「PDFsharp 沒裝好」。
+            //    型別相同、名字相近、失敗訊息指向別的地方——這是會再犯的那一種坑。
             if (_codecs.FormatOfPath(path) is not "PDF")
             {
                 string given = _codecs.FormatOfPath(path) ?? "(unknown)";
@@ -1018,6 +1027,15 @@ internal sealed class ConversionEngine
         // 的理由：命名規則只有一個擁有者（NamingPolicy），而它取的是**來源檔的主檔名**——
         // 五顆既有工具全部如此，這裡跟進就沒有一行新的命名規則；而「永不覆寫」的檔名衝突
         // 自動序號（`fx-a (1).pdf`…）也直接沿用，不必再寫第二套。
+        //
+        // ⚠ **「N 個輸入只有 1 個輸出」這件不對稱是刻意的，而它必須在這裡寫明**：
+        //    合併的輸入是一批、輸出是一個，所以「沿用誰的主檔名」是一個**只有合併會遇到**的問題
+        //    （其餘五顆是一進一出，那個問題不存在）。取 `paths[0]`＝**使用者排序後的第一個檔**
+        //    ——也就是他在那一疊紙上看到的最上面那一張，所以 `fx-a.pdf` 合併三份之後變成
+        //    `fx-a (1).pdf` 是**預期**的結果，不是撞名意外：`(1)` 來自既有的「永不覆寫」
+        //    規則（`fx-a.pdf` 這個名字已經被來源自己佔著），而**來源因此絕對不會被覆蓋**
+        //    ——這正是那一條紅線（規格 §5）在這裡的具體形狀。
+        //    換句話說：`(1)` 的存在本身就是「沒有覆寫來源」的可觀測證據。
         string? extension = _codecs.PrimaryExtension("pdf");
         if (extension == null)
         {
