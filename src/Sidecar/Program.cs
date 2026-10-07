@@ -3118,9 +3118,40 @@ internal static class App
                       $"end={Px(moveRun.AfterEnd)} mode={moveRun.Mode} moved={moveMoved} " +
                       $"ok={moveOk} ({moveDetail})");
 
+        // ③a-2 移動：**貼齊左右兩邊**的矩形（很常見：直式照片按 16:9 ⇒ 框寬＝圖寬）。
+        // ⚠ 來歷（2026-10-07 使用者實機回報：「想平移卻把選取清掉，變成重畫，要從頭來」）。
+        //    根因：`moveCanChange` 原本寫成 `寬有餘 && 高有餘`——只要**任一邊貼齊**就是 false，
+        //    於是框內拖曳被歸成 `New`（＝把整個框清掉重畫）。③a 的基準矩形置中、四邊都不貼齊，
+        //    所以這個缺陷**沒有任何既有的一格抓到它**（這正是它活下來的原因）。
+        bool spanBase = CropUi.SelfTestSetRect(0, 0.25, 1, 0.5, 5000, out _, lines.Enqueue);
+        (int spX, int spY, int spW, int spH) = CropUi.SelfTestRectPx();
+        int spDy = Math.Max(1, spH / 4);
+        bool spanRan = DragPixels(spX + spW / 2, spY + spH / 2, spX + spW / 2, spY + spH / 2 + spDy,
+                                  out CropWindow.DragRun spanRun, out string spanDetail);
+        bool spanMoved = spanRan && spanRun.Mode == "Move" &&
+                         spanRun.AfterEnd.Y == spY + spDy && spanRun.AfterEnd.X == spX &&
+                         spanRun.AfterEnd.Width == spW && spanRun.AfterEnd.Height == spH;
+        // 對照組：**整張圖**（兩軸都貼齊）。此時「移動」在幾何上不可能（可動範圍是 0），
+        // 所以框內拖曳**必須**是「重畫」——否則使用者開窗後在圖上拖曳會完全沒反應（那是 2026-10-06
+        // 修掉的舊缺陷）。這一格是 ③a-2 的另一邊：兩格一起才把 `moveCanChange` 的條件釘住，
+        // 只把 `&&` 改成 `||` 而不看這一格，就會讓舊缺陷復活。
+        bool wholeBase = CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue);
+        (int whX, int whY, int whW, int whH) = CropUi.SelfTestRectPx();
+        bool wholeRan = DragPixels(whX + whW / 2, whY + whH / 2, whX + whW / 4, whY + whH / 4,
+                                   out CropWindow.DragRun wholeRun, out string wholeDetail);
+        bool wholeStartsNew = wholeRan && wholeRun.Mode == "New";
+        bool spanOk = spanBase && spanRan && spW > 0 && spH > 0 && spanMoved &&
+                      wholeBase && wholeRan && whW > 0 && whH > 0 && wholeStartsNew;
+        evidence.Line($"crop ui selftest: move drag on a rectangle that spans the full WIDTH " +
+                      $"(one axis flush): base={spX},{spY},{spW},{spH} dy={spDy} " +
+                      $"end={Px(spanRun.AfterEnd)} mode={spanRun.Mode} moved={spanMoved} | " +
+                      $"whole-image reference: base={whX},{whY},{whW},{whH} mode={wholeRun.Mode} " +
+                      $"startsNew={wholeStartsNew} ok={spanOk} ({spanDetail}) ({wholeDetail})");
+
         // 舊旗標的名字與那一行都留著（套件比對的就是那一行），但**意思變強了**：
-        // 它現在斷言的是「拖曳真的把矩形搬到預期的位置」，不再只是「接縫跑過了」。
-        bool dragged = moveOk;
+        // 它現在斷言的是「拖曳真的把矩形搬到預期的位置」＋「貼齊一邊的矩形也搬得動」，
+        // 不再只是「接縫跑過了」。
+        bool dragged = moveOk && spanOk;
         evidence.Line($"crop ui selftest: programmatic drag (the three mouse handlers) ok={dragged} " +
                       $"{moveDetail}");
 

@@ -781,6 +781,37 @@ function Invoke-S18 {
      (Test-Log $ui.Lines 'newBoxDrag=True \(down=True reverse=True margin=True\)')) `
     "missing='" + ($newBoxMissing -join ' | ') + "' line='" + (Get-LogLine $ui.Lines 'NEW box drag from inside the photo towards the bottom-right') + "'"
 
+  # ---------------------------------------------------------------- S18.15h a flush edge is movable
+  # 2026-10-07 USER REPORT (real hardware): "I want to nudge the box and it wipes my selection and
+  # makes me start over". Root cause: the drag classifier asked `roomOnX && roomOnY`, so a rectangle
+  # flush with ONE image edge was classified as New. That flush state is the COMMON one, not an
+  # edge case: a portrait photo with 16:9/4:3 gets a box whose width equals the image width, because
+  # CropMath takes the largest same-ratio rectangle inside the box.
+  # !! The pre-existing move check used a centred baseline (0.25,0.25,0.5,0.5), whose four edges are
+  # all away from the image border - which is exactly why this defect survived every suite. The two
+  # halves below pin BOTH sides of the condition: one axis flush must still be Move (the useful
+  # behaviour), while a rectangle that IS the whole image must still be New (otherwise opening the
+  # window and dragging on the picture does nothing - the defect fixed on 2026-10-06).
+  # No fixture number is written here: the base rectangle, the displacement and the end rectangle are
+  # read out of the product's own line, and the arithmetic is checked against them.
+  $spanLine = Get-LogLine $ui.Lines 'spans the full WIDTH'
+  $spanOk = $false
+  $spanDetail = "line='" + $spanLine + "'"
+  if ($spanLine -match 'base=(\d+),(\d+),(\d+),(\d+) dy=(\d+) end=(\d+),(\d+),(\d+),(\d+) mode=(\w+) moved=(\w+)') {
+    $sBX = [int]$Matches[1]; $sBY = [int]$Matches[2]; $sBW = [int]$Matches[3]; $sBH = [int]$Matches[4]
+    $sDy = [int]$Matches[5]
+    $sEX = [int]$Matches[6]; $sEY = [int]$Matches[7]; $sEW = [int]$Matches[8]; $sEH = [int]$Matches[9]
+    $sMode = $Matches[10]; $sMoved = $Matches[11]
+    $spanOk = ($sMode -eq 'Move') -and ($sMoved -eq 'True') -and
+              ($sEY -eq $sBY + $sDy) -and ($sEX -eq $sBX) -and
+              ($sEW -eq $sBW) -and ($sEH -eq $sBH) -and
+              ($sBW -gt 0) -and ($sBH -gt 0) -and ($sDy -gt 0) -and
+              (Test-Log $ui.Lines 'startsNew=True ok=True')
+    $spanDetail = "mode=$sMode moved=$sMoved base=$sBX,$sBY,$sBW,$sBH dy=$sDy end=$sEX,$sEY,$sEW,$sEH"
+  }
+  Check 'S18.15h a rectangle flush with ONE image edge is still MOVED by dragging inside it, while a rectangle that IS the whole image still starts a new selection' `
+    $spanOk $spanDetail
+
   # The ratio buttons: each one must be reachable AND must actually change the rectangle.
   # !! The `^` anchor is not decoration: the summary line "ratio states: free: ... ratio=free rect=..."
   # also contains the text "ratio 'free' ->" (inside the state it embeds), so an unanchored pattern
@@ -1222,7 +1253,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S18' { Expect 37; Invoke-S18 }
+    'S18' { Expect 38; Invoke-S18 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }
