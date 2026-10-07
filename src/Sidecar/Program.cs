@@ -735,6 +735,14 @@ internal sealed class Options
     /// 讓驗收能斷言「視窗長什麼樣、有沒有捲軸」。內容順序來自 `--merge-ui-selftest` 的那一組檔。</summary>
     public string MergeUiDump = "";
     /// <summary>
+    /// `--merge-ui-autoconfirm`：讓下一個開起來的排序視窗**自己按確認**（走真視窗的確認鈕，
+    /// 不注入合成滑鼠）。搭配 `--wheel-payload … --wheel-tool merge-pdf` 時，這一條診斷會
+    /// **留下來等**那個延後的合併真的跑完——這是「畫面順序 → 確認回呼 → 排進佇列 → 抽乾 →
+    /// 真的產出檔案」整條正式路徑唯一能端到端被驗到的方式（見 <see cref="MergeUi.EnableAutoConfirm"/>）。
+    /// 不給這個開關時，一行都不會執行，行為與加它之前逐位元相同。
+    /// </summary>
+    public bool MergeUiAutoConfirm;
+    /// <summary>
     /// M3：`--tools-list`——把工具層的扇區清單印出來就結束（不必視窗、不必滑鼠、不必搶單一實例）。
     /// 見 <see cref="App.RunToolsList"/>。
     /// </summary>
@@ -1011,6 +1019,7 @@ internal sealed class Options
                 case "--crop-ui-dump": if (i + 1 < args.Length) o.CropUiDump = args[++i]; break;
                 case "--merge-ui-selftest": if (i + 1 < args.Length) o.MergeUiSelfTest = args[++i]; break;
                 case "--merge-ui-dump": if (i + 1 < args.Length) o.MergeUiDump = args[++i]; break;
+        case "--merge-ui-autoconfirm": o.MergeUiAutoConfirm = true; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
                     if (i + 1 < args.Length)
@@ -1501,6 +1510,13 @@ internal static class App
         if (opt.WheelPayload != null)
         {
             string[] injected = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            if (opt.MergeUiAutoConfirm)
+            {
+                // 必須在酬載進來**之前**開好：開窗是 Enter 那一刻發生的事，而那已經在下面了。
+                MergeUi.EnableAutoConfirm();
+                evidence.Line("payload: --merge-ui-autoconfirm is on (the sorting window will confirm " +
+                              "the order it shows, by pressing its own confirm button)");
+            }
             evidence.Line($"*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): {injected.Length} path(s) ***");
             // 依生產順序模擬：先捕捉（升起接收層），酬載才可能到達。
             guard.OnCaptured();
@@ -1534,6 +1550,20 @@ internal static class App
             // 拒絕狀態（混合選取／不支援）下 Enter 必須不執行，而且輪盤要留在畫面上等 Esc。
             if (opt.WheelDump != null) presenter.DumpTo(opt.WheelDump);
             bool committed = CommitWheel(presenter, guard, evidence, runner);
+            // ⚠ 2026-10-07（切片 B，選項 (b) 之後）：`merge-pdf` 是**延後**提交——Enter 只開排序
+            //    視窗並 `return false`。開窗是排給 WPF 執行緒的**非同步**要求（`PostToSharedUiThread`
+            //    不等待，因為開 modal 視窗要是等下去就等於把主訊息迴圈凍住），所以這一條診斷
+            //    必須**留下來等它真的開起來**，否則行程會在視窗建好之前就結束、把 STA 執行緒一起帶走。
+            //    實測：不等的那一版，日誌到 `merge ui: open requested` 就 `=== session end ===`
+            //    （+170 ms），永遠看不到 `merge ui: window created`；而 S21.07 要驗的正是
+            //    「真的開了視窗、而且真的在等人」——那是「取消 ⇒ 什麼都不產出」這句話的證據。
+            //    等的時候必須**幫浦訊息**（`PumpUntil`）：抽乾佇列的是主訊息迴圈裡的 `WM_APP_TICK`。
+            if (!committed)
+            {
+                bool opened = PumpUntil(() => MergeUi.IsOpen, 15000);
+                evidence.Line($"payload: merge-pdf was deferred -> the sorting window is " +
+                              $"{(opened ? "OPEN and waiting for the user (the process stays alive)" : "NOT open")}");
+            }
             // 診斷用：確定性地重現「第一次回呼來得太晚」這個時序（見 ProgressPresenter.Update）。
             // CommitWheel -> ConversionClient.Start 會為了等 worker 連線而擋住 UI 執行緒，
             // 而 worker 的實際工作只要幾毫秒；再睡一下，就保證第一個回呼看到的是「已完成」。
@@ -1552,9 +1582,67 @@ internal static class App
 
             // M1e：這條注入路徑**真的會轉檔**（透過 worker 行程），所以它就是 UI 端最完整的自動驗證：
             // 進度那一行、淡出、部分失敗摘要都能在這裡被斷言，不需要滑鼠。
-            if (committed)
+            //
+            // ⚠ 第二個條件是 2026-10-07（切片 B）加的：`merge-pdf` 走的是**延後**提交——Enter
+            //    不執行工具，只開排序視窗並 `return false`（這是刻意的：讓 `--wheel-payload` 不會
+            //    去等一個永遠不會開始的工作而回報假的成功 0）。所以在這一條診斷裡，
+            //    「有沒有東西要等」不是 `committed` 而是「**有沒有排進一個真的會跑的合併**」。
+            //    這正是 `PendingMerges.Enqueue` → `StartMerge` 那一段唯一能端到端被驗到的地方。
+            //
+            //    `MergeUi.IsOpen` 是**非同步**才變成 true 的（開窗是排給 WPF 執行緒的非同步要求），
+            //    所以這裡必須等它一下。實測 2026-10-07：不等就會在視窗開起來之前判定
+            //    「沒有東西要等」，行程當場結束，`--merge-ui-autoconfirm` 一次都沒跑到。
+            bool awaitingMerge = false;
+            if (opt.MergeUiAutoConfirm)
+            {
+                var mergeWait = System.Diagnostics.Stopwatch.StartNew();
+                while (mergeWait.ElapsedMilliseconds < 15000 && !MergeUi.IsOpen)
+                    PumpUntil(() => MergeUi.IsOpen, 100);
+                awaitingMerge = MergeUi.IsOpen;
+                evidence.Line($"payload: the deferred merge window is {(awaitingMerge ? "open" : "NOT open")} " +
+                              $"after {mergeWait.ElapsedMilliseconds} ms -> " +
+                              $"{(awaitingMerge ? "waiting for the confirmed merge to drain and run" : "nothing to wait for")}");
+            }
+            if (awaitingMerge)
+                evidence.Line("payload: merge-pdf was deferred to the sorting window; waiting for the " +
+                              "merge to be confirmed and drained (--merge-ui-autoconfirm)");
+            if (committed || awaitingMerge)
             {
                 ConversionSnapshot final = runner.Wait(60000);
+                // ⚠ 合併走的是**延後**提交，所以「runner 說它完成了」不等於「合併跑完了」：
+                //    這一條診斷後面還有 `strip-metadata` 那一輪（release-path），它會把 runner 的
+                //    快照重設，而且**可能在視窗還沒按確認之前就完成**。
+                //
+                //    ⚠⚠ 還有一個更根本的量測（2026-10-07）：**不可以**在這裡用阻塞的 `runner.Wait`。
+                //    抽乾 `PendingMerges` 的是既有週期回呼（`visual.TickRequested`），而那個回呼
+                //    是**主訊息迴圈**裡的 `WM_APP_TICK`；阻塞主執行緒＝那個訊息永遠不會被派送，
+                //    合併就永遠不會被抽乾。實測：用 `runner.Wait(60000)` 等，日誌是
+                //    「deferred merge wait = 60000 ms ... ok=0」→ 逾時後**才**看到
+                //    `worker: job 1 sent (... op=merge-pdf)`，差了整整 60 秒。
+                //    所以這裡改成**一邊幫浦訊息一邊等**（`PumpUntil`，它會派送佇列裡的訊息）。
+                if (awaitingMerge)
+                {
+                    var mergeWait = System.Diagnostics.Stopwatch.StartNew();
+                    while (mergeWait.ElapsedMilliseconds < 60000)
+                    {
+                        PumpUntil(() => runner.Snapshot.Finished && runner.Snapshot.Ok >= 1, 500);
+                        if (runner.Snapshot.Finished && runner.Snapshot.Ok >= 1) break;
+                    }
+                    final = runner.Snapshot;
+                    evidence.Line($"payload: deferred merge wait = {mergeWait.ElapsedMilliseconds} ms, " +
+                                  $"finished={final.Finished} ok={final.Ok} failed={final.Failed} line='{final.Line}'");
+                    if (final.Finished && final.Ok >= 1)
+                    {
+                        committed = true;
+                        evidence.Line("payload: the deferred merge finished -> the window confirmed, " +
+                                      "the queue drained, the worker ran the job");
+                    }
+                    else
+                    {
+                        evidence.Line("payload: the deferred merge produced NOTHING (the window never " +
+                                      "confirmed, or the queue never drained, or the worker never ran)");
+                    }
+                }
                 evidence.Line($"conversion finished: finished={final.Finished} ok={final.Ok} failed={final.Failed} " +
                               $"error={final.Error ?? "-"} line='{final.Line}'");
                 // 轉檔是這一條診斷最主要的外部效果：它沒跑完（逾時／worker 沒接上／管道斷）
@@ -1578,16 +1666,42 @@ internal static class App
                 // 自動測試碰不到。這裡用 detector.ForceRelease("mouse up") 走**同一條** Released
                 // 事件，至少證明「滑鼠放手 → 執行轉檔」這段接線是通的。
                 // 真實手勢仍必須人工確認（這條只保證接線，不保證 Windows 真的把 mouse-up 送給我們）。
-                guard.OnCaptured();                       // 接收層再次升起（＝第二次拖曳）
-                ShowWheelFromPayload(presenter, catalog, evidence, injected);
-                int sel = presenter.SelectNext(1);        // 換一個扇區，輸出才不會撞名
-                evidence.Line($"release-path: selected index={sel} target={presenter.SelectedTarget}");
-                detector.ForceRelease("mouse up");        // 走真正的 Released 事件，不是替代品
-                ConversionSnapshot after = runner.Wait(60000);
-                evidence.Line($"release commit finished: finished={after.Finished} ok={after.Ok} " +
-                              $"failed={after.Failed} line='{after.Line}'");
-                if (!after.Finished) verdict = false;
-                PumpUntil(() => !progress.IsVisible, 12000);
+                //
+                // ⚠ 排序視窗還開著時**不跑這一段**（2026-10-07，切片 B）：那時的語意是「有人在
+                //    視窗前面決定順序」，再送一次釋放只會多跑一次轉檔、把輸出目錄弄亂，
+                //    而它驗的東西與這裡無關。
+                if (!MergeUi.IsOpen)
+                {
+                    guard.OnCaptured();                       // 接收層再次升起（＝第二次拖曳）
+                    ShowWheelFromPayload(presenter, catalog, evidence, injected);
+                    int sel = presenter.SelectNext(1);        // 換一個扇區，輸出才不會撞名
+                    evidence.Line($"release-path: selected index={sel} target={presenter.SelectedTarget}");
+                    detector.ForceRelease("mouse up");        // 走真正的 Released 事件，不是替代品
+                    ConversionSnapshot after = runner.Wait(60000);
+                    evidence.Line($"release commit finished: finished={after.Finished} ok={after.Ok} " +
+                                  $"failed={after.Failed} line='{after.Line}'");
+                    if (!after.Finished) verdict = false;
+                    PumpUntil(() => !progress.IsVisible, 12000);
+                }
+                else
+                {
+                    evidence.Line("release-path: skipped (the sorting window is open; the user is still " +
+                                  "choosing the order)");
+                }
+            }
+
+            // ⚠ 最後一段：排序視窗還開著時**留在這裡等**（2026-10-07，切片 B）。
+            //    正式路徑靠的是常駐的訊息迴圈；這一條診斷沒有那個迴圈（它在 Main 的早期就返回了），
+            //    所以如果不留下來，視窗會在行程結束時被一起拆掉——「真的開了視窗、而且真的在等
+            //    使用者」就無法被外部觀察到，而 S21.07（取消 ⇒ 什麼都不產出）要的正是那個證據。
+            //    幫浦到視窗關閉為止（使用者按確認或取消）；逾時就誠實說出來。
+            if (MergeUi.IsOpen)
+            {
+                evidence.Line("payload: the sorting window is open -> staying alive until the user " +
+                              "confirms or cancels (up to 900000 ms)");
+                bool closed = PumpUntil(() => !MergeUi.IsOpen, 900000);
+                evidence.Line($"payload: the sorting window {(closed ? "was closed by the user" : "was still " +
+                              "open after 900000 ms")} -> this diagnostic is done");
             }
             if (!verdict)
                 evidence.Line("wheel-payload: this diagnostic run produced NO verdict -> exit 3 " +
@@ -2701,6 +2815,24 @@ internal static class App
         // 真實拖曳的檔案清單必須留證據（M1d 的批次輸出要用它；也讓「讀到什麼」可回溯）。
         // 格式與 WM_DROPFILES 路徑一致，S8 才能斷言「這一批就是被拖的那個檔」。
         foreach (string path in paths) evidence.Line($"    payload file: {path}");
+        // 工具清單**永遠算**（很便宜），而且要**先算**：決定顯示哪一層需要它。
+        // 顯示哪一層由 Shift 決定——不能只在 Shift 按著時才算，否則「先顯示格式層、
+        // 之後才按 Shift」會找不到工具可切（PendingTools 會是空的）。
+        IReadOnlyList<ToolDescriptor> tools = verdict.Status == PayloadStatus.Ready
+            ? new ToolCatalog().ToolsFor(verdict)
+            : Array.Empty<ToolDescriptor>();
+        PendingTools = tools;
+
+        // ⚠ **「可以轉成圖片」與「有工具適用」是兩個判定**（2026-10-07 切片 B）。
+        //
+        // `Classify` 現在會讓「有工具適用」的格式（PDF）也到 Ready，但**不給它第一層格式扇形**：
+        // `TargetsFor("PDF")` 回空清單（PDF 不是可轉出的目標）。所以這一區的規則是：
+        //   ①有可轉的目標格式      -> 既有行為：格式層，`notice` 為 null
+        //   ②沒有可轉的目標但有工具 -> **工具層**：輪盤上只出現工具扇形（merge-pdf），
+        //      第一層沒有東西可選，所以不出現「不支援的格式」（那句話現在是不對的：
+        //      這一種格式**有**一個做得成的動作）。提示改成「沒有可轉換的目標格式」——
+        //      它描述的是**格式層**為什麼空，而不是「這批檔案沒用」。
+        //   ③Mixed／連目錄都不認識的 Unsupported -> 既有拒絕訊息，工具清單為空（規格 §4.3）。
         string? notice = verdict.Status switch
         {
             PayloadStatus.Mixed => "混合選取，請選同類別",       // 規格 §4.3 的原文
@@ -2711,13 +2843,13 @@ internal static class App
         IReadOnlyList<string> targets = notice == null
             ? catalog.TargetsFor(verdict.SourceFormat)
             : Array.Empty<string>();
-        if (notice == null && targets.Count == 0) notice = "沒有可轉換的目標格式";
-
-        // 工具清單**永遠算**（很便宜）。顯示哪一層由 Shift 決定——不能只在 Shift 按著時才算，
-        // 否則「先顯示格式層、之後才按 Shift」會找不到工具可切（PendingTools 會是空的）。
-        PendingTools = notice == null
-            ? new ToolCatalog().ToolsFor(verdict)
-            : Array.Empty<ToolDescriptor>();
+        if (notice == null && targets.Count == 0)
+        {
+            notice = "沒有可轉換的目標格式";
+            // 這一層沒有東西可選，但工具層可能有 ⇒ 工具清單**不跟著清掉**（見上面 ②）。
+            // 若連工具都沒有（例如一個目錄認識、卻沒有任何工具適用的格式），
+            // `tools` 本來就是空的，畫面與改動前一樣。
+        }
 
         // 把「重畫另一層需要的輸入」存起來：Shift 切層時要憑它把原本那一層畫回來。
         _wheelSourceFormat = verdict.SourceFormat ?? "?";
@@ -3614,13 +3746,47 @@ internal static class App
     ///
     /// 回傳碼：0 有清單、3 清單是空的（那代表這個組合下輪盤的工具層什麼都不會顯示）。
     /// </summary>
+    /// <summary>
+    /// M3：`--tools-list`——把工具層的扇區清單印出來就結束（不必視窗、不必滑鼠、不必搶單一實例）。
+    ///
+    /// ⚠ **有 `--wheel-payload` 時走的是真正的分類路徑**（`FormatCatalog.Classify`），不是
+    /// 「自己塞一個 Ready 進去」。這個差別在 2026-10-07 量到過：`--tools-list --wheel-source pdf`
+    /// 回 6 顆工具（含 merge-pdf），但同一批 PDF 走**執行期**的 `--wheel-payload` 是
+    /// <code>
+    /// wheel from OLE payload: files=3 status=Unsupported source=UNKNOWN targets=0 notice=不支援的格式 tools=0
+    /// </code>
+    /// ——兩者不一致，而**只有後者**是使用者真的會遇到的。這一條舊行為本身沒有錯
+    /// （它誠實地回答「目錄過濾查詢」），但它**單獨存在時會讓人以為執行期路徑已經被覆蓋**。
+    /// 所以現在：給了酬載就用酬載（等於執行期），只給 `--wheel-source` 才是目錄查詢。
+    /// </summary>
     internal static int RunToolsList(Options opt, Evidence evidence)
     {
-        var verdict = new PayloadVerdict(PayloadStatus.Ready,
-                                        string.IsNullOrEmpty(opt.WheelSource) ? "png" : opt.WheelSource);
+        PayloadVerdict verdict;
+        string how;
+        var catalog = new FormatCatalog(new CodecRegistry());
+        if (!string.IsNullOrEmpty(opt.WheelPayload))
+        {
+            string[] paths = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            verdict = catalog.Classify(paths);
+            how = $"runtime classification of {paths.Length} payload file(s) (FormatCatalog.Classify)";
+        }
+        else
+        {
+            verdict = new PayloadVerdict(PayloadStatus.Ready,
+                                         string.IsNullOrEmpty(opt.WheelSource) ? "png" : opt.WheelSource);
+            how = "catalog query for --wheel-source (no payload: NOT the runtime path)";
+        }
         IReadOnlyList<ToolDescriptor> tools = new ToolCatalog().ToolsFor(verdict);
+        // status= 與 notice= 一起印：只印清單的話，看不出「這一批到底是被拒絕還是被接受」。
+        string? notice = verdict.Status switch
+        {
+            PayloadStatus.Mixed => "混合選取，請選同類別",
+            PayloadStatus.Unsupported => "不支援的格式",
+            _ => null
+        };
         evidence.Line($"tool list: count={tools.Count} tools=[{string.Join(",", tools.Select(t => t.Id))}] " +
-                      $"(source={verdict.SourceFormat}, source of truth: ToolCatalog)");
+                      $"(source={verdict.SourceFormat ?? "UNKNOWN"}, status={verdict.Status}, " +
+                      $"notice={notice ?? "-"}, {how}, source of truth: ToolCatalog)");
         for (int i = 0; i < tools.Count; i++)
         {
             ToolDescriptor t = tools[i];

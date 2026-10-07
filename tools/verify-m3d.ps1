@@ -2019,6 +2019,22 @@ function Invoke-S19 {
 #     so they do not license any claim about Canva/Word/scanner output except the two HAND-WRITTEN
 #     negative files.
 #   - speed: unmeasured at this scale (the fixtures are 1-3 pages), so nothing here claims any.
+#
+#  !! ABOUT S20.12, ADDED 2026-10-07 AFTER OPTION (b) !!
+#   S20.12 is NOT WRONG, but on its own it is MISLEADING and that is worth spelling out. It asks
+#   `--tools-list --wheel-source pdf`, which INJECTS the source format: the tool catalog is asked
+#   "what applies to a PDF", and it truthfully answers with all six tools. That query never calls
+#   FormatCatalog.Classify, which is the function that decides whether the WHEEL can offer a tool
+#   layer at all. Measured on the day option (b) was approved, the runtime path was:
+#     wheel from OLE payload: files=3 status=Unsupported source=UNKNOWN targets=0 notice=<refused> tools=0
+#     wheel-tool 'merge-pdf': not in the catalog []
+#   So S20.12 was GREEN while merge-pdf could not be selected from the wheel, and the whole
+#   tool layer - not just merge-pdf - was unreachable from the real drag path. A catalog query is
+#   a true statement about the catalog; it is NOT evidence about the runtime path.
+#   The runtime path is covered by S21.10..S21.13 in this same file (payload classification,
+#   merge-pdf reachable and format-bound, mixed payload refused, and the end-to-end run through
+#   the wheel with no mouse and no CLI seam). The gap was visible in the brief before that
+#   (see the note directly above) - it is recorded here so nobody reads a green S20 as coverage.
 # =============================================================================
 function Invoke-S20 {
   Write-Host "=== S20 merge-pdf tool: ordered merge, per-page preservation, and fail-fast ==="
@@ -2382,7 +2398,11 @@ function Invoke-S20 {
     $n = [regex]::Matches($helpMgText, '(?m)^\s+' + [regex]::Escape($sw)).Count
     if ($n -eq 1) { $helpDefs++ }
   }
-  Check 'S20.12 the catalog and --help: a PDF source now sees SIX tools including merge-pdf, a JPEG still sees five, and both new switches are documented exactly once' `
+  # S20.12 - CATALOG QUERY ONLY. `--wheel-source pdf` injects the format, so this never touches
+  # FormatCatalog.Classify and says nothing about whether the wheel can offer these tools. It was
+  # green while merge-pdf was unreachable from the wheel (see the S20 header block, added
+  # 2026-10-07). The runtime path is S21.10..S21.13.
+  Check 'S20.12 the catalog and --help: a PDF source now sees SIX tools including merge-pdf, a JPEG still sees five, and both new switches are documented exactly once (CATALOG QUERY, not the runtime path - see S21.10..S21.13)' `
     (($tlPdf.Exit -eq 0) -and ($tlJpg.Exit -eq 0) -and
      (Test-Log $tlPdf.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\]') -and
      (Test-Log $tlPdf.Lines "tool list: 5 id=merge-pdf label='MERGE PDF'") -and
@@ -2788,36 +2808,166 @@ function Invoke-S21 {
   $cxAfter = Get-DirState $cx
   $cxNew = @()
   foreach ($line in $cxAfter) { if ($cxBefore -notcontains $line) { $cxNew += $line } }
-  # S21.07 has two possible shapes, decided by the PRODUCT, not by this suite:
-  #   (reachable) the wheel offers merge-pdf for these PDFs, so the real commit path opens the
-  #     window, waits for a human, and (because nobody confirms) writes NOTHING. Evidence: the
-  #     process had to be KILLED and the log names the window.
-  #   (not reachable) measured 2026-10-07: the wheel classifies a PDF as Unsupported
-  #     (`status=Unsupported source=UNKNOWN tools=0`), so `--wheel-tool merge-pdf` cannot select
-  #     anything and the commit never calls the window. The requirement still enforced here is
-  #     the one that matters for this section: NOTHING was written either way.
-  # This is deliberately a fork rather than a weakened check: on the day the wheel can reach the
-  # tool, this assertion demands the real wait-and-cancel behaviour instead of accepting the
-  # symptom, and it goes red until that is true.
-  $wheelUnsupported = Test-Log $cancelRun.Lines 'status=Unsupported source=UNKNOWN targets=0'
-  $wheelToolMissing = Test-Log $cancelRun.Lines "wheel-tool 'merge-pdf': not in the catalog"
-  $reachable = (-not $wheelUnsupported) -and (-not $wheelToolMissing)
+  # S21.07 STRICT (since 2026-10-07 option (b)): the wheel CAN reach merge-pdf, so this no longer
+  # has a "not reachable" escape hatch. It demands all three: the real commit path opens the
+  # window, the process really WAITS for a human (it had to be killed), and NOTHING was written.
+  # Before option (b) this assertion was written as a fork (accepting `status=Unsupported` as the
+  # symptom) precisely so that it would upgrade itself on the day the tool became selectable, and
+  # go red until the real wait-and-cancel behaviour existed. That day is today, so the fork is
+  # gone: keeping it would have made this a rubber stamp.
   $waited = (-not $cancelRun.DidExit)
   $openedWindow = Test-Log $cancelRun.Lines 'merge ui: window created'
-  $shapeOk = $false
-  if ($reachable) { $shapeOk = ($waited -and $openedWindow) } else { $shapeOk = ($wheelUnsupported -and $wheelToolMissing) }
-  Check 'S21.07 the real commit path writes NOTHING on cancel (and, when the wheel can reach merge-pdf, it must open the window and WAIT for the user - the process is killed and the log names the window)' `
-    ($shapeOk -and ($cxNew.Count -eq 0) -and ($cxBefore.Count -eq 3) -and ($cxAfter.Count -eq 3)) `
-    ("reachable=$reachable shapeOk=$shapeOk waited=$waited windowCreated=$openedWindow " +
-     "wheelUnsupported=$wheelUnsupported wheelToolMissing=$wheelToolMissing " +
-     "newFiles=$($cxNew.Count) before=$($cxBefore.Count) after=$($cxAfter.Count) " +
-     "BLOCKED-BY: a PDF classifies as Unsupported so the tool layer never lists merge-pdf")
+  $wheelReady = Test-Log $cancelRun.Lines 'wheel from OLE payload: files=3 status=Ready source=PDF'
+  $selectedTool = Test-Log $cancelRun.Lines "ENTER: tool layer -> index=5 op=merge-pdf"
+  Check 'S21.07 the real commit path opens the sorting window and WAITS for the user without writing anything (the process had to be killed), and the wheel really selected merge-pdf to get there' `
+    ($waited -and $openedWindow -and $wheelReady -and $selectedTool -and
+     ($cxNew.Count -eq 0) -and ($cxBefore.Count -eq 3) -and ($cxAfter.Count -eq 3)) `
+    ("waited=$waited windowCreated=$openedWindow wheelReady=$wheelReady selected=$selectedTool " +
+     "newFiles=$($cxNew.Count) before=$($cxBefore.Count) after=$($cxAfter.Count)")
 
-  # ---------------------------------------------------------------- S21.08 sources untouched
+  # ---------------------------------------------------------------- S21.10..S21.13 the RUNTIME path
+  # WHY THIS EXISTS (option (b), 2026-10-07): everything above could be green while the wheel was
+  # UNABLE to reach merge-pdf at all. Measured before the fix:
+  #   wheel from OLE payload: files=3 status=Unsupported source=UNKNOWN targets=0 notice=<refused> tools=0
+  #   wheel-tool 'merge-pdf': not in the catalog []
+  # A PDF classified as non-convertible, so ToolCatalog.ToolsFor returned an empty list and the
+  # whole tool layer - merge-pdf included - was unreachable from the wheel. S21.01 did NOT catch
+  # that, and neither did S20.12: both ask the CATALOG a question (`--tools-list --wheel-source
+  # pdf`), which INJECTS the source format and bypasses FormatCatalog.Classify. A catalog query is
+  # a true statement about the catalog; it is NOT evidence about the runtime path. These four
+  # checks ask the runtime path itself, with a real payload.
+  $rt = Join-Path $Work 'mergeui-runtime'
+  New-Item -ItemType Directory -Force -Path $rt | Out-Null
+  $rA = Join-Path $rt 'fx-a.pdf'
+  $rB = Join-Path $rt 'fx-b.pdf'
+  $rC = Join-Path $rt 'fx-c.pdf'
+  Copy-Item -LiteralPath $fA -Destination $rA -Force
+  Copy-Item -LiteralPath $fB -Destination $rB -Force
+  Copy-Item -LiteralPath $fC -Destination $rC -Force
+  # Seeded inline on purpose (a function cannot see the caller's locals - see the note above).
+  foreach ($p in @($rA, $rB, $rC)) {
+    $srcHashes[$p] = Get-Sha $p
+    $srcLens[$p] = (Get-Item -LiteralPath $p).Length
+    $srcMtimes[$p] = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+  }
+
+  # ---- S21.10 the runtime CLASSIFIER accepts this payload, and still offers no format sector.
+  # `--tools-list` now honours `--wheel-payload`, so when a payload is given the answer comes from
+  # the same FormatCatalog.Classify call the wheel itself makes - the `via classify` half is what
+  # makes this a RUNTIME answer instead of the catalog query S21.01 asks.
+  # NOTE: `tools=6` here is the CATALOG's complete list for that format, not a claim about which
+  # layer the wheel paints; the wheel's own line inside S21.13 is what shows the tool layer being
+  # used (`layer=tool tools=6`) while the format layer stays empty (`targets=0`).
+  $rtTools = Invoke-Confern 's21-rt-tools' @('--tools-list', '--wheel-payload', "$rA;$rB;$rC")
+  # NOTE: every literal [ ] in these patterns is escaped. Select-String takes a REGEX, and an
+  # unescaped `[...]` becomes a character class - measured 2026-10-07: the first version threw
+  # "range in reverse order" on `[rotate90,...,read-qr]` and killed the run at S21.10.
+  $rtClassified = Test-Log $rtTools.Lines 'tool list: count=6 tools=\[rotate90,strip-metadata,compress,crop,read-qr,merge-pdf\] \(source=PDF, status=Ready'
+  $rtHow = Test-Log $rtTools.Lines 'runtime classification of 3 payload file\(s\) \(FormatCatalog\.Classify\)'
+  Check 'S21.10 a payload of PDFs is accepted by the RUNTIME classifier (FormatCatalog.Classify), not merely by a catalog query: status=Ready with merge-pdf in the list, where before option (b) the same payload answered status=Unsupported with zero tools' `
+    ($rtClassified -and $rtHow) `
+    ("count6AndReady=$rtClassified viaClassify=$rtHow")
+
+  # ---- S21.11 merge-pdf is offered ONLY for PDF. This is the other half of S21.01, asked of the
+  # runtime path rather than of the catalog.
+  $rtJpg = Invoke-Confern 's21-rt-jpg' @('--tools-list', '--wheel-source', 'JPG')
+  $jpgHasMerge = Test-Log $rtJpg.Lines 'tools=\[[^]]*merge-pdf'
+  $pdfHasMerge = Test-Log $rtTools.Lines 'tools=\[[^]]*merge-pdf'
+  Check 'S21.11 merge-pdf appears for a PDF payload and NEVER for a JPG source, measured on the runtime path: it is the one tool bound to a single format' `
+    ($pdfHasMerge -and (-not $jpgHasMerge)) `
+    ("pdfHasMerge=$pdfHasMerge jpgHasMerge=$jpgHasMerge")
+
+  # ---- S21.12 mixed payload [image + PDF]: measured, not guessed. The categories differ, so spec
+  # 4.3 rejects the batch as a mixed selection and NO tool is offered - a picture that must be converted
+  # and a PDF that must be merged have no common executable meaning. This is intentional and is
+  # asserted so that a future "let any payload through" change has to argue with a test.
+  $mixDir = Join-Path $Work 'mergeui-mixed'
+  New-Item -ItemType Directory -Force -Path $mixDir | Out-Null
+  $mixJpg = Join-Path $mixDir 'fx-mix.jpg'
+  $mixPdf = Join-Path $mixDir 'fx-mix.pdf'
+  $jpgSrc = Get-ChildItem -LiteralPath (Join-Path $repo 'fixtures') -Recurse -Include *.jpg,*.jpeg,*.png |
+            Select-Object -First 1
+  $haveImage = $null -ne $jpgSrc
+  if ($haveImage) {
+    Copy-Item -LiteralPath $jpgSrc.FullName -Destination $mixJpg -Force
+    Copy-Item -LiteralPath $fA -Destination $mixPdf -Force
+    $mixRun = Invoke-Confern 's21-rt-mixed' @('--tools-list', '--wheel-payload', "$mixJpg;$mixPdf")
+    $mixRejected = Test-Log $mixRun.Lines 'status=Mixed'
+    # The notice text itself is CJK and this script is deliberately pure ASCII (PS 5.1 reads a
+    # BOM-less .ps1 as ANSI, so a CJK literal here would be corrupted - measured on this repo).
+    # The rejection is asserted through the machine-readable fields instead: status=Mixed, and a
+    # tool list that is EMPTY. That is the same claim; only the prose is left unasserted.
+    $mixNoTools = Test-Log $mixRun.Lines 'count=0 tools=\[\]'
+    $mixSourceUnknown = Test-Log $mixRun.Lines 'source=UNKNOWN'
+    Check 'S21.12 a MIXED payload (one image + one PDF) is still refused as mixed selection with no tools at all, even though the PDF alone is now accepted: the two files have no common action' `
+      ($mixRejected -and $mixNoTools -and $mixSourceUnknown) `
+      ("statusMixed=$mixRejected noTools=$mixNoTools sourceUnknown=$mixSourceUnknown image=$($jpgSrc.Name)")
+  } else {
+    Inconclusive 'S21.12 no image fixture was found under fixtures\ - cannot measure the mixed image+PDF payload'
+  }
+
+  # ---- S21.13 THE END-TO-END RUN (this is what option (b) was for). One process, no CLI merge
+  # seam, no synthetic input, no mouse:
+  #   wheel (payload -> status=Ready -> tool layer -> merge-pdf selected) ->
+  #   MergeUi.Open -> the window is built and shows the source order ->
+  #   the window confirms by pressing its OWN confirm button (--merge-ui-autoconfirm; a self-test
+  #   seam, NOT a synthetic mouse event) ->
+  #   the confirm callback runs on the WPF thread and only ENQUEUES (PendingMerges) ->
+  #   the existing visual.TickRequested drains it and StartMerge sends the worker job ->
+  #   the output file exists and its pages are in the order the window showed.
+  # Before option (b) the middle of this chain (Enqueue -> StartMerge) could not be reached at all
+  # and was an admitted honest gap; it is now measured.
+  $rtBefore = Get-DirState $rt
+  $real = Invoke-Confern 's21-rt-e2e' @('--wheel-payload', "$rA;$rB;$rC", '--wheel-tools',
+                                        '--wheel-tool', 'merge-pdf', '--merge-ui-autoconfirm')
+  $realWheelReady = Test-Log $real.Lines 'wheel from OLE payload: files=3 status=Ready source=PDF'
+  $realSelected = Test-Log $real.Lines "ENTER: tool layer -> index=5 op=merge-pdf"
+  $realWindow = Test-Log $real.Lines 'merge ui: window created for 3 file\(s\) in the given order =\[fx-a\.pdf,fx-b\.pdf,fx-c\.pdf\]'
+  $realConfirmed = Test-Log $real.Lines 'merge ui: auto-confirm ran=True'
+  $realQueued = Test-Log $real.Lines 'queued for the main thread \(the worker starts there\)'
+  $realDrained = Test-Log $real.Lines 'op=merge-pdf'
+  $realFinished = Test-Log $real.Lines 'the deferred merge finished -> the window confirmed, the queue drained, the worker ran the job'
+  # The wheel's own line: this is where `targets=0` (no format sector) and `layer=tool` are
+  # measured for a PDF payload.
+  $realNoFormatLayer = Test-Log $real.Lines 'wheel from OLE payload: files=3 status=Ready source=PDF targets=0'
+  $realToolLayer = Test-Log $real.Lines 'layer=tool tools=6'
+  # The order the merge actually ran with, as the product logged it when it started the job.
+  $realOrderLine = Get-LogLine $real.Lines 'merge: start files=3 order='
+  $realOrderOk = [bool]($realOrderLine -match 'order=\[fx-a\.pdf,fx-b\.pdf,fx-c\.pdf\]')
+  # The output file is found by DIFFING THE FOLDER, not by scraping a log line. Measured
+  # 2026-10-07: this path logs `merge: start ...` + `worker result: ok=True output=...`, NOT the
+  # CLI seam's `merge-pdf output: <name> exists=True` (that line belongs to `--merge-pdf`), so a
+  # pattern for it matched nothing and the check reported out='' while the file plainly existed.
+  $rtAfter = Get-DirState $rt
+  $rtNew = @()
+  foreach ($line in $rtAfter) { if ($rtBefore -notcontains $line) { $rtNew += $line } }
+  $realOutName = ''
+  if ($rtNew.Count -eq 1) { $realOutName = [string]($rtNew[0] -split '\|')[0] }
+  $realOutPath = Join-Path $rt $realOutName
+  $realPagesOk = $false
+  if ($realOutName -ne '' -and (Test-Path -LiteralPath $realOutPath)) {
+    $realMerged = Get-MergePages 's21-rt-e2e-pages' $realOutPath
+    $realWantSizes = @($srcSizesA) + @($srcSizesB) + @($srcSizesC)
+    $realWantShas = @($srcShasA) + @($srcShasB) + @($srcShasC)
+    $realPagesOk = Test-MergeOrderMatches @($realMerged.Pages) $realWantSizes $realWantShas
+  }
+  # The name still comes from the first source's stem (NamingPolicy) - `fx-a` here, with `(1)`
+  # because the source already owns `fx-a.pdf`.
+  $realNameOk = ($realOutName -eq 'fx-a (1).pdf')
+  Check 'S21.13 END TO END through the real wheel path with no mouse and no CLI merge seam: the wheel selects merge-pdf (tool layer, no format sector), the sorting window opens with the source order, its own confirm button hands the order back, the callback enqueues, the existing tick drains it, the worker merges - and the output file exists with the source page order' `
+    ($realWheelReady -and $realSelected -and $realWindow -and $realConfirmed -and $realQueued -and
+     $realDrained -and $realFinished -and $realNoFormatLayer -and $realToolLayer -and
+     $realOrderOk -and $realNameOk -and $realPagesOk -and ($rtNew.Count -eq 1)) `
+    ("wheelReady=$realWheelReady selected=$realSelected window=$realWindow confirmed=$realConfirmed " +
+     "queued=$realQueued drained=$realDrained finished=$realFinished " +
+     "noFormatLayer=$realNoFormatLayer toolLayer=$realToolLayer orderOk=$realOrderOk " +
+     "out='$realOutName' nameOk=$realNameOk pagesOk=$realPagesOk newFiles=$($rtNew.Count)")
+
+  # S21.08 sources untouched
   # Spec 5: a source file is never modified, moved or deleted. sha256 + length + mtime on every
   # file this section handed to the product, checked after everything above.
   $touched = @()
-  foreach ($p in @($uA, $uB, $uC, $xA, $xB, $xC)) {
+  foreach ($p in @($uA, $uB, $uC, $xA, $xB, $xC, $rA, $rB, $rC)) {
     $nowSha = Get-Sha $p
     $nowLen = (Get-Item -LiteralPath $p).Length
     $nowMtime = (Get-Item -LiteralPath $p).LastWriteTimeUtc
@@ -2855,7 +3005,7 @@ foreach ($s in $sections) {
     'S18' { Expect 39; Invoke-S18 }
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
-    'S21' { Expect 9; Invoke-S21 }
+    'S21' { Expect 13; Invoke-S21 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

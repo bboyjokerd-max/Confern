@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Threading;
 using System.Windows;
 
 namespace Sidecar;
@@ -125,12 +127,70 @@ internal static class MergeUi
                 }
 
                 Log(log, $"merge ui: open requested for {batch.Length} file(s)");
+                if (_autoConfirm)
+                    StartAutoConfirm(generation, log);
             }
         }
         catch (Exception ex)
         {
             Log(log, $"merge ui: open threw {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 診斷接縫：讓下一個開起來的視窗**自己按確認**——走的是真視窗的
+    /// <see cref="MergeWindow.SelfTestConfirm"/>（＝確認鈕的 <c>RaiseEvent(Click)</c>），
+    /// **不是合成滑鼠事件**（本專案的規則：套件不注入合成輸入）。
+    ///
+    /// 為什麼需要它：有了它，「**畫面上的順序 → 確認回呼 → 排進佇列 → 抽乾 → 真的產出檔案**」
+    /// 這一整條正式路徑才能在不碰使用者滑鼠的前提下被端到端驗到。少了它，`PendingMerges.Enqueue`
+    /// 到 <c>StartMerge</c> 那一段只能靠讀程式碼相信——而那正是本專案列為缺口的那一類。
+    ///
+    /// ⚠ 呼叫端（<c>--wheel-payload</c> 的診斷）必須**留下來等**結果；否則行程會在視窗
+    ///   有機會確認之前就結束。它**不是**正式路徑的一部分：不傳這個開關時一行都不會執行，
+    ///   行為與加它之前逐位元相同。
+    /// </summary>
+    private static volatile bool _autoConfirm;
+
+    public static void EnableAutoConfirm() => _autoConfirm = true;
+
+    /// <summary>下一個開起來的視窗會被自動確認幾毫秒後（預設 600 ms，讓排版先跑完）。</summary>
+    public static void SetAutoConfirmDelay(int ms) => _autoConfirmDelayMs = ms;
+
+    private static volatile int _autoConfirmDelayMs = 600;
+
+    private static void StartAutoConfirm(long generation, Action<string>? log)
+    {
+        int delay = _autoConfirmDelayMs;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                // 等視窗真的開起來（排隊、建立、排版都要時間）。
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 20000)
+                {
+                    if (generation != Volatile.Read(ref _generation))
+                    {
+                        Log(log, "merge ui: auto-confirm gave up (this open was superseded)");
+                        return;
+                    }
+                    if (_isOpen && SelfTestWindowPresent(200, out _, null)) break;
+                    Thread.Sleep(50);
+                }
+
+                Thread.Sleep(Math.Max(0, delay));
+                bool confirmed = SelfTestConfirm(8000, out string detail, log);
+                Log(log, $"merge ui: auto-confirm ran={confirmed} ({detail}) - the window confirmed the " +
+                         $"order it showed, exactly like the confirm button");
+            }
+            catch (Exception ex)
+            {
+                Log(log, $"merge ui: auto-confirm threw {ex.GetType().Name}: {ex.Message}");
+            }
+        })
+        { IsBackground = true, Name = "MergeUiAutoConfirm" };
+        thread.Start();
     }
 
     /// <summary>

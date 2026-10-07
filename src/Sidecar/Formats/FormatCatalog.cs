@@ -12,6 +12,42 @@ internal sealed class FormatCatalog : IFormatCatalog
     /// <summary>MVP 可轉換的類別（規格 §4.4：圖片優先）。其他類別一律視為不支援。</summary>
     private static readonly string[] ConvertibleCategories = { "IMAGE" };
 
+    /// <summary>
+    /// **有工具適用**的 FORMAT（不是類別）——與「可轉成圖片」是**兩個不同的判定**
+    /// （2026-10-07，切片 B 補）。
+    ///
+    /// 為什麼非分開不可（這是**量出來的**，不是推論）：在這一條存在之前，一份 PDF 的輪盤路徑是
+    /// <code>
+    /// wheel from OLE payload: files=3 status=Unsupported source=UNKNOWN targets=0 notice=不支援的格式 tools=0
+    /// wheel-tool 'merge-pdf': not in the catalog []
+    /// </code>
+    /// 也就是說 <see cref="ToolCatalog.ToolsFor"/> 因為 `Status != Ready` 回空清單，於是
+    /// **輪盤上選不到 merge-pdf，那個工具的提交分支成了死碼**——工具做完了但使用者按不到。
+    ///
+    /// ⚠ 比對的是**格式名**（`CodecRegistry.FormatOfPath` 的回傳值，例如 `"PDF"`），
+    /// 不是 `Classify` 內部那個類別鍵。原因是量到的：PDF 的類別鍵是
+    /// `"UNDECODABLE:PDF"`（因為 `DeclarePdf` 宣告 `Decode: No`），拿 `"PDF"` 去比類別鍵
+    /// 會**永遠不成立**，症狀就是這條修正在第一版看起來「沒生效」
+    /// （`--tools-list --wheel-payload <3 pdf>` 仍然回 `count=0 status=Unsupported`）。
+    ///
+    /// 兩個判定的差別：
+    ///  ①**可轉成圖片**（類別 `"IMAGE"`）：第一層格式扇形會出現，且 `--convert` 會收下它。
+    ///    PDF 是這一類的**反面**，所以 `--convert` 仍然拒絕 PDF、第一層格式扇形仍然不出現。
+    ///  ②**有工具適用**（`"PDF"`）：**不給第一層格式扇形**（沒有可轉的目標），但把工具層打開，
+    ///    讓 `merge-pdf` 這一顆扇形真的畫得出來、選得到、按下去真的走那條提交路徑。
+    ///
+    /// 為什麼要留這張表、而不是「有工具就放行」：一個**目錄認識、卻連解碼器都裝不起來**的格式
+    /// （例如 `HEIC` 在沒有解碼器的機器上）也會「有工具適用」，但那些工具的每一次執行都會失敗。
+    /// 本專案的原則是「畫面上有的東西必須是真的」（見 <see cref="IToolCatalog"/>），
+    /// 所以這裡明列**確定做得到事**的格式，不靠推論。
+    ///
+    /// ⚠ 這一條**不會**把 PDF 變成可轉換的格式：`--convert &lt;pdf&gt;` 的拒絕語意、
+    /// `MvpInputs`／`MvpOutputs` 與規格 §6.1／§6.2 都不動。使用者凍結的是輪盤的**視覺**
+    /// （`WheelDesign`／方向 D 色票／7px 幾何），不是「哪些扇形該出現」——
+    /// 讀 QR 與 merge-pdf 的扇形本來就是這兩刀加上去的。
+    /// </summary>
+    private static readonly string[] ToolFormats = { "PDF" };
+
     private readonly CodecRegistry _codecs;
 
     public FormatCatalog(CodecRegistry codecs) => _codecs = codecs;
@@ -23,9 +59,12 @@ internal sealed class FormatCatalog : IFormatCatalog
 
     /// <summary>
     /// 規格 §4.3：**同類別**才給一組選項；不同類別＝混合選取（拒絕）。
-    /// 因此 [jpg, pdf] 是 <see cref="PayloadStatus.Mixed"/>（「請選同類別」），
-    /// 而 [pdf] 單獨一個才是 <see cref="PayloadStatus.Unsupported"/>（「不支援的格式」）——
-    /// 這是兩種不同的使用者訊息，不可以混為一談。
+    ///
+    /// `[pdf, pdf]` ⇒ <see cref="PayloadStatus.Ready"/>（PDF 有工具適用，輪盤開工具層）——
+    /// **與「可以轉成圖片」是兩件事**，見 <see cref="ToolFormats"/>。
+    /// `[jpg, pdf]` ⇒ <see cref="PayloadStatus.Mixed"/>（「請選同類別」）：圖片要轉、PDF 要合併，
+    /// 兩者放同一批沒有共同的可執行語意，所以仍然拒絕，而且仍然不給任何工具。
+    /// 一個連 <see cref="CodecRegistry"/> 都不認識的類別才是不支援。
     /// </summary>
     public PayloadVerdict Classify(IReadOnlyList<string> paths)
     {
@@ -60,10 +99,29 @@ internal sealed class FormatCatalog : IFormatCatalog
                 return new PayloadVerdict(PayloadStatus.Mixed, null);
         }
 
-        return ConvertibleCategories.Contains(category!, StringComparer.Ordinal)
-            ? new PayloadVerdict(PayloadStatus.Ready, firstFormat)
-            : new PayloadVerdict(PayloadStatus.Unsupported, null);
+        // 判定 ①：可以轉成圖片 ⇒ Ready，而且第一層格式扇形會出現。
+        if (ConvertibleCategories.Contains(category!, StringComparer.Ordinal))
+            return new PayloadVerdict(PayloadStatus.Ready, firstFormat);
+
+        // 判定 ②：不能轉成圖片，但這個格式**有工具適用** ⇒ 也 Ready（`SourceFormat` 必須填，
+        // 否則 `ToolsFor` 無從判斷適用性），而且**不給第一層格式扇形**——呼叫端看到
+        // `TargetsFor` 回空清單就知道「這一層沒有東西可選」，於是把工具層打開。
+        // 適用性的判定仍然**只有一個來源**：`ToolDescriptor.AppliesTo`；
+        // 這裡問的是工具目錄本身（`Tools`），不是自己再寫一份「PDF 有什麼工具」。
+        if (!string.IsNullOrEmpty(firstFormat)
+            && ToolFormats.Contains(firstFormat, StringComparer.OrdinalIgnoreCase)
+            && HasApplicableTool(firstFormat))
+            return new PayloadVerdict(PayloadStatus.Ready, firstFormat);
+
+        return new PayloadVerdict(PayloadStatus.Unsupported, null);
     }
+
+    /// <summary>
+    /// 這個來源格式有沒有**任何**工具適用。問的是 <see cref="ToolCatalog"/> 自己的判定
+    /// （`ToolsFor` → `ToolDescriptor.AppliesTo`），不是這裡的一張表。
+    /// </summary>
+    private static bool HasApplicableTool(string format) =>
+        new ToolCatalog().ToolsFor(new PayloadVerdict(PayloadStatus.Ready, format)).Count > 0;
 
     /// <summary>不認得的副檔名 → 自己的類別鍵（小寫、不含點）。</summary>
     private static string UnknownKey(string path)
@@ -83,6 +141,22 @@ internal sealed class FormatCatalog : IFormatCatalog
     {
         IReadOnlyList<string> offered = _codecs.OfferedOutputs;
         if (string.IsNullOrEmpty(sourceFormat)) return offered;
+
+        // ⚠ 2026-10-07（切片 B，選項 (b)）：**不能轉成圖片的來源格式，第一層一個扇區都不給。**
+        //
+        // 為什麼非擋不可（這是**量出來的**）：`Classify` 現在會讓 PDF 也到 Ready（它有一個真的
+        // 做得成的工具），而呼叫端只有在 `TargetsFor` 回空清單時才知道「這一層沒有東西可選、
+        // 該把工具層打開」。少了這一擋，一份 PDF 的輪盤會出現
+        // `targets=[ROTATE,CLEAN,COMPRESS,CROP]` ——那四顆的語意會變成
+        // 「把 PDF 轉成 PNG／JPG／…」，而 `--convert <pdf>` **做不到這件事**（PDF 不可解碼）。
+        // 畫面上有一顆按下去只會失敗的扇形，正是本專案禁止的那種東西。
+        // 實測（未擋之前）：`wheel from OLE payload: … source=PDF targets=4 notice=- layer=format`。
+        //
+        // 這個判定與 `Classify` 用的是同一份 `ConvertibleCategories`：**可轉成圖片的類別才有
+        // 目標格式**。「有工具適用」是另一個判定，它開的是工具層，不是這一層。
+        string category = _codecs.CategoryOf(sourceFormat) ?? "";
+        if (!ConvertibleCategories.Contains(category, StringComparer.Ordinal))
+            return Array.Empty<string>();
 
         var list = new List<string>(offered.Count);
         foreach (string format in offered)
