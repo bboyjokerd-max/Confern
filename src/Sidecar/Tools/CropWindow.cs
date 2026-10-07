@@ -106,6 +106,13 @@ internal sealed class CropWindow : Window
 
     // 拖曳狀態
     private DragMode _dragMode = DragMode.None;
+
+    // 「切換方向」的可逆性記憶（見 ToggleDirection）：翻過去之前的那個矩形，以及翻過去的結果。
+    // 只有在**目前的矩形仍然就是那一次翻轉的結果**時才拿來還原——所以使用者中途拖曳過、
+    // 按過比例鈕、或自測設過矩形，記憶就自動失效（不必在每個變更點掛勾）。
+    private Int32Rect? _flipRestoreRect;
+    private string? _flipRestoreId;
+    private Int32Rect? _flipResult;
     private Point _dragStartImage;
     private Int32Rect _dragStartRect;
 
@@ -592,13 +599,76 @@ internal sealed class CropWindow : Window
         try
         {
             if (CropRatios.Counterpart(_ratioId) is not { } other) return;
-            SelectRatio(other);
+            // ⚠ 這條路**刻意不走** SelectRatio／Constrain 的「在舊框內找最大等比矩形」語意。
+            //    來歷（2026-10-07 使用者實機回報）：「如果連續按直式跟橫式切換的話裁切框會越來越小」。
+            //    原因：每一步都拿上一步的結果再夾一次，於是**單調縮小**——實測（600x900 夾具，
+            //    從 16:9 的 600x338 起算）六次切換：190x338 → 190x107 → 60x107 → 60x34 → 19x34 → 19x11。
+            //    「切換方向」的語意是**同一個構圖翻到另一邊**，所以：
+            //      ① 翻過去保留長邊與中心（長邊逐字保留、只由比例推短邊 ⇒ 不累積捨入誤差）；
+            //      ② 翻**回來**時精確還原上一次翻過去之前的那個矩形——不然在橫式圖上
+            //         「16:9 → 9:16 → 16:9」會停在比較小的大小（實測 900x506 → 338x600 → 600x338，
+            //         因為 900 寬的框在 900x600 的圖上翻成直式根本放不下，只能縮到 338x600）。
+            //    有效性靠比對：只有在目前矩形仍然就是那一次翻轉的結果時才還原。
+            Int32Rect before = _rect;
+            string to = CropRatios.CanonicalId(other);
+            if (_flipRestoreRect is { } saved && _flipRestoreId == to && _flipResult == before)
+            {
+                _ratioId = to;
+                _rect = Constrain(saved, DragMode.Move);
+                _flipRestoreRect = null;
+                _flipRestoreId = null;
+                _flipResult = null;
+                Notice($"比例＝{CropRatios.LabelOf(_ratioId)}" +
+                       $"：矩形還原為 {_rect.Width}×{_rect.Height} px（翻回切換前的大小）");
+                _log?.Invoke($"crop ui: direction -> {_ratioId} (restored) " +
+                             $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height}");
+                UpdateVisuals();
+                return;
+            }
+            if (CropRatios.TargetRatio(to, _imageWidth, _imageHeight) is not { } target || target <= 0)
+            {
+                SelectRatio(to);
+                return;
+            }
+            _ratioId = to;
+            _rect = Constrain(FlipKeepingLongSide(before, target), DragMode.Move);
+            _flipRestoreRect = before;
+            _flipRestoreId = CropRatios.CanonicalId(CropRatios.Counterpart(to) ?? to);
+            _flipResult = _rect;
+            Notice($"比例＝{CropRatios.LabelOf(_ratioId)}" +
+                   (before.Width != _rect.Width || before.Height != _rect.Height
+                       ? $"：矩形由 {before.Width}×{before.Height} 翻轉為 {_rect.Width}×{_rect.Height} px（保留長邊與中心）"
+                       : "：矩形不變"));
+            _log?.Invoke($"crop ui: direction -> {_ratioId} " +
+                         $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height} " +
+                         $"longSideBefore={Math.Max(before.Width, before.Height)}");
+            UpdateVisuals();
         }
         catch (Exception ex)
         {
             Notice($"切換方向時發生未預期的錯誤（{ex.GetType().Name}）——已忽略");
             _log?.Invoke($"crop ui: ToggleDirection threw {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 把矩形翻成 <paramref name="targetRatio"/>，**保留長邊與中心**。
+    /// 長邊逐字保留、只由比例推出短邊，所以反覆切換是可逆的（不會像「在舊框內找最大」那樣
+    /// 每翻一次就被上一次的結果再夾一次）。翻過去若放不下影像，才縮到放得下的最大等比矩形。
+    /// 位置保持中心不變（超出邊界由後續的 <see cref="Constrain"/> 夾回影像內）。
+    /// </summary>
+    private Int32Rect FlipKeepingLongSide(Int32Rect r, double targetRatio)
+    {
+        int longSide = Math.Max(Math.Max(r.Width, r.Height), 1);
+        double w = targetRatio >= 1.0 ? longSide : longSide * targetRatio;
+        double h = targetRatio >= 1.0 ? longSide / targetRatio : longSide;
+        if (w > _imageWidth) { w = _imageWidth; h = w / targetRatio; }
+        if (h > _imageHeight) { h = _imageHeight; w = h * targetRatio; }
+        int nw = Math.Max(1, (int)Math.Round(w, MidpointRounding.AwayFromZero));
+        int nh = Math.Max(1, (int)Math.Round(h, MidpointRounding.AwayFromZero));
+        if (nw > _imageWidth) nw = _imageWidth;
+        if (nh > _imageHeight) nh = _imageHeight;
+        return new Int32Rect(r.X + (r.Width - nw) / 2, r.Y + (r.Height - nh) / 2, nw, nh);
     }
 
     /// <summary>畫面座標 → 影像像素座標（①→②）。超出畫布一律夾進影像內。</summary>

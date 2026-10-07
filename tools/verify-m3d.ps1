@@ -812,6 +812,37 @@ function Invoke-S18 {
   Check 'S18.15h a rectangle flush with ONE image edge is still MOVED by dragging inside it, while a rectangle that IS the whole image still starts a new selection' `
     $spanOk $spanDetail
 
+  # ---------------------------------------------------------------- S18.15i the flip is reversible
+  # 2026-10-07 USER REPORT (real hardware): "if I keep pressing the portrait/landscape toggle the crop
+  # box gets smaller and smaller - can it stay the same size?".
+  # Root cause: ToggleDirection went through SelectRatio, whose semantics are "the largest same-ratio
+  # rectangle INSIDE the old box". Every flip re-clamped the previous result, so six flips turned
+  # 600x338 into 19x11 (measured on the 600x900 fixture: 190x338 -> 190x107 -> 60x107 -> ...).
+  # The behaviour now: a flip keeps the long side and the centre, and flipping BACK restores the
+  # pre-flip rectangle exactly - which is what a landscape source needs, where a 900-wide box cannot
+  # fit as a portrait box at all (measured: 900x506 -> 338x600 -> 900x506).
+  # !! The product prints its own verdict flags, but reading a flag is a weak assertion, so the sizes
+  # are parsed out of the product's line and re-derived here: every EVEN flip must return to the base
+  # size exactly, all ODD flips must be identical (and different from the base), and the flipped area
+  # must still be at least 95% of what fits.
+  $flipLine = Get-LogLine $ui.Lines 'toggling the direction six times'
+  $flipOk = $false
+  $flipDetail = "line='" + $flipLine + "'"
+  if ($flipLine -match 'base=(\d+)x(\d+) sizes=([0-9x >-]+) .*oddArea=(\d+) expectedArea=(\d+)') {
+    $fBase = "$($Matches[1])x$($Matches[2])"
+    $fSizes = @($Matches[3].Trim() -split '\s*->\s*')
+    $fOddArea = [long]$Matches[4]; $fExpect = [long]$Matches[5]
+    $fEven = ($fSizes.Count -eq 6) -and ($fSizes[1] -eq $fBase) -and ($fSizes[3] -eq $fBase) -and ($fSizes[5] -eq $fBase)
+    $fOddSame = ($fSizes.Count -eq 6) -and ($fSizes[0] -eq $fSizes[2]) -and ($fSizes[2] -eq $fSizes[4]) -and ($fSizes[0] -ne $fBase)
+    $fBig = ($fExpect -gt 0) -and ($fOddArea * 100 -ge $fExpect * 95)
+    $flipOk = $fEven -and $fOddSame -and $fBig -and
+              (Test-Log $ui.Lines 'backToBase=True oddStable=True oddIsTall=True') -and
+              (Test-Log $ui.Lines 'oddBigEnough=True ok=True')
+    $flipDetail = "base=$fBase sizes=$($fSizes -join ' -> ') oddArea=$fOddArea expectedArea=$fExpect backToBase=$fEven oddStable=$fOddSame bigEnough=$fBig"
+  }
+  Check 'S18.15i flipping the direction repeatedly does NOT shrink the box: every second flip returns to the exact base size, every flipped size is identical, and the flipped box is still as large as fits' `
+    $flipOk $flipDetail
+
   # The ratio buttons: each one must be reachable AND must actually change the rectangle.
   # !! The `^` anchor is not decoration: the summary line "ratio states: free: ... ratio=free rect=..."
   # also contains the text "ratio 'free' ->" (inside the state it embeds), so an unanchored pattern
@@ -1253,7 +1284,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 foreach ($s in $sections) {
   switch ($s) {
-    'S18' { Expect 38; Invoke-S18 }
+    'S18' { Expect 39; Invoke-S18 }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

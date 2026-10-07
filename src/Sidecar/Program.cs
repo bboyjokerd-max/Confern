@@ -3625,6 +3625,64 @@ internal static class App
         evidence.Line($"crop ui selftest: direction toggle ok={directionOk}");
         if (!directionOk) ratiosOk = false;
 
+        // ④d-3 連續切換方向：**不可以越來越小**。
+        // ⚠ 來歷（2026-10-07 使用者實機回報）：「如果連續按直式跟橫式切換的話裁切框會越來越小」。
+        //    根因：ToggleDirection 走的是 SelectRatio ⇒ Constrain，而 Constrain 的語意是
+        //    「在**舊框內**找最大的等比矩形」——每一步都拿上一步的結果再夾一次，於是單調縮小
+        //    （600x338 → 190x338 → 190x107 → …，每次砍掉一半以上）。
+        //    正確語意是「同一個構圖翻到另一邊」⇒ **保留長邊**（可逆），不是再夾一次。
+        bool flipBase = CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue);
+        bool flipWide = flipBase && CropUi.SelfTestSelectRatio(CropRatios.IdWide, 5000, out _, lines.Enqueue);
+        (int fbx, int fby, int fbw, int fbh) = CropUi.SelfTestRectPx();
+        var flipSizes = new List<(int W, int H)>();
+        bool flipRan = flipWide && fbw > 0 && fbh > 0;
+        while (flipRan && flipSizes.Count < 6)
+        {
+            if (!CropUi.SelfTestToggleDirection(5000, out _, lines.Enqueue)) { flipRan = false; break; }
+            (int ffx, int ffy, int ffw, int ffh) = CropUi.SelfTestRectPx();
+            if (ffw <= 0 || ffh <= 0) { flipRan = false; break; }
+            flipSizes.Add((ffw, ffh));
+        }
+        // 三個條件，全部用產品自己報出來的尺寸推導（沒有寫死任何夾具數字）：
+        //   ① 第一次翻轉**保留長邊**（「同一個構圖翻過去」的直接後果）；
+        //   ② 六次翻轉之中，面積不得比初始小 1% 以上（擋掉單調縮小）；
+        //   ③ 從第二次起必須是**嚴格的 2-循環**（兩個方向的大小固定，不再漂移）。
+        // 四個條件，全部用產品自己報出來的尺寸與影像尺寸推導（沒有寫死任何夾具數字）：
+        //   ① 偶數次（翻回來）必須**精確回到原來的尺寸**——這正是使用者要的「維持一樣大小」；
+        //   ② 奇數次（翻過去）每次都一樣（沒有逐次漂移）；
+        //   ③ 奇數次真的變成直式（w/h ≈ 9:16，容許 1px 整數捨入）
+        //   ④ 翻過去拿到的是「放得下的最大框」：面積 ≥ min(原面積, 影像內最大的 9:16 面積) 的 95%
+        bool flipHas6 = flipSizes.Count == 6;
+        bool flipBackToBase = flipHas6 && flipSizes[1] == (fbw, fbh) &&
+                              flipSizes[3] == (fbw, fbh) && flipSizes[5] == (fbw, fbh);
+        bool flipOddStable = flipHas6 && flipSizes[0] == flipSizes[2] && flipSizes[2] == flipSizes[4] &&
+                             flipSizes[0] != (fbw, fbh);
+        //   ③ 奇數次真的變成直式：與 9:16 的差不得超過 1px（整數矩形不可能剛好等於無理數比例；
+        //      實測 338x600 與 9:16 差 0.15%，那是 337.5 → 338 的進位。橫式的 600x338 會差到 3 倍以上）
+        bool flipOddIsTall = flipHas6 && Math.Abs(flipSizes[0].W * 16 - flipSizes[0].H * 9) <= 16;
+        int tallW = (int)Math.Floor(imageHpx * (9.0 / 16)), tallH = imageHpx;
+        if (tallW > imageWpx) { tallW = imageWpx; tallH = (int)Math.Floor(imageWpx / (9.0 / 16)); }
+        long largestTallArea = (long)Math.Max(1, tallW) * Math.Max(1, tallH);
+        long flipBaseArea = (long)fbw * fbh;
+        long flipExpectedArea = Math.Min(flipBaseArea, largestTallArea);
+        bool flipOddBigEnough = flipHas6 &&
+                                (long)flipSizes[0].W * flipSizes[0].H * 100 >= flipExpectedArea * 95;
+        // 收尾：把視窗還原成後續階段期待的狀態（比例＝預設＝自由、矩形＝整張圖）。
+        // ⚠ 一定要還原：不還原的話 ⑤a「整張圖被拒絕」會紅——因為比例還停在 9:16，
+        //    Constrain 會把「整張圖」收斂成 9:16，於是那格的前提（矩形＝整張圖）不成立。
+        //    實測就是這樣紅的：fullFrameRefused=False subPixelClamped=False confirmedMatches=False。
+        bool flipReset = CropUi.SelfTestSelectRatio(CropRatios.DefaultId, 5000, out _, lines.Enqueue) &&
+                         CropUi.SelfTestSetRect(0, 0, 1, 1, 5000, out _, lines.Enqueue);
+        bool flipOk = flipRan && flipHas6 && flipBackToBase && flipOddStable &&
+                      flipOddIsTall && flipOddBigEnough && flipReset;
+        evidence.Line($"crop ui selftest: toggling the direction six times: base={fbw}x{fbh} " +
+                      $"sizes={string.Join(" -> ", flipSizes.Select(s => $"{s.W}x{s.H}"))} " +
+                      $"backToBase={flipBackToBase} oddStable={flipOddStable} oddIsTall={flipOddIsTall} " +
+                      $"oddArea={flipSizes.FirstOrDefault().W * flipSizes.FirstOrDefault().H} " +
+                      $"expectedArea={flipExpectedArea} (largestTall={largestTallArea}) " +
+                      $"oddBigEnough={flipOddBigEnough} ok={flipOk}");
+        if (!flipOk) ratiosOk = false;
+
         // ④e 比例列的幾何：**五顆比例鈕 ＋ 一顆方向鈕**還放得下嗎？
         // 「沒有捲軸」不足以回答它——StackPanel 不會生捲軸，它把放不下的東西**裁掉**。
         // 所以由視窗自己報「最右緣 vs 這一列被配置到的寬度」，腳本不量像素。
