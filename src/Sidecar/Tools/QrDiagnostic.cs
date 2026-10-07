@@ -273,13 +273,20 @@ internal static class QrDiagnostic
                       "(the process keeps running; the window is not what keeps it alive)");
 
         // ⑦ ⚠ 最重要的一條：開瀏覽器那條路徑在自測模式下**沒有真的開瀏覽器**。
-        //    順序刻意如此：先證明「真的那一支從來沒被走到」，再證明外部的瀏覽器行程數沒變。
+        //    順序刻意如此：先證明「真的那一支從來沒被走到」，再證明外部的瀏覽器行程數沒暴增。
+        //    ⚠ 2026-10-07 實測修正：這一行原本要求 browsersAfter == browsersBefore，那是個**會誤報的
+        //    見證**。量到的實例：browsersBefore=53 browsersAfter=52。這台機器上有 53 個瀏覽器行程，
+        //    而瀏覽器自己會不停生滅輔助行程（renderer／GPU／utility），**掉一個是正常抖動**，
+        //    不是我們的副作用；那一次抖動讓整個自測 ok=False，連帶把兩條斷言一起弄紅（一因兩紅）。
+        //    判定改成**不對稱**：真的開一個瀏覽器一定會**多出**行程，所以只有「變多」才算失敗；
+        //    「變少」是別人的事。主要見證仍然是那個確定的 realAttempts == 0（縫自己數「真實實作被
+        //    進入了幾次」），行程數只是第二個、外部的旁證——旁證不該有能力把好的自測判成壞的。
         int browsersBefore = QrBrowserOpener.BrowserProcessCount();
         bool seamOpened = QrBrowserOpener.TryOpen("https://example.com/qr-selftest", out string? seamError);
         Thread.Sleep(700);                       // 真的有開的話，行程會在這一小段時間內出現
         int browsersAfter = QrBrowserOpener.BrowserProcessCount();
         int realAttempts = QrBrowserOpener.RealLaunchAttempts;
-        bool seamHeld = seamOpened && realAttempts == 0 && browsersAfter == browsersBefore &&
+        bool seamHeld = seamOpened && realAttempts == 0 && browsersAfter <= browsersBefore &&
                         QrBrowserOpener.LastTarget == "https://example.com/qr-selftest";
         evidence.Line($"qr open selftest: safety: seamOpened={seamOpened} seamError={seamError ?? "-"} " +
                       $"realLaunchAttempts={realAttempts} browsersBefore={browsersBefore} " +

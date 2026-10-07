@@ -1677,9 +1677,13 @@ function Invoke-S19 {
     $winChars = [int]$Matches[1]
     if ($FaultInjection -eq 'qr-text') { $winChars = $winChars + 1 }   # the injected wrong expectation
   }
+  # This check owns ONE subject: the text window and its content. It deliberately does NOT also require
+  # the whole selftest to exit 0. Measured 2026-10-07: an unrelated browser-process drift made the
+  # aggregate ok=False, which reddened BOTH this check and S19.15 from a single cause - one cause must
+  # stay one red, or a reader learns to ignore red. The exit code is still printed in the detail below.
   $routedText = Test-Log $qrOpen.Lines 'qr open selftest: routed kind=text opened=True'
   Check 'S19.13 a non-url payload really opens the text window, and the window holds the decoded string character for character' `
-    (($qrOpen.Exit -eq 0) -and $routedText -and ($decChars -eq 42) -and ($winChars -eq $decChars) -and
+    ($routedText -and ($decChars -eq 42) -and ($winChars -eq $decChars) -and
      ($payload.Length -eq $decChars) -and (Test-Log $qrOpen.Lines 'window text chars=42 decoded chars=42 identical=True')) `
     "exit=$($qrOpen.Exit) routedText=$routedText decodedChars=$decChars windowChars=$winChars payloadChars=$($payload.Length) line='$winLine'"
 
@@ -1717,7 +1721,13 @@ function Invoke-S19 {
     $realAttempts = [int]$Matches[3]
     $browsersBefore = [int]$Matches[4]
     $browsersAfter = [int]$Matches[5]
-    $seamOk = ($Matches[1] -eq 'True') -and ($realAttempts -eq 0) -and ($browsersBefore -eq $browsersAfter)
+    # Asymmetric ON PURPOSE (measured 2026-10-07, the day this was written): the first version demanded
+  # browsersBefore == browsersAfter, and it reddened here with browsersBefore=53 browsersAfter=52.
+  # The browser churns its own helper processes (renderer/GPU/utility), so a DECREASE is noise.
+  # A real launch ADDS processes, so only an INCREASE is evidence of one. The deterministic witness
+  # stays realLaunchAttempts=0 (the seam counts entries into the real implementation); the process
+  # count is only a second, outside witness and must not be able to fail a healthy run.
+  $seamOk = ($Matches[1] -eq 'True') -and ($realAttempts -eq 0) -and ($browsersAfter -le $browsersBefore)
   }
   Check 'S19.15 the browser path was exercised through the seam and NO real browser was started (real implementation never entered, browser process count unchanged)' `
     ($seamOk -and (Test-Log $qrOpen.Lines 'noRealBrowser=True') -and
