@@ -54,7 +54,27 @@ internal enum ToolIcon
     /// 也刻意不用「相機鏡頭」那種圖示：本工具**不吃相機**，它讀的是已經在畫面上的圖，
     /// 畫一個鏡頭會承諾一件產品沒有做的事。
     /// </summary>
-    ReadQr
+    ReadQr,
+
+    /// <summary>
+    /// 合併 PDF（M3 第六顆扇形，工具 id `merge-pdf`）：**左邊兩張小頁 ＋ 一條收束的線 ＋
+    /// 右邊一張大頁**——「多份進去、一份出來」。
+    ///
+    /// 為什麼是這個形狀：17px 之下要與既有五顆一眼可分。前五顆佔掉的形狀是
+    /// 弧線（旋轉）、多邊形＋斜線（去中繼資料）、上下對稱的直線（壓縮）、
+    /// 一個框＋兩條對角線（裁切）、三個尋像圖案＋四個資料點（讀 QR）。
+    /// 這五顆的共同點是**都是單一物件**；唯一還沒被用掉、而且在這個尺寸撐得住的辨識特徵是
+    /// **「三個框 ＋ 一組收束的線」**（＝多 → 一），這正是這個工具唯一做的事。
+    ///
+    /// ⚠ 刻意**不畫「兩張紙疊在一起」**（那在 17px 下就是一團）也不用**書籤／迴紋針**
+    /// 那一類「文件」的通用圖示：本工具**不保留書籤**（PDFsharp 的 `/Outlines` 不 deep-copy），
+    /// 畫一個迴紋針或標籤會承諾一件產品沒有做的事（與 <see cref="ReadQr"/> 不畫鏡頭同一條規矩）。
+    ///
+    /// 刻意**不用箭頭**：箭頭在這個輪盤上已經是既有的形狀語彙所佔用的
+    /// （<see cref="Rotate90"/> 的箭頭、<see cref="Compress"/> 的相向箭頭），再加一個只會更難分。
+    /// 收束的線本身就有方向（左寬右窄），不需要另一個符號再說一次。
+    /// </summary>
+    MergePdf
 }
 
 /// <summary>
@@ -67,7 +87,30 @@ internal enum ToolIcon
 /// <param name="Label">扇區標籤（大寫英文）。</param>
 /// <param name="Description">圓心膠囊的一句話（zh-Hant）——參考設計的「中心顯示 hover 動作」。</param>
 /// <param name="Icon">線稿圖示。</param>
-internal sealed record ToolDescriptor(string Id, string Label, string Description, ToolIcon Icon);
+internal sealed record ToolDescriptor(string Id, string Label, string Description, ToolIcon Icon)
+{
+    /// <summary>
+    /// 這個工具適不適用於某一個**來源格式**（`CodecRegistry.FormatOfPath` 回的那個名字）。
+    ///
+    /// **這是「適用性」的唯一判定處**，由 <see cref="ToolCatalog.ToolsFor"/> 呼叫；
+    /// UI 不得自己判斷（<see cref="IToolCatalog"/> 立下的規矩：輪盤只拿到一排字串）。
+    ///
+    /// 為什麼掛在描述元上而不是寫在 <see cref="ToolCatalog.ToolsFor"/> 裡的一個 <c>if</c>：
+    /// 「這一顆工具吃什麼」是**這一顆工具自己的知識**。寫在 ToolsFor 裡，新增工具的人會在
+    /// 兩個地方各改一次，而漏改的那一半症狀是「扇形出現了、按下去只會失敗」——
+    /// 畫面上有的東西必須是真的，所以判定要跟工具的身分放在一起。
+    ///
+    /// 預設回 <c>true</c>：前五顆工具（旋轉／去中繼資料／壓縮／裁切／讀 QR）對**所有**
+    /// 「本產品支援的圖片」都成立，那不是「以後也一定如此」的宣告——真正的細條件會寫在
+    /// 這裡，而 `merge-pdf` 已經是第一個例子（它只吃 PDF）。
+    /// </summary>
+    public bool AppliesTo(string? sourceFormat) =>
+        Id != ToolCatalog.MergePdfId
+        // `merge-pdf` **只接受 PDF**（使用者 2026-10-07 裁定的產品語意）：它把多個 PDF 依序
+        // 合併成一個，對一張 JPEG 沒有任何可做的事。放行它是**錯的**，而且錯得看得出來：
+        // 一張 JPG 會看到一顆按下去只會回「無法合併這個 PDF」的扇形。
+        || string.Equals(sourceFormat, "PDF", StringComparison.OrdinalIgnoreCase);
+}
 
 /// <summary>
 /// 工具知識的**唯一查詢介面**（規格 §9.4:390 的工具輪盤擴充點）。

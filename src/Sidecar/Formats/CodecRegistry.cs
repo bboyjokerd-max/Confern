@@ -61,6 +61,29 @@ internal sealed class CodecRegistry
 {
     private const string ImageCategory = "IMAGE";
 
+    /// <summary>
+    /// 文件類別（**目前只有 PDF 一個成員**）。2026-10-07 隨工具 `merge-pdf` 加入。
+    ///
+    /// 為什麼非有這一列不可（這一條不是口味問題）：<see cref="FormatOfPath"/> 是格式的
+    /// **唯一**查詢點，而工具目錄的適用性判定（`ToolCatalog.ToolsFor`）問的就是它。
+    /// 在這一列存在之前，一個 `.pdf` 會回 <c>null</c>，於是**產品根本說不出「這是一份 PDF」**
+    /// ——`merge-pdf` 也就永遠不可能被放行，因為沒有任何地方能誠實地回答「這一批是 PDF 嗎」。
+    ///
+    /// ⚠ **這一列不會把 PDF 變成可轉換的圖片**，三件事都由既有的程式碼分開保證：
+    ///   ① <see cref="CategoryOf"/> 回 `"PDF"`，而 `FormatCatalog.ConvertibleCategories`
+    ///      只認 `"IMAGE"` ⇒ 一份 PDF 仍然被判成 `PayloadStatus.Unsupported`，
+    ///      第一層扇區（格式轉換）一個都不會出現——**行為與加入這一列之前完全相同**；
+    ///   ② <see cref="Capability"/> 回 <see cref="DecodeSupport.No"/> ⇒
+    ///      `FormatCatalog.Classify` 走的是 `"UNDECODABLE:PDF"` 那一條，不會被誤判成同類別，
+    ///      所以 `[jpg, pdf]` 仍然是 `<see cref="PayloadStatus.Mixed"/>`（「請選同類別」）；
+    ///   ③ PDF **不在** <see cref="MvpInputs"/>／<see cref="MvpOutputs"/>，
+    ///      所以規格 §6.1／§6.2 的可輸入／可輸出清單一位元都沒動。
+    ///
+    /// 換句話說：這一列只補上「產品說得出這是一份 PDF」，**沒有承諾任何解碼或編碼能力**
+    /// （§7.2 禁止靜默失敗——做不到的格式不出現扇區，而不是出現之後才失敗）。
+    /// </summary>
+    private const string PdfCategory = "PDF";
+
     /// <summary>格式表：名稱 →（副檔名、類別）。</summary>
     private static readonly (string Format, string[] Extensions, string Category)[] Table =
     {
@@ -71,6 +94,9 @@ internal sealed class CodecRegistry
         ("GIF",  new[] { "gif" },          ImageCategory),
         ("WEBP", new[] { "webp" },         ImageCategory),
         ("HEIC", new[] { "heic", "heif" }, ImageCategory),
+        // ⚠ 放在**最後**：這個順序就是 `--codecs` 與 `--codec-probe` 的輸出行順序，
+        // 而既有的套件比對的是那些行——把 PDF 插在中間會讓它們轉紅，而那不是在驗這件事。
+        ("PDF",  new[] { "pdf" },          PdfCategory),
     };
 
     /// <summary>Windows 內建的 WIC 編碼器格式（經 WPF 包裝）。這五個是「應該要能用」的基準。</summary>
@@ -118,6 +144,7 @@ internal sealed class CodecRegistry
         ProbeWicEncoders();
         DeclareWebp();
         DeclareHeic();
+        DeclarePdf();
 
         // 兩個方向都會出錯，所以這裡把「宣告」與「實測」分開記錄：
         //   只信能力 → 多承諾：GIF 真的編得出來，但規格 §6.2 沒把它列為 MVP 輸出。
@@ -368,6 +395,26 @@ internal sealed class CodecRegistry
             "decode is probed per file (spec 6.3): it depends on the system HEIF image extension, " +
             "so the answer is per file rather than per machine; encode is deliberately not provided " +
             "(no HEVC codec is shipped)"));
+
+    /// <summary>
+    /// 工具 `merge-pdf` 加入的第三個類別（2026-10-07，見 <see cref="PdfCategory"/>）。
+    ///
+    /// **解碼與編碼都是 <c>false</c>，而且這不是「還沒做」而是「刻意不做」**：
+    /// PDF 不是點陣圖，把它解成像素是另一件事（要一個 rasterizer），本工具也**不需要**它
+    /// ——合併是整頁物件搬移，全程在 PDF 的物件模型上做（見 `ConversionEngine.MergePdf`）。
+    /// 把它宣告成可解碼會讓它出現在第一層的來源格式裡、讓 `--convert` 對它放行，
+    /// 而那一條路上沒有任何東西做得動它＝§7.2 的靜默失敗。
+    ///
+    /// ⚠ 這裡**不呼叫** <see cref="ProbeDecode"/>（那條路是 WIC 的，而 WIC 沒有 PDF 解碼器），
+    /// 也不探測「PDFsharp 在不在」——它是一個 <c>PackageReference</c>，在就是載得起來的東西；
+    /// 探測一個編譯期相依會讓這一列在**建置成功**的前提下仍然可能說謊。
+    /// </summary>
+    private void DeclarePdf() =>
+        _capabilities.Add(new CodecCapability("PDF", DecodeSupport.No, false,
+            "PDF is not a bitmap format: it is never decoded to pixels and never encoded here " +
+            "(merging copies whole page objects, it does not rasterise); the tool merge-pdf reads and " +
+            "writes the PDF object model directly through PDFsharp, so this row says only " +
+            "'the product can name a .pdf', not 'the product can rasterise one'"));
 
     private static BitmapSource MakeProbeBitmap()
     {

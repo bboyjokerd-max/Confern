@@ -132,11 +132,40 @@ internal sealed class ToolCatalog : IToolCatalog
         Icon: ToolIcon.ReadQr);
 
     /// <summary>
+    /// M3 的第六個工具：**合併 PDF**（`merge-pdf`）。把多個 PDF **依序合併成一個**
+    /// （使用者 2026-10-07 裁定的產品語意：依序，不是「任意順序」也不是「分成多個輸出」）。
+    ///
+    /// ⚠ **這是唯一一個「多個輸入、一個輸出」的工具**（見 <see cref="ConversionEngine.MergePdf"/>）。
+    /// 前五顆都是「一個檔進去、一個結果出來」，所以 worker 的逐檔迴圈對它們成立；合併不是。
+    /// 這一刀刻意**只讓核心能動**：**排序視窗（拖拉調整順序）是下一個切片**，
+    /// 現在送出去的順序就是使用者的選取順序（`--merge-pdf a;b;c` 就是 `a` 在前）。
+    ///
+    /// ⚠ **失敗政策＝fail-fast**（使用者 2026-10-07 的原話：「整批不產出，明確說出是哪個檔、為什麼」）。
+    /// 任何一個檔合併不了就**一個輸出檔都不寫**——那不是靠記得清理，是結構上成立的
+    /// （整批在記憶體裡合併完，最後才走一次 <see cref="AtomicWriter"/>）。
+    ///
+    /// ⚠ **`AppliesTo` 的條件是「只接受 PDF」**：這一顆**不像**前五顆那樣對所有圖片成立。
+    /// 一個 PDF 之外的來源（JPG／PNG／HEIC…）不該看到這一顆扇形，因為它做不到任何事
+    /// （唯一的判定處是 <see cref="ToolDescriptor.AppliesTo"/>，不是這裡的註解）。
+    ///
+    /// 文字長度預算（圓心鏤空直徑 94px）：`合併 PDF` 是**兩個漢字 ＋ 四個 ASCII 字元**
+    /// （含一個空白），比既有的 `去中繼資料`（5 個漢字）與 `依設定壓縮`（5 個漢字）都短，
+    /// 膠囊只會更窄。扇區標籤 `MERGE PDF` 是 9 個字元（含一個空白），比 `COMPRESS`（8 個）
+    /// 多一個——6 扇區的字級見 <see cref="WheelDesign.LabelFontPx"/>，`tools/verify-m3d.ps1`
+    /// 的 S20 會量它有沒有壓到扇區邊界（與 S17.40 對 `COMPRESS` 的同一種量測）。
+    /// </summary>
+    private static readonly ToolDescriptor MergePdf = new(
+        Id: "merge-pdf",
+        Label: "MERGE PDF",
+        Description: "合併 PDF",
+        Icon: ToolIcon.MergePdf);
+
+    /// <summary>
     /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
     /// 輪盤與命中測試不必改一行。
     /// </summary>
     public IReadOnlyList<ToolDescriptor> Tools { get; } =
-        new[] { Rotate90, StripMetadata, Compress, Crop, ReadQr };
+        new[] { Rotate90, StripMetadata, Compress, Crop, ReadQr, MergePdf };
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {
@@ -145,11 +174,15 @@ internal sealed class ToolCatalog : IToolCatalog
         // 在第二層變成「可以按」，而兩層的訊息會互相矛盾。
         if (verdict.Status != PayloadStatus.Ready) return Array.Empty<ToolDescriptor>();
 
-        // 兩個工具對所有「本產品支援的圖片」都成立，所以目前沒有更細的條件。
-        // 這不是「以後也一定如此」的宣告：`strip-metadata` 的適用性其實取決於「這個容器有沒有
-        // metadata 容器」（一個沒有 EXIF／ICC／註解的 JPEG 也會成功，只是沒東西可丟——
-        // 仍然產出一個檔案，這比「按下去沒反應」誠實）。真正的細條件會寫在**這裡**，不寫在 UI 裡。
-        // 未來的工具會有：裁切（要能取像素）、讀 QR（只適用於解碼得動的點陣圖）。
-        return Tools;
+        // 適用性判定**只有一個來源**：`ToolDescriptor.AppliesTo`（那一顆工具自己的知識）。
+        // 這裡只負責把不適用的濾掉，不自己判斷任何工具的條件——寫在這裡就會變成兩份，
+        // 而漏改的那一份症狀是「扇形出現了、按下去只會失敗」。
+        //
+        // `merge-pdf` 是第一個有細條件的工具：它**只接受 PDF**（見 AppliesTo 的說明）。
+        // 一張 JPG 因此看不到它，而這正是「畫面上有的東西必須是真的」。
+        return Tools.Where(t => t.AppliesTo(verdict.SourceFormat)).ToList();
     }
+
+    /// <summary>`merge-pdf` 的穩定識別碼（進日誌與 worker 協議，**不得就地改字**）。</summary>
+    internal const string MergePdfId = "merge-pdf";
 }

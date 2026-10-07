@@ -2,6 +2,8 @@ using System.Collections.ObjectModel;
 using System.Windows;                 // Int32Rect（裁切矩形用；WindowsBase）
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PdfSharp.Pdf;                   // 只有工具 merge-pdf 會用到（PdfDocument／PdfPage）
+using PdfSharp.Pdf.IO;                // PdfReader／PdfDocumentOpenMode（只有工具 merge-pdf）
 using ZXing;                          // 只有工具 read-qr 會用到（BarcodeReaderGeneric／RGBLuminanceSource）
 
 namespace Sidecar;
@@ -836,6 +838,283 @@ internal sealed class ConversionEngine
             $"{text!.Length} chars from the {foundIn} ({total.Elapsed.TotalMilliseconds:F0} ms)",
             text);
     }
+
+    /// <summary>
+    /// 工具：合併 PDF（工具 id `merge-pdf`，M3 的第六顆扇形；規格 §9.4）。
+    ///
+    /// ⚠ **這是唯一一個「輸入是一組有序路徑、產物是一個檔」的引擎方法。** 前五顆都是
+    /// 「一個檔進去、一個結果出來」（`read-qr` 的產物是文字，但仍然是單檔進、單結果出），
+    /// 所以 worker 的逐檔迴圈對它們成立。合併不是：它是**一次工作、多個輸入、一個輸出**。
+    /// 這一刀刻意**不動** worker 的逐檔迴圈，而是讓 `op=merge-pdf` 走**一次呼叫**
+    /// （見 <see cref="WorkerServer"/>：`paths[0]` 觸發、其餘路徑整批傳進來），
+    /// 理由是排序視窗（拖拉調整順序）是下一個切片——先把核心做成一個**原子操作**，
+    /// 那個視窗之後只要換掉「送進來的順序」即可，不必再改這一層。
+    ///
+    /// **排序語意**：`sourcePaths` 的**陣列順序就是頁序**。這不是實作細節，是這個工具的定義
+    /// ——`a.pdf;b.pdf` 與 `b.pdf;a.pdf` 是兩個不同的請求，而且必須產出兩個不同的檔。
+    ///
+    /// ## 失敗政策＝fail-fast（使用者 2026-10-07 裁定：「整批不產出，明確說出是哪個檔、為什麼」）
+    ///
+    /// ①②③ 都在**寫出之前**：整批先在**記憶體**裡合併成一份 `PdfDocument`，全部成功之後
+    /// 才走**一次** <see cref="AtomicWriter"/>。所以「不產出半成品」是**結構上**成立的，
+    /// 不是靠記得去清理暫存檔——中途任何失敗時，磁碟上根本還沒有這個輸出檔存在過
+    /// （連 `.tmp-*` 都沒有，因為 <see cref="AtomicWriter"/> 還沒被呼叫）。
+    ///
+    /// 訊息**必定指名是哪一個檔、以及為什麼**（<see cref="ConversionResult.Position"/> ＝ 第幾個）：
+    /// 只說「合併失敗」等於把使用者送去猜，而 fail-fast 讓他**一個檔都沒拿到**，猜的代價更大。
+    ///
+    /// ## 🔴 「開檔成功」不可以當成「合併得成」（PDFsharp Issue #388）
+    ///
+    /// 含有 `/XRefStm`（混合參照）的 PDF（**真實案例：Canva 產出的檔**）**開檔不會報錯**，
+    /// 要等到 `AddPage` 才丟例外；Issue #388 在 Open、6.2.4 與 7.0.0-preview-1 都重現。
+    /// 所以這裡**真的把每一頁加進暫存文件**，而且開檔與 AddPage **在同一個 try 裡**，
+    /// 例外一律走 <see cref="ConversionError.MergeFailed"/>——這正是本專案最反對的那種
+    /// 「靜默做錯事」的相反：**每一步都當場做，做不動就當場說**。
+    ///
+    /// ## 頁面尺寸**原樣保留**
+    ///
+    /// `PdfDocumentOpenMode.Import` ＋ `dst.AddPage(srcPage)` 是**整頁物件搬移**，
+    /// 不是重新排版、也不是 fit-to-page：來源頁的 `/MediaBox`（因此寬高與原點）一個點都不會被動。
+    /// ⚠ 這裡**刻意不用** `Modify` 模式——那個模式的頁面不能 `AddPage`（PDFsharp 的既有契約）。
+    ///
+    /// ## 加密 PDF
+    ///
+    /// 沒有密碼就讀不開（PDFsharp 丟 `PdfReaderException`，訊息含 "password"）。
+    /// 本工具**沒有任何取得密碼的介面**（輪盤上沒有輸入框、協議上沒有欄位），所以它走 fail-fast
+    /// 並**說出是加密／密碼問題**——而不是回一句看不出原因的「無法合併這個 PDF」。
+    ///
+    /// ## 誠實記明的既有套件限制（不必修，但不可以假裝不存在）
+    ///
+    ///   • xref stream **可讀，但輸出會被攤平成 top-level xref table** ⇒ 輸出檔**可能變大**；
+    ///   • object stream **可讀，但不寫** ⇒ 輸出的物件是未壓縮的；
+    ///   • `/Annots` **預設不 deep-copy** ⇒ 註解可能不會跟著走；
+    ///   • **書籤（`/Outlines`）不會被保留**。
+    ///
+    /// ⚠ **`Save()` 之後那個 in-memory 文件會被鎖住**（2026-10-07 實測）：連讀 `PageCount`
+    /// 都會丟 `InvalidOperationException: The document was already saved and cannot be modified
+    /// anymore.`。所以下面**存檔之後不回頭讀任何屬性**；`--merge-pdf-inspect` 讀的是**已經寫出去
+    /// 的那個檔**（重新開檔），不是這個物件。
+    ///
+    /// 回傳碼語意：<see cref="ConversionError.None"/>＝成功且**已經寫出**一個檔；
+    /// 其餘＝整批放棄、**磁碟上沒有任何新檔**。
+    /// </summary>
+    /// <param name="sourcePaths">
+    /// **依序**要合併的 PDF。順序＝頁序（見方法說明）。空清單或 null ＝ 沒有東西可以合併。
+    /// </param>
+    public ConversionResult MergePdf(IReadOnlyList<string>? sourcePaths, TempJournal? journal = null,
+                                     string? targetDirectory = null)
+    {
+        string[] paths = sourcePaths?.ToArray() ?? Array.Empty<string>();
+        if (paths.Length == 0)
+        {
+            // 沒有第一個檔可以當「來源」放進結果，所以這裡的 sourcePath 是空字串。
+            // 使用者訊息因此退回純原因（見 DescribeMessage：position <= 0 那條路），
+            // 那是一句看得懂的話，而不是一個空檔名。
+            _log("merge-pdf: no source file was given; nothing to merge, and no file is written");
+            return new ConversionResult("", null, ConversionError.MergeFailed,
+                "the request carried 0 source paths (merge-pdf needs at least one PDF)");
+        }
+
+        string first = paths[0];
+
+        // ① 先逐檔做**便宜的**檢查（存在嗎、是不是本產品認得的格式）：不必開檔就能說出原因。
+        //    這一步刻意與其他工具的第一段同形（它們也是先看 AtomicWriter.Exists 與格式表）。
+        foreach (string path in paths)
+        {
+            if (_codecs.FormatOfPath(path) is not "PDF")
+            {
+                string given = _codecs.FormatOfPath(path) ?? "(unknown)";
+                _log($"merge-pdf: refusing {Path.GetFileName(path)}: extension is not a PDF " +
+                     $"(the format table says '{given}'); fail-fast -> NO file is written");
+                return MergeFail(path, PositionOf(paths, path), ConversionError.Unsupported,
+                    $"extension is not in the format table as PDF (it resolved to '{given}')");
+            }
+            if (!AtomicWriter.Exists(path))
+            {
+                _log($"merge-pdf: refusing {Path.GetFileName(path)}: it disappeared before the merge; " +
+                     "fail-fast -> NO file is written");
+                return MergeFail(path, PositionOf(paths, path), ConversionError.SourceMissing,
+                    "source disappeared before the merge");
+            }
+        }
+
+        // ② 整批在**記憶體**裡合併。這裡是唯一會碰到 PDF 內容的地方，也是 fail-fast 的判準所在。
+        //
+        // ⚠ `current` 與 `stage` 是**歸因用的**：例外一定要說得出「第幾個檔、哪一步」，
+        //    而「猜哪一個檔」是最容易寫錯又最看不出來的一件事（一個指錯檔的訊息看起來
+        //    仍然像一句正常的失敗訊息）。所以它們由**迴圈自己**在每一步之前設定，
+        //    不是事後從例外訊息回推。
+        byte[] merged;
+        int totalPages = 0;
+        int current = 1;
+        string stage = "open";
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var dst = new PdfDocument();
+            for (int i = 0; i < paths.Length; i++)
+            {
+                string path = paths[i];
+                int position = i + 1;
+                current = position;
+                stage = "PdfReader.Open (Import)";
+                // ⚠ Import 模式是硬性的：Modify 模式的頁面**不能** AddPage（PDFsharp 的既有契約），
+                //   而在這裡用 Modify 的症狀是「每個檔都失敗」而不是一個安靜的錯誤——
+                //   但契約仍然要寫在程式碼裡，不能只靠症狀。
+                using PdfDocument src = PdfReader.Open(LongPath.Prepare(path), PdfDocumentOpenMode.Import);
+                int pages = src.PageCount;
+                _log($"merge-pdf: {Path.GetFileName(path)} (第 {position} 個檔) opened (Import), " +
+                     $"{pages} page(s)");
+                if (pages == 0)
+                {
+                    // 「開得了、但一頁都沒有」是一個具名的失敗，不是成功。
+                    // 靜默跳過它會讓使用者拿到一個少了整份文件的合併檔，而且回報成功。
+                    return MergeFail(path, position, ConversionError.MergeFailed,
+                        "the document opens but reports 0 pages, so there is nothing to import " +
+                        "(a merge that silently skips it would drop a whole document)");
+                }
+                for (int p = 0; p < pages; p++)
+                {
+                    // 🔴 #388：含有 /XRefStm 的 PDF 到**這一行**才會炸。所以每一頁都真的加，
+                    //    不可以先用 PageCount 或開檔成功來推論「這一批合得成」。
+                    stage = $"AddPage (page {p + 1}/{pages})";
+                    PdfPage page = src.Pages[p];
+                    double w = page.Width.Point, h = page.Height.Point;
+                    dst.AddPage(page);
+                    totalPages++;
+                    _log($"merge-pdf: {Path.GetFileName(path)} page {p + 1}/{pages} added " +
+                         $"({w:0.###}x{h:0.###} pt)");
+                }
+            }
+
+            // 整批都加完了才序列化。序列化失敗也還在記憶體裡 ⇒ 一樣是「一個檔都不寫」。
+            stage = "PdfDocument.Save (in memory)";
+            using var buffer = new MemoryStream();
+            dst.Save(buffer, closeStream: false);
+            merged = buffer.ToArray();
+        }
+        catch (Exception ex)
+        {
+            // catch (Exception) 而不是特定型別，這是**刻意的**：這個陷阱的例外型別不穩定。
+            // 2026-10-07 實測：同樣是「開得起來、AddPage 才炸」的檔，壞在頁面樹的參照上時丟
+            // NullReferenceException，而換一個壞法就丟 InvalidOperationException
+            // ("Page has no MediaBox.")。寫成特定型別＝某些壞法會逃出這個 catch，
+            // 而逃出去的意思是**整批的 fail-fast 承諾消失**（例外會往上冒，變成一個沒有指名檔案的
+            // 當機）。使用者裁定的政策是「整批不產出，明確說出是哪個檔、為什麼」，
+            // 所以這裡寧可接住全部，再由 Detail 說出真正的型別與訊息。
+            (ConversionError code, string reason) = DescribeMergeException(ex);
+            _log($"merge-pdf: FAILED on the {OrdinalOf(current)} file ({stage}): " +
+                 $"{ex.GetType().Name}: {ex.Message} " +
+                 "(PDFsharp Issue #388: a PDF with /XRefStm opens fine and only throws at AddPage) " +
+                 "-> giving up the whole batch; NO file is written");
+            return MergeFail(paths[current - 1], current, code, $"stage {stage}: {reason}");
+        }
+        timer.Stop();
+
+        // ③ **全部成功之後**才命名並原子寫出。到這一步為止磁碟上沒有任何新檔。
+        //
+        // 輸出檔名照既有慣例：**沿用第一個來源檔的主檔名**（`NamingPolicy.ResolveOutputPath`
+        // 的規則，副檔名換成 pdf）。選「第一個來源」而不是發明一個固定的名字（例如 `merged.pdf`）
+        // 的理由：命名規則只有一個擁有者（NamingPolicy），而它取的是**來源檔的主檔名**——
+        // 五顆既有工具全部如此，這裡跟進就沒有一行新的命名規則；而「永不覆寫」的檔名衝突
+        // 自動序號（`fx-a (1).pdf`…）也直接沿用，不必再寫第二套。
+        string? extension = _codecs.PrimaryExtension("pdf");
+        if (extension == null)
+        {
+            _log("merge-pdf: the format table has no extension for pdf -> refusing; no file is written");
+            return MergeFail(first, 1, ConversionError.TargetUnavailable, "no extension for target pdf");
+        }
+
+        string targetPath;
+        try
+        {
+            targetPath = NamingPolicy.ResolveOutputPath(first, extension, targetDirectory);
+            if (!string.IsNullOrWhiteSpace(targetDirectory)
+                && string.Equals(Path.GetDirectoryName(targetPath),
+                                 Path.GetDirectoryName(Path.GetFullPath(first)),
+                                 StringComparison.OrdinalIgnoreCase))
+            {
+                _log($"output dir: '{targetDirectory}' unavailable -> fell back to the source folder");
+            }
+        }
+        catch (Exception ex)
+        {
+            return MergeFail(first, 1, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        ConversionResult done = WriteWithCollisionRetry(first, targetPath, journal,
+            stream => stream.Write(merged, 0, merged.Length),
+            tried => NamingPolicy.ResolveOutputPath(first, extension, targetDirectory, tried.ToList()),
+            out targetPath);
+        if (!done.Ok) return MergeFail(first, 1, done.Error, done.Detail);
+
+        _log($"merge-pdf: merged {paths.Length} file(s) -> {Path.GetFileName(targetPath)} " +
+             $"({totalPages} page(s), {merged.LongLength}B, " +
+             $"{timer.Elapsed.TotalMilliseconds:F0} ms; sources untouched)");
+        return new ConversionResult(first, targetPath, ConversionError.None,
+            $"{paths.Length} file(s), {totalPages} page(s), {merged.LongLength}B in " +
+            $"{timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}", null, 1);
+    }
+
+    /// <summary>一個檔案路徑在一批有序輸入裡的位置（1 起算）。同名的第二份檔仍然是合法輸入。</summary>
+    private static int PositionOf(string[] paths, string path)
+    {
+        for (int i = 0; i < paths.Length; i++)
+        {
+            if (string.Equals(paths[i], path, StringComparison.Ordinal)) return i + 1;
+        }
+        return 0;
+    }
+
+    /// <summary>英文序數只在日誌裡用（那裡的既有文字全是英文）；使用者訊息用中文「第 N 個檔」。</summary>
+    private static string OrdinalOf(int n) => n switch
+    {
+        1 => "1st", 2 => "2nd", 3 => "3rd", _ => $"{n}th"
+    };
+
+    /// <summary>
+    /// 例外 → detail（**維修的人看得到的那一欄**；使用者訊息那一句是規格條文，見 MergeFailed）。
+    ///
+    /// 加密要**當場認出來**：PDFsharp 沒有給「這個檔加密了」的專用例外型別或欄位
+    /// （`PdfReaderException` 只有三個建構子，沒有任何屬性），所以只能看訊息文字。
+    /// 這是**字串比對**，所以它只影響 detail 那一句的**說法**，不影響分類，也不影響
+    /// fail-fast 的決定——猜錯只會讓那句話少說「密碼」兩個字，不會讓行為改變。
+    /// </summary>
+    private static (ConversionError Code, string Reason) DescribeMergeException(Exception ex)
+    {
+        string type = ex.GetType().Name;
+        string message = ex.Message;
+        // ⚠ 這是**字串比對**，而且是刻意的（2026-10-07 實測：不給密碼是
+        // "A password is required to open the PDF document."、給錯密碼是
+        // "The specified password is invalid."——兩種都含 "password"；
+        // PdfReaderException 沒有專門的屬性可以問，它只有三個建構子）。
+        // 猜錯的代價只是「少說一句密碼」或「多說一句密碼」，**行為完全不變**
+        // （一樣 fail-fast、一樣不寫任何檔），所以不需要更強的手段。
+        bool passwordish = message.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0
+                        || message.IndexOf("encrypted", StringComparison.OrdinalIgnoreCase) >= 0;
+        return passwordish
+            // **這一句是給使用者的**（ConversionError.MergeNeedsPassword）：加密檔的失敗原因
+            // 決定了他的下一步（先解除密碼再來），所以它不能與「無法合併這個 PDF」共用
+            // ——那句話讀完只會讓人重試同一個永遠不會成功的檔。
+            // 訊息刻意不含「請輸入密碼」的暗示：本工具**沒有**取得密碼的介面（輪盤上沒有輸入框、
+            // worker 協議上沒有欄位），說「請輸入密碼」等於把使用者指向一個不存在的功能。
+            ? (ConversionError.MergeNeedsPassword,
+               $"{type}: {message} -- the source is ENCRYPTED and this tool has no way to ask for a " +
+               "password (there is no field for one in the wheel or in the worker protocol), so the " +
+               "whole batch is given up rather than merged without it")
+            : (ConversionError.MergeFailed, $"{type}: {message}");
+    }
+
+    /// <summary>
+    /// 合併失敗的**唯一建構處**：位置 ＋ 檔名 ＋ 分類 ＋ detail。
+    ///
+    /// 為什麼要有它而不是各處自己 <c>new</c>：<see cref="ConversionResult.Position"/> 漏填的症狀
+    /// 是「訊息少了『第幾個檔』」——而那句訊息正是使用者裁定要看的那一件事，缺了它看起來仍然
+    /// 像一句正常的失敗訊息，不會有人發現。集中在這裡＝漏填不可能發生。
+    /// </summary>
+    private static ConversionResult MergeFail(string sourcePath, int position, ConversionError error,
+                                              string detail) =>
+        new(sourcePath, null, error, detail, null, position);
 
     /// <summary>
     /// 第一輪的縮圖上限（**寬或高較大的一邊**）。選 1600 而不是更大的理由：

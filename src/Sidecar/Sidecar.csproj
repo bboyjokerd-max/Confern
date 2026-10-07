@@ -83,4 +83,36 @@
     -->
     <PackageReference Include="ZXing.Net" Version="0.16.11" />
   </ItemGroup>
+  <ItemGroup>
+    <!--
+      M3 工具「合併 PDF」（`merge-pdf`）。選它的理由與界線（2026-10-07）：
+        - **選 `PDFsharp-WPF` 而不是純 `PDFsharp`**：兩者同源同授權（MIT，讀自 6.2.4 的 nuspec），
+          差別只在原生 TFM。本專案的 TFM 是 `net8.0-windows`，而 `PDFsharp-WPF` 的原生 TFM
+          就是 `net8.0-windows7.0`（純 `PDFsharp` 的 WPF 資產要另外挑），所以這一個是本專案
+          唯一不需要 TFM 轉接的選擇。**兩者都必須避開 `PDFsharp-MigraDoc*` 那幾包**——它們會
+          多拉一整套排版引擎（本工具只做「整頁搬移」，一行排版都不做）。
+        - 遞移相依 3 個（讀自 6.2.4 的 nuspec）：`PDFsharp-WPF` ＋
+          `System.Security.Cryptography.Pkcs` 8.0.1 ＋ `Microsoft.Extensions.Logging.Abstractions` 8.0.3。
+          `System.Security.Cryptography.Pkcs` 是**加密 PDF 的支援**（PDFsharp 用它做 AES 解密），
+          `Microsoft.Extensions.Logging.Abstractions` 是 PDFsharp 內的診斷介面。
+        - ⚠ **`System.Drawing.Common` 沒有被拉進來**（2026-10-07 實測輸出目錄，見 `fixtures/pdf/README.md`）：
+          PDFsharp 的核心不碰 GDI+，本專案也仍然沒有任何 WinForms／GDI+ 影像相依。
+        - **為什麼不是自己寫**：把多個 PDF 併成一個要處理交叉參照表（xref table 與 xref stream）、
+          object stream、`/Annots`、`/Outlines`、頁面樹（`/Pages` 的 `/Kids`）與增量更新。
+          自己寫等於拿使用者的檔案冒險——而這一條在本專案已經有先例（讀 QR 的解碼器）。
+        - ⚠ **已知缺陷，必須照實說**（PDFsharp Issue #388，Open、未修，6.2.4 與 7.0.0-preview-1
+          都重現）：含有 `/XRefStm`（混合參照）的 PDF（真實案例是 Canva 產出的檔）**開檔不會報錯**，
+          要等到 `AddPage` 才丟 `KeyNotFoundException`。⇒「開檔成功」不可以當成「合併得成」，
+          所以 `ConversionEngine.MergePdf` 一定**真的把每一頁加進暫存文件**，而且整個匯入包在
+          try/catch 裡（見該方法的說明）。
+        - ⚠ 其他已知限制（不必修，但註解要誠實）：xref stream **可讀但會被攤平成 top-level**
+          （輸出檔可能變大）；object stream **可讀但不寫**；`/Annots` **預設不 deep-copy**；
+          **書籤（`/Outlines`）不會被保留**。
+        - ⚠ **`Save()` 之後那個 in-memory 文件會被鎖住**（2026-10-07 實測）：連讀 `PageCount`
+          都會丟 `InvalidOperationException: The document was already saved and cannot be
+          modified anymore.`。所以任何「存檔後才要讀的資訊」都必須**重新開檔讀**，
+          不可以回頭讀那個已經 Save 過的物件（診斷開關 merge-pdf-inspect 就是這個形狀）。
+    -->
+    <PackageReference Include="PDFsharp-WPF" Version="6.2.4" />
+  </ItemGroup>
 </Project>

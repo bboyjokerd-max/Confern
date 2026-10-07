@@ -60,6 +60,16 @@ internal static class WorkerProtocol
     /// **逐位元不變**；而一個不認識 `read-qr` 的舊 worker 走
     /// <see cref="WorkerServer.RejectUnknownOp"/>，根本到不了填那個欄位的那一行。
     /// 「欄位被忽略」這種靜默錯誤需要「op 被接受但欄位被丟掉」這個前提，而那個前提不成立。
+    ///
+    /// **2026-10-07 新增 `op=merge-pdf`（第六顆扇形，合併 PDF）——同樣不升，而且這次更強。**
+    /// 它**沒有帶來任何新欄位**（順序就是既有的 `sourcePaths` 陣列本身），所以「欄位被忽略」
+    /// 這個前提連成立都不可能；而一個不認識 `merge-pdf` 的舊 worker 一樣走
+    /// <see cref="WorkerServer.RejectUnknownOp"/>，回一個具名的失敗。
+    ///
+    /// ⚠ 這個 op 與前六個有一個**結構上**的不同：它是**多個輸入、一個輸出**
+    /// （見 <see cref="WorkerProtocol.OpMergePdf"/>），所以它不能被逐檔執行——
+    /// 逐檔執行同一批路徑的症狀是「檔案被覆寫成同一個名字」或「產生 N 個合併檔」，
+    /// 兩者都是靜默的錯。分派處因此讓它**只跑一次**。
     /// </summary>
     public const int Version = 3;
 
@@ -110,6 +120,23 @@ internal static class WorkerProtocol
     /// 而且它**根本走不到**填 <c>text</c> 的那一行。
     /// </summary>
     public const string OpReadQr = "read-qr";
+
+    /// <summary>
+    /// 工具 `merge-pdf`（合併 PDF，M3 第六顆扇形）。**這是唯一一個「多個輸入、一個輸出」的 op**
+    /// ——前六個都是「一個檔進去、一個結果出來」，所以 <see cref="WorkerServer.RunJob"/> 的逐檔
+    /// 迴圈對它們成立；合併不是（見該方法的 `op=merge-pdf` 那一臂：它只跑**一次**，
+    /// 由 <c>paths[0]</c> 觸發，而其餘路徑整批傳進引擎）。
+    ///
+    /// **`sourcePaths` 的陣列順序就是頁序**（`a;b` 與 `b;a` 是兩個不同的請求），
+    /// 這是這個工具的定義而不是實作細節，所以在協議上沒有任何額外的「順序」欄位——
+    /// 順序就是那個既有的欄位本身。
+    ///
+    /// ⚠ 新增這個 op **不升 <see cref="Version"/>**，理由與前三顆逐條相同：舊 worker 走
+    /// <see cref="WorkerServer.RejectUnknownOp"/>（它會回一個具名的失敗，而不是默默做別的事），
+    /// 而且它**根本走不到**那一臂。它也**沒有帶來任何新欄位**——`sourcePaths` 早就在協議上，
+    /// 所以既有的封包逐位元不變，連「欄位被忽略」這種靜默錯誤的前提都不成立。
+    /// </summary>
+    public const string OpMergePdf = "merge-pdf";
 
     public static string NewPipeName() => ProductInfo.Slug + "-" + Guid.NewGuid().ToString("N");
 
@@ -381,7 +408,14 @@ internal static class WorkerServer
         // 裁切的矩形同樣只追加在**尾巴**：它是這一顆扇形唯一跨管道的事實，不放進日誌就只剩
         // 「UI 說它送出去了」可以相信。
         evidence.Line($"worker job {job.jobId}: files={paths.Length} target={target} quality={quality} op={op}" +
-                      (op == WorkerProtocol.OpCrop ? $" crop={cropSpec?.Describe() ?? "(none)"}" : ""));
+                      (op == WorkerProtocol.OpCrop ? $" crop={cropSpec?.Describe() ?? "(none)"}" : "") +
+                      // ⚠ 只有 op=merge-pdf 會多這一段（附加在**行尾**，與 crop 同一條規矩：
+                      // 既有套件比對的是那一行的前綴，插在中間會弄紅它們）。
+                      // 為什麼非印不可：合併**唯一的輸入就是順序**，而順序有沒有跨過管道
+                      // 在另一端完全看不出來——一個「順序被弄丟」的實作會產生一個
+                      // 頁序全錯但每一個數字都對的檔（頁數對、尺寸集合對），
+                      // 所以那一行必須把送出的順序原封不動寫下來，讓驗收有東西可比。
+                      (op == WorkerProtocol.OpMergePdf ? $" order=[{string.Join(",", paths.Select(Path.GetFileName))}]" : ""));
         link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Progress, jobId = job.jobId, done = 0, total = paths.Length,
@@ -389,6 +423,35 @@ internal static class WorkerServer
         });
 
         int succeeded = 0, failed = 0;
+
+        // ⚠ **`paths` 是空的**（同版本的 UI 送了空清單＝bug）而 op 是 `merge-pdf` 時，
+        // 下面的迴圈一次都不會跑，於是**不會有任何 result 封包**——呼叫端看到的是
+        // 「這一輪結束了、卻一個結果都沒有」，那是一種靜默的失敗。
+        // 所以合併這條路要**當場回一個具名的失敗**（引擎自己會說出「0 個來源路徑」），
+        // 而且**不寫任何檔**。其餘 op 的空清單維持既有行為（summary 為 0/0），
+        // 因為那不是這一刀要動的事。
+        if (paths.Length == 0 && op == WorkerProtocol.OpMergePdf)
+        {
+            ConversionResult empty = engine.MergePdf(paths, journal, job.outputDir);
+            failed++;
+            link.Send(new WorkerMessage
+            {
+                type = WorkerMessageTypes.Result, jobId = job.jobId, ok = empty.Ok,
+                outputPath = empty.OutputPath, errorCode = empty.Error.ToString(),
+                message = empty.UserMessage, sourcePath = empty.SourcePath, detail = empty.Detail,
+                done = 0, total = 0, current = null
+            });
+            sw.Stop();
+            evidence.Line($"worker job {job.jobId} done: ok={succeeded} failed={failed} " +
+                          $"in {sw.Elapsed.TotalMilliseconds:F0} ms");
+            link.Send(new WorkerMessage
+            {
+                type = WorkerMessageTypes.Summary, jobId = job.jobId,
+                okCount = succeeded, failedCount = failed, done = failed, total = 0
+            });
+            return;
+        }
+
         for (int i = 0; i < paths.Length; i++)
         {
             // 取消在**檔案邊界**生效（一個檔案轉到一半不中斷：中斷會留下沒意義的半成品）
@@ -409,8 +472,7 @@ internal static class WorkerServer
             // outputDir 原封不動傳下去（null＝來源旁邊）：解析規則只有 Settings 那一份，
             // worker 不是第二個擁有者。資料夾不存在時的回退由 NamingPolicy 負責。
             ConversionResult result = op switch
-            {
-                WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal,
+            {                WorkerProtocol.OpConvert => engine.Convert(paths[i], target, quality, journal,
                                                            job.outputDir),
                 WorkerProtocol.OpRotate90 => engine.Rotate90(paths[i], journal, job.outputDir),
                 WorkerProtocol.OpStripMetadata => engine.StripMetadata(paths[i], journal, job.outputDir),
@@ -425,9 +487,19 @@ internal static class WorkerServer
                 // outputDir 對它沒有意義（沒有檔案可寫），所以刻意不傳——傳了就是讓一個
                 // 沒有效果的欄位看起來像有效果。
                 WorkerProtocol.OpReadQr => engine.ReadQr(paths[i], journal),
+                // 合併 PDF：⚠ **唯一一個多輸入、單輸出的 op**，所以它不走逐檔那一條。
+                // 它只在 i == 0 跑一次（`MergePdfBatch`），而下面的 `break` 立刻結束這一輪
+                // ——所以整批只會產生一個 result 封包與一個輸出檔，而 `total` 仍然是那一批的
+                // 檔案數（見 totalForResult：總數必須說出「這一輪處理了幾個檔」）。
+                WorkerProtocol.OpMergePdf => MergePdfBatch(paths, i, engine, journal, job.outputDir,
+                                                           evidence.Line),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;
+
+            // ⚠ 合併（多輸入、單輸出）的 `total` **必須是那一批的檔案數**，不是 1：
+            // 「這一輪處理了幾個檔」是使用者要看的那件事，而它是 3。
+            int totalForResult = paths.Length;
 
             link.Send(new WorkerMessage
             {
@@ -444,9 +516,15 @@ internal static class WorkerServer
                 text = result.QrText,
                 detail = result.Detail,
                 done = i + 1,
-                total = paths.Length,
+                total = totalForResult,
                 current = Path.GetFileName(paths[i])
             });
+
+            // 合併已經在 i == 0 那一輪把**整批**做完了（一個輸出檔、一個 result）。
+            // 剩下的 i 只是讓這一輪的收尾統計走到位，**不可以再送 result**：
+            // 再送就是對同一次工作回報第二次，而呼叫端會把它當成第二個檔案的結果
+            // ——那正是「同一批路徑被逐檔執行」的症狀（N 個合併檔、或同一個名字被搶）。
+            if (op == WorkerProtocol.OpMergePdf) break;
         }
 
         sw.Stop();
@@ -561,7 +639,40 @@ internal static class WorkerServer
         new(sourcePath, null, ConversionError.Unknown,
             $"unknown op '{op}' (this worker speaks " +
             $"{WorkerProtocol.OpConvert}/{WorkerProtocol.OpRotate90}/{WorkerProtocol.OpStripMetadata}/" +
-            $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop}/{WorkerProtocol.OpReadQr})");
+            $"{WorkerProtocol.OpCompress}/{WorkerProtocol.OpCrop}/{WorkerProtocol.OpReadQr}/" +
+            $"{WorkerProtocol.OpMergePdf})");
+
+    /// <summary>
+    /// `op=merge-pdf` 的**整批**執行：這一個 op 只有一個工作，而它吃**整份路徑清單**。
+    ///
+    /// 為什麼寫成一個方法而不是塞進分派臂：那一臂要能一眼看出「它與其他七個形狀不同」，
+    /// 而 30 行的說明與防禦會把 <see cref="RunJob"/> 的分派表變成一團。
+    ///
+    /// 三件事在這裡定案：
+    ///   ① **只有 <paramref name="index"/> == 0 才真的做事**——其餘回一個「已被同一批處理」
+    ///      的佔位結果，而 <see cref="RunJob"/> 不會把它送出去（那裡的 <c>break</c>）。
+    ///      所以同一次工作只會產生**一個** result 封包與**一個**輸出檔。
+    ///   ② **空清單不是「成功但沒做事」**：回一個具名的失敗（引擎負責那句話），
+    ///      而且**不寫任何檔**。一個空的請求靜默回 ok 會讓呼叫端以為合併了一個空集合。
+    ///   ③ 順序**原封不動**傳進引擎：`paths` 的順序就是頁序，這一層不重排、不去重、
+    ///      不排序（去重會讓 `a;b;a` 少一份，而那是完全合法的請求——使用者可能刻意要兩份）。
+    /// </summary>
+    private static ConversionResult MergePdfBatch(string[] paths, int index, ConversionEngine engine,
+                                                  TempJournal? journal, string? outputDir,
+                                                  Action<string> log)
+    {
+        if (index != 0)
+        {
+            // 只有 i == 0 會做事，所以這一行**在正常流程下不會被執行**（RunJob 在那之後 break）。
+            // 留著它是為了讓「為什麼其餘的 i 沒有結果」在日誌上是一句看得到的話，
+            // 而不是一個要讀原始碼才推得出來的事實。
+            log($"merge-pdf: batch already handled at file 1/1; file {index + 1} of this batch " +
+                "does not produce its own result or its own output file");
+            return new ConversionResult(paths[index], null, ConversionError.None,
+                "handled as part of the batch (no separate output)");
+        }
+        return engine.MergePdf(paths, journal, outputDir);
+    }
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)
     {

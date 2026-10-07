@@ -230,6 +230,25 @@ internal static class Program
             return QrDiagnostic.RunTextWindow(qrOpenEvidence, opt.QrSource ?? opt.ReadQr, opt.QrExtraUrl);
         }
 
+        // M3 第六顆扇形（2026-10-07）：`--merge-pdf`——走**完整的一條路**（worker 行程、
+        // op=merge-pdf、管道、快照）。位置同樣在單一實例守衛之前（理由與 `--crop` 一字不差）。
+        if (!string.IsNullOrEmpty(opt.MergePdf))
+        {
+            Native.AttachParentConsole();
+            using var mergeEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.MergePdfDiagnostic(mergeEvidence, opt);
+        }
+
+        // M3 第六顆扇形（2026-10-07）：`--merge-pdf-inspect <file>`——印出一個 PDF 的頁數與
+        // **逐頁**尺寸／旋轉／內容流雜湊。**只讀不寫**，而且它是套件唯一能客觀斷言頁序的縫
+        // （見 <see cref="Options.MergePdfInspect"/>）。同樣在守衛之前。
+        if (!string.IsNullOrEmpty(opt.MergePdfInspect))
+        {
+            Native.AttachParentConsole();
+            using var inspectEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.MergePdfInspectPdf(inspectEvidence, opt.MergePdfInspect!);
+        }
+
         // M3 第四顆扇形：`--crop`——走**完整的一條路**（worker 行程、op=crop、管道、快照）。
         //
         // ⚠ 位置刻意在單一實例守衛**之前**（與 `--convert` 同一條規矩）：守衛是為了擋下第二個
@@ -372,6 +391,21 @@ internal sealed class Options
           --qr-worker <path>        the same tool through the real WORKER process (op=read-qr over
                                     the pipe): proves the decoded text survives the cross-process
                                     field, which an in-process call cannot show; still writes nothing
+          --merge-pdf <p1;p2;...>   run tool merge-pdf on these PDFs IN THIS ORDER through the real
+                                    WORKER process (op=merge-pdf over the pipe); the semicolon
+                                    order IS the page order (a;b and b;a are different requests);
+                                    the product semantics ruled by the user on 2026-10-07 are
+                                    fail-fast: if ANY file cannot be merged, NOT ONE output file is
+                                    written and the message names the offending file and why; the
+                                    sources are never touched
+          --merge-pdf-inspect <file>
+                                    print one PDF's page count and, per page, its size in points,
+                                    its /Rotate and the length and SHA-256 of its decoded content
+                                    stream; READ ONLY (it never writes) and it reads a file that is
+                                    already on disk. This is the only objective way to assert page
+                                    ORDER: merge-pdf's product is a binary, so "is page 3 really
+                                    fx-c's second page" can only be answered from each page's own
+                                    geometry and content
           --qr-classify-selftest    print the http/https classification of 18 known inputs (and
                                     whether the browser target agrees) and exit; touches no window
                                     and never starts a process
@@ -560,6 +594,41 @@ internal sealed class Options
     /// 「解出來的文字」必須能從產品的輸出**重新推導**出來，而不是只相信它印的 `ok=True`。
     /// </summary>
     public string? ReadQr;
+    /// <summary>
+    /// M3 診斷（2026-10-07）：`--merge-pdf &lt;p1;p2;...&gt;` 對這幾個 PDF（**依序**）跑工具
+    /// `merge-pdf`（第六顆扇形），走**完整的一條路**（worker 行程、`op=merge-pdf`、管道、快照）
+    /// ——形狀與 <see cref="Crop"/> 一字不差（它也是分號分隔的一次批次）。
+    ///
+    /// ⚠ **分號的順序就是頁序**，這不是排版而是這個工具的定義：`a;b` 與 `b;a` 是兩個不同的請求，
+    /// 必須產出兩個頁序不同的檔。所以這一條診斷的輸出必須讓驗收**反推得出順序**
+    /// （見 <see cref="MergePdfInspect"/>：逐頁印尺寸與旋轉）。
+    ///
+    /// ⚠ 這一條**走真的 worker**而不是同一個行程內的引擎：合併是唯一一個「多輸入、單輸出」的 op，
+    /// 而「順序有沒有跨過管道」在另一端完全看不出來——一個弄丟順序的實作會產生一個
+    /// 頁序全錯、但每一個數字都對的檔。同一個行程內的呼叫驗不到那件事。
+    /// </summary>
+    public string? MergePdf;
+    /// <summary>
+    /// M3 診斷（2026-10-07）：`--merge-pdf-inspect &lt;file&gt;` 印出一個 PDF 的**頁數**與
+    /// **每一頁的尺寸（point）與旋轉角度**——**只讀、不寫**，而且讀的是**已經在磁碟上的檔**
+    /// （它不會、也不能讀一個剛剛 `Save()` 過的記憶體物件：PDFsharp 在存檔之後會把那個物件鎖住，
+    /// 連 `PageCount` 都會丟 `InvalidOperationException`，見 `ConversionEngine.MergePdf`）。
+    ///
+    /// 為什麼這是套件**唯一**能客觀斷言頁序的手段：合併的產物是一個二進位檔，而「第 3 頁是不是
+    /// `fx-c` 的第 2 頁」只能從**每一頁自己的幾何**看出來。所以 fixture 的每一頁尺寸都不同
+    /// （見 `fixtures/pdf/README.md`），而這一條把那個序列印成**固定、可被 regex 反解**的格式：
+    ///
+    /// <code>
+    /// merge-pdf inspect: file=&lt;name&gt; pages=&lt;N&gt; ok=True
+    /// merge-pdf inspect: page=&lt;n&gt; size=&lt;w&gt;x&lt;h&gt; rotate=&lt;deg&gt; contents=&lt;bytes&gt; sha=&lt;12 hex&gt;
+    /// merge-pdf inspect done: file=&lt;name&gt; pages=&lt;N&gt; ok=True
+    /// </code>
+    ///
+    /// ⚠ 尺寸印**一個小數位**（`Point` 的原始值是 double；`XUnit.FromPoint(200).Point` 可能是
+    /// 199.99999…）。四捨五入到小數一位讓 fixture 的期望值可以寫成人看得懂的数字，
+    /// 而 0.1 pt 的解析度對「這是不是原來那一頁」完全足夠（fixture 之間差 10 pt 以上）。
+    /// </summary>
+    public string? MergePdfInspect;
     /// <summary>
     /// M3 診斷（2026-10-07 切片 2）：`--qr-worker &lt;path&gt;` 對這個檔案跑工具 `read-qr`，
     /// 但**走真的 worker 行程**（`op=read-qr`、管道、快照）——形狀與 <see cref="Crop"/> 一字不差。
@@ -891,6 +960,11 @@ internal sealed class Options
                 case "--strip-metadata": if (i + 1 < args.Length) o.StripMetadata = args[++i]; break;
                 case "--compress": if (i + 1 < args.Length) o.Compress = args[++i]; break;
                 case "--read-qr": if (i + 1 < args.Length) o.ReadQr = args[++i]; break;
+                // 形狀與 `--crop` 一字不差（分號分隔＝一次批次，那正是「有序」唯一的表達方式）。
+                // ⚠ 這一條**不設** CropUiSource 那種東西：merge-pdf 沒有第二個視窗要吃這個路徑
+                // （排序視窗是下一個切片），所以這裡沒有對應的 ??= 那一行。
+                case "--merge-pdf": if (i + 1 < args.Length) o.MergePdf = args[++i]; break;
+                case "--merge-pdf-inspect": if (i + 1 < args.Length) o.MergePdfInspect = args[++i]; break;
                 case "--qr-worker": if (i + 1 < args.Length) o.QrWorker = args[++i]; break;
                 case "--qr-classify-selftest": o.QrClassifySelfTest = true; break;
                 case "--qr-open-selftest": o.QrOpenSelfTest = true; break;
@@ -2191,6 +2265,272 @@ internal static class App
         {
             client.Dispose();
         }
+    }
+
+    /// <summary>
+    /// M3 第六顆扇形（2026-10-07）：`--merge-pdf-inspect &lt;file&gt;`——印出一個 PDF 的頁數與
+    /// **逐頁**的尺寸（point）、`/Rotate`、以及**解壓後**內容流的長度與雜湊。**只讀，永不寫檔。**
+    ///
+    /// 為什麼這條縫是整個切片的關鍵：合併的產物是一個**二進位檔**，而「第 3 頁是不是
+    /// `fx-c` 的第 2 頁」不能靠產品的 `ok=True` 回答——那只證明它自己覺得成功了。
+    /// 唯一客觀的作法是把每一頁**自己的幾何與內容**印出來，讓套件拿它與**自己寫死的期望序列**
+    /// 逐項比對。所以 fixture 的每一頁尺寸都不同（見 `fixtures/pdf/README.md`）：
+    /// 任何換序、少頁、多頁、或尺寸被縮放，都逃不過那個序列。
+    ///
+    /// ⚠ 它讀的是**已經在磁碟上的檔**，這件事不是選擇而是硬性的：PDFsharp 在 `Save()` 之後
+    /// 會把那個 in-memory 文件鎖住，連 `PageCount` 都會丟 `InvalidOperationException`
+    /// （2026-10-07 實測），所以「存檔後回頭讀那個物件」這條路根本走不通。
+    ///
+    /// ⚠ **內容流的長度不可以當成內容本身**：兩個都是空的內容流長度相同，於是「內容有沒有
+    /// 跟著走」會得到一個**假陽性**。所以這裡印的是 **SHA-256 的前 12 碼**，而且印出長度讓
+    /// 套件可以拒絕「兩邊都是 0」這種通過（見 `verify-m3d.ps1` 的 S20.07）。
+    ///
+    /// ⚠ 內容流是**壓縮**的，所以「在檔案位元組裡搜字串」找不到它是正常的——那不是內容不見了。
+    /// 這裡讀的是 `UnfilteredValue`（已解壓），與套件比對的是同一個東西。
+    ///
+    /// 回傳碼：0 讀成功、2 找不到檔或不是本產品認得的 PDF、3 PDFsharp 讀不開（含加密）。
+    /// </summary>
+    internal static int MergePdfInspectPdf(Evidence evidence, string path)
+    {
+        if (!File.Exists(LongPath.Prepare(path)))
+        {
+            evidence.Line($"--merge-pdf-inspect: file not found: {path}");
+            return 2;
+        }
+
+        string name = Path.GetFileName(path);
+        try
+        {
+            using PdfSharp.Pdf.PdfDocument doc =
+                PdfSharp.Pdf.IO.PdfReader.Open(LongPath.Prepare(path),
+                                               PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
+            evidence.Line($"merge-pdf inspect: file={name} pages={doc.PageCount} ok=True");
+            for (int i = 0; i < doc.PageCount; i++)
+            {
+                PdfSharp.Pdf.PdfPage page = doc.Pages[i];
+                byte[] contents = PageContentBytes(page);
+                string sha = contents.Length > 0
+                    ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(contents))
+                             .Substring(0, 12).ToLowerInvariant()
+                    : "-";
+                // 格式是驗收斷言的一部分（固定、可 regex 反解）：
+                //   merge-pdf inspect: page=<n> size=<w>x<h> rotate=<deg> contents=<bytes> sha=<12 hex>
+                // 尺寸只有**一個小數位**：Point 是 double，而 200 pt 可能印成 199.99999…
+                // （XUnit 的往返誤差）。0.1 pt 的解析度對「這是不是原來那一頁」完全足夠
+                // ——fixture 之間差 10 pt 以上，而縮放造成的差更是整數倍。
+                evidence.Line($"merge-pdf inspect: page={i + 1} " +
+                              $"size={page.Width.Point:0.#}x{page.Height.Point:0.#} " +
+                              $"rotate={page.Rotate} contents={contents.Length} sha={sha}");
+            }
+            evidence.Line($"merge-pdf inspect done: file={name} pages={doc.PageCount} ok=True");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            evidence.Line($"merge-pdf inspect: file={name} failed {ex.GetType().Name}: {ex.Message}");
+            evidence.Line($"merge-pdf inspect done: file={name} pages=0 ok=False");
+            return 3;
+        }
+    }
+
+    /// <summary>
+    /// 一頁的**解壓後內容流位元組**（可能有好幾個：`/Contents` 是陣列時要接起來）。
+    ///
+    /// 為什麼要把好幾個串起來而不是只看第一個：`/Contents` 在 PDF 裡可以是**一個陣列**，
+    /// 而只看第一個會讓「內容有兩段、第一段被保留、第二段被丟掉」看起來完全正常。
+    /// 串起來之後那個損失會改變雜湊，於是斷言抓得到。
+    ///
+    /// 讀不到內容（頁面沒有 `/Contents`）時回**空陣列**，而呼叫端會印 `contents=0 sha=-`
+    /// ——那是誠實的結果（不是「雜湊是空的」這種看起來像通過的東西）。
+    /// </summary>
+    private static byte[] PageContentBytes(PdfSharp.Pdf.PdfPage page)
+    {
+        using var buffer = new MemoryStream();
+        foreach (object element in page.Contents.Elements)
+        {
+            // PdfReference → PdfContent → Stream（PdfDictionary.PdfStream）。
+            // ⚠ 型別名稱是 `PdfSharp.Pdf.PdfDictionary+PdfStream`（nested），
+            //    而 `PdfSharp.Pdf.PdfStream` 在 6.2.4 **不存在**（編譯會失敗）。
+            if (element is PdfSharp.Pdf.Advanced.PdfReference reference
+                && reference.Value is PdfSharp.Pdf.Advanced.PdfContent content)
+            {
+                byte[] raw = content.Stream.UnfilteredValue;
+                buffer.Write(raw, 0, raw.Length);
+            }
+        }
+        return buffer.ToArray();
+    }
+
+    /// <summary>
+    /// M3 第六顆扇形（2026-10-07）：`--merge-pdf &lt;p1;p2;...&gt;`——對這幾個 PDF（**依序**）
+    /// 跑工具 `merge-pdf`，走**真的 worker**（`op=merge-pdf`、管道、快照）。
+    ///
+    /// 形狀與 <see cref="CropDiagnostic"/> 一字不差（那一條也是分號分隔的一次批次），
+    /// 差別在**它是一個「多輸入、單輸出」的 op**：worker 那一側只跑一次、只回一個結果、
+    /// 只寫一個檔。所以這裡的期望也是「一個輸出、零個失敗」而不是「N 個檔各一個輸出」。
+    ///
+    /// 它把四件事印成可斷言的事實：
+    ///   ①**快照那一行**（`ok=`／`failed=`／產品的訊息）——使用者看到的就是那一句；
+    ///   ②**失敗清單的原文**（`--merge-pdf failure:`）——fail-fast 的訊息必須**指名是哪個檔**，
+    ///     而那句話只在這裡出現，套件要能逐字元讀到它；
+    ///   ③**輸出檔名**（`--merge-pdf output:`）——套件拿它去跑 `--merge-pdf-inspect`，
+    ///     所以頁序的斷言是**從產品自己的產物**反推，不是從這裡印的摘要；
+    ///   ④來源檔的**三項指紋**（sha256／長度／mtime）前後比對（規格 §5 的第一名）——
+    ///     這一條對**成功與失敗兩條路徑**都要成立，而那正是 fail-fast 最容易被寫壞的地方。
+    ///
+    /// ⚠ **回傳碼刻意區分「失敗」的兩種意思**（與 <see cref="CropDiagnostic"/> 同一條規矩）：
+    ///   0 ＝ 合併成功且**真的寫出一個檔**；
+    ///   3 ＝ **引擎依 fail-fast 拒絕了整批**（這是正確的行為，不是這條診斷壞了）；
+    ///   1 ＝ 來源被動到（規格 §5 紅線）、2 ＝ 參數或來源檔本身的問題（根本沒送出去）。
+    /// 把「正確的拒絕」回成 3 而不是 0，才讓套件有辦法斷言「這一批真的沒有產出」。
+    /// </summary>
+    internal static int MergePdfDiagnostic(Evidence evidence, Options opt)
+    {
+        string[] paths = opt.MergePdf!.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        if (paths.Length == 0)
+        {
+            evidence.Line("--merge-pdf: no source path was given");
+            return 2;
+        }
+        foreach (string path in paths)
+        {
+            if (!File.Exists(LongPath.Prepare(path)))
+            {
+                evidence.Line($"--merge-pdf: source not found: {path}");
+                return 2;
+            }
+        }
+
+        var before = paths.Select(p => (Path: p, Hash: Sha256Of(p), Length: new FileInfo(p).Length,
+                                        Mtime: File.GetLastWriteTimeUtc(p))).ToList();
+
+        Settings settings = _settings ?? new Settings();
+        string? outputDir = settings.ResolveOutputDirectory();
+        evidence.Line($"tool merge-pdf: outputDir={outputDir ?? "(source folder)"}");
+        // 順序**逐項印出來**：它是這個工具唯一的輸入（`a;b` 與 `b;a` 是兩個不同的請求），
+        // 而套件要能從產品的輸出反推「我送出去的順序是什麼」。
+        evidence.Line($"tool merge-pdf: request files={paths.Length} order=[" +
+                      $"{string.Join(",", paths.Select(Path.GetFileName))}] (the order IS the page order)");
+
+        int journalRecovered = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
+        evidence.Line($"temp journal: recovered {journalRecovered} stale temp file(s)");
+
+        string exePath = Environment.ProcessPath ?? $"{ProductInfo.Name}.exe";
+        var client = new ConversionClient(exePath, evidence.Line);
+        try
+        {
+            if (!client.Start(paths, "", 100, outputDir: outputDir,
+                              toolOp: WorkerProtocol.OpMergePdf, out string? startError))
+            {
+                evidence.Line($"--merge-pdf FAILED: the worker did not start ({startError})");
+                return 3;
+            }
+
+            var sw = Stopwatch.StartNew();
+            while (!client.Snapshot.Finished && sw.ElapsedMilliseconds < 120000) Thread.Sleep(20);
+            ConversionSnapshot snapshot = client.Snapshot;
+
+            evidence.Line($"merge-pdf snapshot: finished={snapshot.Finished} done={snapshot.Done}/{snapshot.Total} " +
+                          $"ok={snapshot.Ok} failed={snapshot.Failed} error={snapshot.Error ?? "-"} " +
+                          $"line='{snapshot.Line}'");
+            foreach (string failure in snapshot.Failures)
+                evidence.Line($"merge-pdf failure: {failure}");
+
+            // 輸出檔名取自**跑完之後在來源資料夾裡找到的那一個新檔**（見 LatestMergeOutputOf：
+            // 它不自己組名字，因為命名規則只有 NamingPolicy 一份）。套件會拿這一個路徑
+            // 去跑 `--merge-pdf-inspect`，所以頁序的斷言是**從產品自己的產物**反推的。
+            // ⚠ 只有在**合併成功**時才找：fail-fast 拒絕整批時，這一行必須找不到東西
+            //    ——套件的斷言就是「這裡沒有任何新檔」。
+            string? output = snapshot.Ok > 0 ? LatestMergeOutputOf(evidence, paths) : null;
+            if (output != null)
+                evidence.Line($"merge-pdf output: {Path.GetFileName(output)} " +
+                              $"exists={File.Exists(LongPath.Prepare(output))}");
+
+            bool untouched = true;
+            foreach ((string path, string hash, long length, DateTime mtime) in before)
+            {
+                string nowHash = Sha256Of(path);
+                bool same = nowHash == hash && new FileInfo(path).Length == length
+                            && File.GetLastWriteTimeUtc(path) == mtime;
+                untouched &= same;
+                evidence.Line($"tool merge-pdf: source-untouched[{Path.GetFileName(path)}]={same} " +
+                              $"(sha256 {hash.Substring(0, 12)} -> {nowHash.Substring(0, 12)}, " +
+                              $"len {length}, mtime {(mtime == File.GetLastWriteTimeUtc(path) ? "same" : "CHANGED")})");
+            }
+
+            if (!untouched)
+            {
+                evidence.Line("--merge-pdf FAILED: a source file was modified (spec 5 violation)");
+                return 1;
+            }
+            if (!snapshot.Finished)
+            {
+                evidence.Line("--merge-pdf FAILED: the worker never finished");
+                return 3;
+            }
+            if (snapshot.Failed > 0 || snapshot.Ok == 0)
+            {
+                // ⚠ 這一條**不是**「診斷壞了」：fail-fast 拒絕整批時回的就是這條路
+                // （使用者 2026-10-07 裁定）。上面那幾行 `merge-pdf failure:` 已經指名是哪個檔、
+                // 為什麼；套件要斷言的是「沒有任何新檔」＋「訊息指名了那個檔」。
+                evidence.Line($"--merge-pdf: the batch was REFUSED (fail-fast): ok={snapshot.Ok} " +
+                              $"failed={snapshot.Failed}; nothing was written");
+                return 3;
+            }
+            evidence.Line($"merge-pdf summary: ✓ 1 output from {paths.Length} source(s), sources untouched");
+            return 0;
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 這一輪合併寫出來的那一個檔。
+    ///
+    /// ⚠ 這**不是**第二份命名規則（與 <see cref="LatestCropOutputOf"/> 同一條理由，逐條相同）：
+    /// 命名規則仍然只有 <see cref="NamingPolicy"/> 一份，這裡只是「跑完之後在資料夾裡找
+    /// 那一個新檔案」。之所以不自己組：「組出正確的名字」正是會與產品不一致的那種第二份實作
+    /// （撞名加「 (1)」、輸出資料夾回退…）；而**這裡若找錯檔案，下面 inspect 的就是另一個檔**。
+    ///
+    /// 與裁切那一條的兩個差異，兩個都是必要的：
+    ///   ① **合併的來源與輸出副檔名相同**（都是 `.pdf`），所以「與來源同主檔名」的候選
+    ///      可能**就是來源自己**。裁切那一條靠副檔名不同天然避開這件事，這裡必須明講：
+    ///      `sources` 裡的任何一個路徑都不算候選。
+    ///   ② 輸出檔名沿用**第一個來源檔**的主檔名（見 `ConversionEngine.MergePdf` 的命名說明），
+    ///      所以搜尋的基準是 `sources[0]`，不是每一個來源。
+    ///
+    /// 取**編號最小**的那一個：否則會回一個舊批次留下的檔案，而「這次有沒有產出」就變成
+    /// 一個說不準的答案（這正是 fail-fast 斷言最需要看的一件事）。
+    /// </summary>
+    private static string? LatestMergeOutputOf(Evidence evidence, string[] sources)
+    {
+        if (sources.Length == 0) return null;
+        string full = Path.GetFullPath(sources[0]);
+        string folder = Path.GetDirectoryName(full) ?? ".";
+        string stem = Path.GetFileNameWithoutExtension(full);
+        string extension = Path.GetExtension(full);
+
+        var sourceSet = new HashSet<string>(
+            sources.Select(s => Path.GetFullPath(s)), StringComparer.OrdinalIgnoreCase);
+
+        string? best = null;
+        int bestIndex = int.MaxValue;
+        for (int n = 0; n <= 9; n++)
+        {
+            string candidate = n == 0 ? Path.Combine(folder, stem + extension)
+                                      : Path.Combine(folder, $"{stem} ({n}){extension}");
+            if (sourceSet.Contains(Path.GetFullPath(candidate))) continue;   // 來源自己不是輸出
+            if (!File.Exists(LongPath.Prepare(candidate))) continue;
+            if (n >= bestIndex) continue;
+            bestIndex = n;
+            best = candidate;
+        }
+        if (best == null)
+            evidence.Line($"merge-pdf output: no output file was found next to {Path.GetFileName(sources[0])} " +
+                          "(the run reported success but nothing new is in that folder)");
+        return best;
     }
 
     /// <summary>

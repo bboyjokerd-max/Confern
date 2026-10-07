@@ -80,7 +80,50 @@ internal enum ConversionError
     /// 這也是唯一一個**成功執行但 `Ok == false`** 的分類：`read-qr` 的結果是文字，
     /// 沒有文字就沒有東西可以回，所以它走既有的失敗回報路徑（訊息 ＋ 不寫檔）而不是另開一條。
     /// </summary>
-    QrNotFound
+    QrNotFound,
+
+    /// <summary>
+    /// 工具 `merge-pdf`（合併 PDF，M3 第六顆扇形）專用：**這一批合併不起來**，而且已經
+    /// 指名是哪一個檔、在哪一個階段失敗（見 <see cref="ConversionResult.Position"/>）。
+    ///
+    /// **為什麼既有分類沒有一個合用**（逐個對過）：
+    ///   • <see cref="DecodeFailed"/>——它的規格訊息是「**檔名** 無法解碼」，說的是「這個檔案壞了」。
+    ///     合併失敗有一整類**檔案完全沒壞**：PDFsharp 的已知缺陷 #388（含 `/XRefStm` 混合參照的
+    ///     PDF，真實案例是 Canva 產出的檔）**開檔不報錯**，要等到 `AddPage` 才丟例外。
+    ///     說「無法解碼」會把使用者送去檢查一個完好的檔案（與 <see cref="WriteConflict"/> 同一種錯）。
+    ///   • <see cref="Unreadable"/>——那句是「無法讀取來源檔案」，而這裡讀得動。
+    ///   • <see cref="Locked"/>／<see cref="WriteDenied"/>——那是環境問題，而這裡是**內容**問題。
+    ///
+    /// ⚠ 這一條**只描述「合併這個檔的那一步失敗了」**，不含是哪一步（`AddPage` 還是開檔）、
+    /// 也不含例外型別——那些是 `detail`（維修的人看得到）。分類與細節分開的理由與其他每一條相同：
+    /// 使用者訊息是規格條文，可以當斷言；例外型別是實作細節，會隨套件版本變。
+    ///
+    /// ⚠ **失敗政策＝fail-fast（使用者 2026-10-07 裁定）**：任何一個檔合併不了，就**一個輸出檔
+    /// 都不寫**。這一條錯誤碼因此必定伴隨「輸出目錄裡沒有任何新檔」——那不是靠記得去清理，
+    /// 而是結構上成立的（見 <see cref="ConversionEngine.MergePdf"/>：整批在記憶體裡合併完，
+    /// 最後才走一次 <see cref="AtomicWriter"/>）。
+    /// </summary>
+    MergeFailed,
+
+    /// <summary>
+    /// 工具 `merge-pdf` 專用：批次裡的那個檔**需要密碼才開得起來**。
+    ///
+    /// **為什麼不沿用 <see cref="MergeFailed"/>（這一條是使用者訊息，不是分類潔癖）**：
+    /// 「無法合併這個 PDF」對加密檔而言是一句**沒有下一步的話**——使用者讀完不知道要做什麼，
+    /// 只能重試同一個檔，而它永遠不會成功。真正該說的是「**這個檔要密碼，請先解除密碼**」，
+    /// 那是一個他做得到的動作。規格 §7.1 的精神就是「原因要說得出來」，而這裡的原因
+    /// 決定了下一步，所以它必須是自己的那一句。
+    ///
+    /// ⚠ 本工具**沒有任何取得密碼的介面**（輪盤上沒有輸入框、worker 協議上沒有欄位），
+    /// 所以它走 fail-fast：整批不產出，並指名那個檔。
+    ///
+    /// ⚠ 判定方式是 **`PdfReaderException` 且訊息含 "password"**（2026-10-07 實測：不給密碼是
+    /// `A password is required to open the PDF document.`、給錯密碼是
+    /// `The specified password is invalid.`——兩種都含），也就是說它是**字串比對**。
+    /// 猜錯的代價只是「少說一句密碼」或「多說一句密碼」，**行為不變**（一樣 fail-fast、
+    /// 一樣不寫檔），所以這個判定不需要更強的手段。
+    /// </summary>
+    MergeNeedsPassword
 }
 
 /// <summary>單一檔案的轉檔結果。</summary>
@@ -101,8 +144,22 @@ internal enum ConversionError
 /// 所以它回的結果 <see cref="OutputPath"/> 必定是 <c>null</c>、<see cref="QrText"/> 才有值。
 /// 兩者同時有值＝有東西壞了，不是一種可以接受的組合。
 /// </param>
+/// <param name="Position">
+/// **這一批裡的第幾個檔（1 起算）**；`0` ＝「這個結果不屬於一批有序的輸入」，
+/// 也就是**其餘每一個工具的既有行為**（它們是一檔一結果，順序由呼叫端的迴圈決定）。
+///
+/// 為什麼工具 `merge-pdf` 非有它不可：合併的輸入是**一組有序的路徑**，而它的失敗政策是
+/// fail-fast 且**必須指名是哪一個檔**（使用者 2026-10-07 裁定）。只有檔名不夠——同一個檔名
+/// 可以在批次裡出現兩次（`a.pdf;b.pdf;a.pdf` 是完全合法的請求），那時「哪一個 a.pdf」只有
+/// 位置說得出來。這與 <see cref="ConversionFailureRow"/> 那一條理由相同：檔名是**資料**，
+/// 不可以從排版訊息裡切回來。
+///
+/// ⚠ `int` 而不是 `int?`：值型別的 0 不會多出任何欄位（這一格不是跨管道欄位，
+/// 它只在行程內被 <see cref="DescribeMessage"/> 讀），而且這裡的 0 有明確語意
+/// （＝沒有位置），不是「缺席」。
+/// </param>
 internal sealed record ConversionResult(string SourcePath, string? OutputPath, ConversionError Error,
-                                        string Detail, string? QrText = null)
+                                        string Detail, string? QrText = null, int Position = 0)
 {
     public bool Ok => Error == ConversionError.None;
 
@@ -137,11 +194,21 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 工具 read-qr 專用（規格 §9.4）。說的是「這張圖裡沒有 QR」，不是「這張圖壞了」
         // （見 QrNotFound 的逐條比較）。
         ConversionError.QrNotFound => "圖片中找不到 QR 碼",
+        // 工具 merge-pdf 專用（規格 §9.4）。說的是「這一批合併不起來」，而且必定指明是哪一個檔
+        // （由 DescribeMessage 把「第 N 個檔 ＋ 檔名」接在前面）。不是「轉檔壞了」，
+        // 也不是「這個檔壞了」——含 /XRefStm 的 PDF 是完全合法的檔（見 MergeFailed 的逐條比較）。
+        ConversionError.MergeFailed => "無法合併這個 PDF",
+        // 工具 merge-pdf 專用，而且是**一句有下一步的話**（2026-10-07，見 MergeNeedsPassword
+        // 的逐條說明）：加密檔的失敗原因決定了使用者要做什麼（先解除密碼再來），
+        // 所以它不能與 MergeFailed 共用同一句——那句話讀完只會讓人重試同一個檔。
+        // 訊息刻意**不含密碼輸入的暗示**：本工具沒有取得密碼的介面，說「請輸入密碼」
+        // 會把使用者指向一個不存在的功能。
+        ConversionError.MergeNeedsPassword => "這個 PDF 需要密碼才能開啟，請先解除密碼再合併",
         _ => "轉檔失敗"
     };
 
     /// <summary>規格 §7.1 的使用者訊息（繁體中文），＝檔名 ＋ <see cref="Reason"/>。</summary>
-    public string UserMessage => DescribeMessage(Error, SourcePath, OutputPath, Reason);
+    public string UserMessage => DescribeMessage(Error, SourcePath, OutputPath, Reason, Position);
 
     /// <summary>
     /// 規格 §7.1 訊息的**唯一組裝處**：檔名 ＋ 原因。原因由呼叫端的 <see cref="Reason"/> 帶進來，
@@ -150,9 +217,19 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
     /// ⚠ **這一組訊息是規格條文，不是排版**：`m1d`／`m1f` 直接斷言它們（＝現成的回歸網），
     /// 任何一個字元變動都會讓那些套件轉紅。要改訊息，先改規格。
     /// </summary>
-    internal static string DescribeMessage(ConversionError error, string sourcePath, string? outputPath, string reason)
+    internal static string DescribeMessage(ConversionError error, string sourcePath, string? outputPath, string reason,
+                                           int position = 0)
     {
         if (error == ConversionError.None) return $"✓ {FileNameOf(outputPath ?? sourcePath)}";
+        // 合併（`merge-pdf`）的訊息**必定**帶位置與檔名：使用者 2026-10-07 裁定 fail-fast 的
+        // 原話是「整批不產出，明確說出是哪個檔、為什麼」。位置在檔名前面，因為「哪一個」在
+        // 一批有序的輸入裡首先是「第幾個」（同一個檔名可以在批次裡出現兩次）。
+        // `position <= 0` ＝ 這個結果不屬於一批有序的輸入 ⇒ 退回既有的純原因訊息，
+        // 所以其餘工具的訊息逐字元不變（`m1d`／`m1f` 斷言的就是那些字）。
+        // ⚠ MergeNeedsPassword 走**同一條**組裝規則（一樣要指名是哪個檔），所以兩者共用這一臂
+        // ——分成兩臂會讓「加密檔的訊息忘了帶檔名」變成一個看起來通過的缺口。
+        if (error is ConversionError.MergeFailed or ConversionError.MergeNeedsPassword && position > 0)
+            return $"{FileNameOf(sourcePath)}（第 {position} 個檔） {reason}";
         // 只有 DecodeFailed 的規格訊息帶檔名（先有「哪個檔案」才讀得懂「無法解碼」）；
         // 其餘是純原因，使用者在清單那一列本來就看得到檔名。
         return error == ConversionError.DecodeFailed

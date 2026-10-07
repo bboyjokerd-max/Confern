@@ -711,6 +711,37 @@ internal sealed class WheelPresenter
                     }
                 }
                 return true;
+
+            case ToolIcon.MergePdf:
+                // 合併：**左邊兩張小頁 ＋ 一條收束的線 ＋ 右邊一張大頁**（多 → 一）。
+                // 形狀為什麼是這個（以及刻意不用哪些畫法）寫在 ToolIcon.MergePdf 的註解裡，
+                // 這裡只記尺寸。
+                //
+                // 版面（以 17px 為例）：整張圖 16.15 x 10.2 px，筆寬 max(1.4, s/9) = 1.89px。
+                //   左兩張小頁  x ∈ [-0.47s,-0.05s]，半高 0.30s；**共用一條邊**（中間那條只畫一次）
+                //   右一張大頁  x ∈ [+0.17s,+0.51s]，半高 0.25s（比小頁矮 ⇒ 一眼看得出誰是結果）
+                //   收束線：左兩張的右緣（±0.30s）走到大頁的左緣（±0.25s）
+                // 為什麼共用一條邊而不是畫兩張有間隙的紙：間隙要 > 筆寬 1.89px 才分得開，
+                // 那會讓左邊那一疊吃掉 0.44s 以上，剩下的寬度不夠再放第三個框。
+                // 共用邊在 17px 下讀起來是「一疊紙」，那正是要說的事。
+                float mSmallH = s * 0.30f;          // 小頁半高
+                float mSmallW = s * 0.21f;          // 小頁寬（兩張 ＋ 共用邊）
+                float mLargeH = s * 0.25f;          // 大頁半高
+                float mLargeW = s * 0.34f;          // 大頁寬
+                float mLeft = cx - s * 0.47f;       // 左緣
+                float mGapX = cx - s * 0.05f;       // 兩張小頁的右緣（＝收束線的起點）
+                float mRight0 = cx + s * 0.17f;     // 大頁左緣
+
+                // 左邊：兩張共用一條邊的小頁。外框畫兩次，中間那一條邊只畫一次（避免疊成兩倍粗）。
+                g.DrawRectangle(pen, mLeft, cy - mSmallH, mSmallW, mSmallH * 2f);
+                g.DrawRectangle(pen, mLeft + mSmallW, cy - mSmallH, mSmallW, mSmallH * 2f);
+                g.DrawLine(pen, mLeft + mSmallW, cy - mSmallH, mLeft + mSmallW, cy + mSmallH);
+                // 右邊：一張大頁（結果）
+                g.DrawRectangle(pen, mRight0, cy - mLargeH, mLargeW, mLargeH * 2f);
+                // 收束的線：上緣與下緣各一條，把兩張小頁的開口收進大頁
+                g.DrawLine(pen, mGapX, cy - mSmallH, mRight0, cy - mLargeH);
+                g.DrawLine(pen, mGapX, cy + mSmallH, mRight0, cy + mLargeH);
+                return true;
         }
         // 沒有任何 case 命中（＝`ToolIcon` 多了一個值而這裡忘了畫）：**大聲回報「沒畫」**。
         // 這一行取代了 2026-10-07 之前那個空的 switch 尾巴——它當時讓第五顆工具靜默地變成空白圖示。
