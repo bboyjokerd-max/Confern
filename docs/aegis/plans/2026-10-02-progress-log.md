@@ -1727,3 +1727,64 @@ merge-pdf failure: fx-broken.pdf（第 2 個檔） 無法合併這個 PDF
 **三個工具全部到齊並經我方獨立驗收**：讀 QR（`e54844b`／`c48c0b9`／`8ff518a`）、合併 PDF（`e1ef7b1` 核心＋`4f8ace0` 排序視窗＋`93bc701` 輪盤可達）、去背（`a720084`）。日誌與 Obsidian 同步於本節之後執行。
 
 ---
+
+## 2026-10-08 出貨去背模型（使用者裁定「隨產品出貨」）
+
+使用者在 M3 完成後裁定：**MODNet fp16 模型隨產品出貨**。這一節記錄實作與我方獨立驗收。
+
+### 交付（`790c9ca`，5 檔、1029 insertions）
+
+| 檔案 | 內容 |
+| --- | --- |
+| `tools\publish-confern.ps1`（新，547 行，純 ASCII 無 BOM） | 一鍵：取得模型並驗 sha256＋長度 → 殺 Confern → `dotnet publish -c Release`（斷言 0 警告 0 錯誤）→ 斷言發佈目錄內有 `Confern.exe`、**預設路徑那個** `models\model_fp16.onnx`、`models\MODEL-LICENSE.txt` → 對**發佈出來的** exe 跑 `--remove-bg`（**刻意不帶 `--remove-bg-model`**）→ 臨時複本移走模型必須得到具名狀態。exit code 分級 0–6，寫 `publish-report.txt` |
+| `src\Sidecar\Sidecar.csproj` | 條件式 Content（`Exists()`）把模型與聲明檔複製到輸出／publish 的 `models\`；**沒有模型時建置照樣成功**（實測：移走 `models\` 後建置 exit 0、0 警告 0 錯誤） |
+| `models\MODEL-LICENSE.txt`（**進版控**，14,397 B） | apache-2.0 4(a) 聲明＋Apache-2.0 全文（取自上游 `ZHKKKe/MODNet` 的 LICENSE） |
+| `.gitignore` | `models/` → `models/*` ＋ `!models/MODEL-LICENSE.txt`。**注意**：被排除的**目錄**裡的檔案用 `!` 救不回來，所以必須先把目錄改成 `models/*` |
+| `tools\verify-m3d.ps1` | S22.14–S22.17（`Expect 13` → `17`），`$exeDir` 改絕對路徑 |
+
+**模型仍不進版控**：實測 `git ls-files` 238 個檔案中 `.onnx` = 0（「出貨」與「進版控」是兩件事）。
+
+### 我方獨立驗收（對 `790c9ca`，全部我自己跑）
+
+| 項目 | 結果 |
+| --- | --- |
+| 我自己執行 `publish-confern.ps1` | **exit 0**；模型 12,984,781 B sha256 `25F165DA…E5CF6`；`publish` **0 警告 0 錯誤**；`Confern.dll` 675,328 B sha `CC6BEB48…`（腳本自己斷言與建置輸出的那顆相等）；發佈夾 20,713,205 B |
+| **開箱即用**（不帶 `--remove-bg-model`） | exit 0；`defaultPath=…\publish\models\model_fp16.onnx`；產物 37,595 B；來源未動 |
+| **我自己讀那個 PNG**（對發佈版 exe 的產物） | `sig=89504e470d0a1a0a`、`colorType=6`（RGBA）、`alpha min=0 max=1 mean=0.5253 clear=0.459` ⇒ **與我先前量開發版產物的數字完全相同** |
+| 負向（模型移走） | exit 3、`newFiles=0`、日誌具名 `ModelUnavailable`、路徑跟著**正在跑的那顆 exe**（不是固定路徑） |
+| 我自己檢查發佈夾 | 模型 sha256 相符、授權檔 14,397 B 在、`Confern.dll` 與建置輸出相符 |
+| `verify-m3d.ps1 -Section S18,S19,S20,S21,S22` | **`checks=102 pass=102 fail=0 inconclusive=0 expected=102`** |
+| `verify-m3c.ps1`（S17）／`verify-m1d.ps1` | `20/20`／`74/74` |
+
+### 子代理自己抓到的（最有價值的一條）
+
+**演練 (a)**：把 `RemoveBgModel.ResolvePath` 改成跟著**工作目錄** ⇒ 套件 `100/102`，**只有 S22.14 與 S22.15 紅**；而 S22.14 的細節顯示「路徑變成 repo 的存放區、卻仍然 exit=0」。⇒ 正好證明那兩條斷言**必須斷言路徑**，不能只斷言「成功」——因為「找到一個模型並成功」在錯誤的路徑下也會過關。
+
+另兩支：關掉聲明檔的 Content ⇒ 發佈腳本第 3 步 red（exit 4「no model licence notice」）；用截斷檔當 `-ModelSource` ⇒ 取得腳本驗長度失敗、發佈 exit 2、**什麼都沒安裝**。全部已還原，dll 雜湊回到 `CC6BEB48…`。
+
+### 我自己犯的兩個量測錯誤（同一類，記下來）
+
+1. `$pubExe.Length` 印出 **1 B**——那是我把 `@(…)` 陣列的**元素個數**當成檔案大小。
+2. `MY reading` 那行沒印出寬高——因為我在讀 `$bmp.Width` 之前就 `Dispose()` 了。
+
+加上昨晚 `New-Object System.Drawing.Bitmap` 忘了 `Add-Type` 而 `$bmp` 是 null、誤報「幾乎沒有透明像素」——**三次都是「儀器壞掉時數字還是很好看」**。⇒ 規矩：**每一條量測都要先自問「這個數字在我儀器壞掉時會長什麼樣」**。
+
+### 尚未驗證（子代理自列，我照收）
+
+1. 模型的**網路下載**這條路這一刀沒重跑（走的是離線 `-ExistingPath` 與「壞來源必須被拒」）。
+2. **沒測 self-contained 發佈**（目前是 framework-dependent、24 檔 20.7 MB）⇒ **沒有證明「機器上沒有 .NET 8 runtime 也能跑」**。
+3. 「完全沒有模型」時跑**完整** S22 會踩到既有的 `registered != expected` FATAL（S22.01／S22.05–S22.08 會 INCONCLUSIVE，而 `Expect` 固定 17）——**既有**行為，不是新增的。
+4. 授權合規只做到「聲明檔隨產品出貨且有斷言」；**法律充足性需人工確認**（是否還需 NOTICE／第三方清單）。
+5. `dotnet publish` 的「0 Warning(s)/0 Error(s)」摘要**不會**出現在被重導的 stdout（同樣形狀的 `dotnet build` 會印）⇒ 改用 MSBuild file logger 當權威（讀不到摘要視為失敗）。
+
+### 留給使用者裁定的三件事
+
+1. **出貨方式**：模型放 repo 根的 `models\`（不進版控）＋建置時條件複製——是否接受。
+2. **要不要做 self-contained 發佈／程式碼簽章**（目前都沒有）。
+3. **授權聲明是否足夠**（是否還需 NOTICE 或第三方元件清單）。
+
+### 順帶量到的 repo 特性（建議之後補 `.gitattributes`）
+
+`core.autocrlf=true` 且**沒有 `.gitattributes`** ⇒ `git checkout -- <檔>` 會把工作樹的 LF 換成 CRLF，**`git diff` 仍是空的、但重建出來的 `Confern.dll` 雜湊會變**（實測 `CC6BEB48…` → `3555F3E8…`）。⇒ 判斷「還原是否逐位元」要拿 dll 雜湊當證據，不能只看 `git diff`。
+
+---
