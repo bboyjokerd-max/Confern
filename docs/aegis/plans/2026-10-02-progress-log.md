@@ -1788,3 +1788,33 @@ merge-pdf failure: fx-broken.pdf（第 2 個檔） 無法合併這個 PDF
 `core.autocrlf=true` 且**沒有 `.gitattributes`** ⇒ `git checkout -- <檔>` 會把工作樹的 LF 換成 CRLF，**`git diff` 仍是空的、但重建出來的 `Confern.dll` 雜湊會變**（實測 `CC6BEB48…` → `3555F3E8…`）。⇒ 判斷「還原是否逐位元」要拿 dll 雜湊當證據，不能只看 `git diff`。
 
 ---
+
+## 2026-10-08 發佈方式的決定（使用者裁定：維持 framework-dependent）
+
+使用者裁定：**維持 framework-dependent 發佈**，不做 self-contained；**程式碼簽章先不做**（目前也沒有憑證）。此決定**不需要改任何程式**——`tools\publish-confern.ps1` 本來就是這個模式。
+
+### 我實測的兩種發佈（供日後查，不用再量一次）
+
+| | framework-dependent（採用） | self-contained（實測後不採用） |
+| --- | --- | --- |
+| 檔案數 | 24 | **484** |
+| 總大小 | **20,713,205 B**（≈19.8 MiB） | **200,924,638 B**（≈191.6 MiB） |
+| 建置 | 0 警告 0 錯誤 | 0 警告 0 錯誤 |
+| 條件式 Content 是否生效 | 有（模型＋授權聲明都在 `models\`） | **有**（模型 12,984,781 B） |
+| 實跑去背（不帶 `--remove-bg-model`） | exit 0、1 個新檔 | **exit 0、1 個新檔**（預設路徑解析到 exe 旁邊） |
+
+⇒ 約 **9.7 倍**體積，換到「目標機器不用先裝 .NET 8 Desktop Runtime」。使用者的交付情境不需要這個，故維持小的一份。
+
+### 連帶記下來的
+
+- **未做**：程式碼簽章（使用者明示先不管）、self-contained 發佈（已量但不採用）、單一檔案／裁剪（**WPF 對裁剪支援有限**，故未嘗試）。
+- self-contained 的實測輸出留在 `%TEMP%\confern-sc`（200.9 MB），要交給「不能要求對方裝東西」的機器時可以直接用；否則可刪。
+- 這一刀**沒有動任何 repo 檔案**（除本日誌），故沒有新的程式提交。
+
+### 使用者現在可以做什麼
+
+1. 跑 `Confern.exe` 把圖片拖進輪盤 → **CUTOUT** 去背（模型已隨建置就位）。
+2. 要出貨就跑 `tools\publish-confern.ps1`：它會備好可發佈的資料夾並自己驗一遍（模型 sha256、授權聲明、開箱即用、缺模型的具名狀態）。
+3. 用眼睛確認去背邊緣品質（`%TEMP%\rembgwork\indep\portrait\real-512 (1).png`）。
+
+---
