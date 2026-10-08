@@ -457,6 +457,14 @@ internal sealed class Options
                                     of the centre band against the four corner bands. This is what
                                     makes "the subject is opaque and the background is not" a
                                     measurement instead of a claim; it writes nothing
+          --remove-bg-refine <mode> with --remove-bg: edge refinement of the alpha matte, guided |
+                                    off (default guided). The model only ever sees a 512-edge tensor,
+                                    so on a 1920x1281 photo each mask pixel covers 2.5 image pixels;
+                                    "guided" runs a guided filter (He et al. 2010) with the SOURCE
+                                    LUMINANCE as the guide and puts the high-frequency edge structure
+                                    back into the alpha at full resolution. "off" writes the raw
+                                    upscaled mask, i.e. the bytes this build produced before the
+                                    refinement existed -- that is the control arm of the measurement
           --qr-classify-selftest    print the http/https classification of 18 known inputs (and
                                     whether the browser target agrees) and exit; touches no window
                                     and never starts a process
@@ -720,6 +728,20 @@ internal sealed class Options
     public string? RemoveBgModel;
 
     /// <summary>
+    /// M3 診斷（2026-10-08，全解析度邊緣精修那一刀）：`--remove-bg-refine off|guided`——
+    /// 指定去背的 alpha 要不要做引導濾波精修（見 <see cref="EdgeRefine"/>；**預設是開的**）。
+    ///
+    /// **為什麼這條接縫非有不可**：精修的整個賣點是「同一張輸入、只有這一個開關不同時，
+    /// 邊緣細節變多」——那是**同一張圖的兩個版本之間的比較**，而沒有這個旗標就沒有第二次
+    /// 測量的立足點（把預設改掉再重跑一次不是一個可重複的實驗）。它同時也是使用者
+    /// 遇到「這一刀不喜歡」時的唯一退路（設定檔的 <c>RemoveBgRefine</c> 在正式路徑上做同一件事）。
+    ///
+    /// 認不得的值＝**拒絕並回 2**（不靜默退回預設）：與 <see cref="RemoveBgModel"/> 同一條規矩，
+    /// 診斷的參數打錯要當場看得出來。
+    /// </summary>
+    public string? RemoveBgRefine;
+
+    /// <summary>
     /// M3 診斷（2026-10-08）：`--remove-bg-inspect &lt;png&gt;`——**只讀**印出一張 PNG 的
     /// 尺寸、alpha 統計（有沒有 alpha 通道、min/max/mean、全不透明與全透明的像素比例）
     /// 以及「中央帶 vs 四角帶」的平均 alpha。
@@ -732,6 +754,7 @@ internal sealed class Options
     /// <code>
     /// remove-bg inspect: file=&lt;name&gt; size=&lt;w&gt;x&lt;h&gt; format=&lt;pf&gt; hasAlpha=&lt;True|False&gt;
     /// remove-bg inspect: alpha min=&lt;f4&gt; max=&lt;f4&gt; mean=&lt;f4&gt; opaque=&lt;f4&gt; clear=&lt;f4&gt;
+    /// remove-bg inspect: matte band=&lt;f4&gt; edge=&lt;f4&gt; (fraction of pixels in the 0&lt;a&lt;255 transition; mean |grad alpha| inside it, 0..1 per pixel)
     /// remove-bg inspect: band centre=&lt;f4&gt; corner=&lt;f4&gt; top=&lt;f4&gt; bottom=&lt;f4&gt; left=&lt;f4&gt; right=&lt;f4&gt;
     /// remove-bg inspect done: file=&lt;name&gt; ok=True
     /// </code>
@@ -1097,6 +1120,7 @@ internal sealed class Options
                 case "--merge-pdf-inspect": if (i + 1 < args.Length) o.MergePdfInspect = args[++i]; break;
                 case "--remove-bg": if (i + 1 < args.Length) o.RemoveBg = args[++i]; break;
                 case "--remove-bg-model": if (i + 1 < args.Length) o.RemoveBgModel = args[++i]; break;
+                case "--remove-bg-refine": if (i + 1 < args.Length) o.RemoveBgRefine = args[++i]; break;
                 case "--remove-bg-inspect": if (i + 1 < args.Length) o.RemoveBgInspect = args[++i]; break;
                 case "--qr-worker": if (i + 1 < args.Length) o.QrWorker = args[++i]; break;
                 case "--qr-classify-selftest": o.QrClassifySelfTest = true; break;
@@ -2858,6 +2882,36 @@ internal static class App
         string? outputDir = settings.ResolveOutputDirectory();
         evidence.Line($"tool remove-bg: outputDir={outputDir ?? "(source folder)"}");
 
+        // 邊緣精修的模式（2026-10-08）。三層優先序，而且**每一層都印出來是哪一層**：
+        //   ①命令列 `--remove-bg-refine`（診斷接縫；認不得的值＝拒絕，回 2）
+        //   ②設定檔的 RemoveBgRefine（正式路徑也讀的那一個）
+        //   ③EdgeRefine.DefaultMode（guided，開）
+        // ⚠ 送給 worker 時**預設值一律送 null**（見 ConversionClient.Start）：送 null 與送
+        // "guided" 的行為相同，但只有送 null 能讓既有封包逐位元不變。
+        string refineRequest = (opt.RemoveBgRefine ?? "").Trim();
+        string refineMode;
+        string refineOrigin;
+        if (refineRequest.Length > 0)
+        {
+            refineMode = EdgeRefine.CanonicalModeOrEmpty(refineRequest);
+            if (refineMode.Length == 0)
+            {
+                evidence.Line($"--remove-bg FAILED: --remove-bg-refine '{refineRequest}' is not one of " +
+                              $"{string.Join("/", EdgeRefine.Modes)}");
+                return 2;
+            }
+            refineOrigin = "--remove-bg-refine";
+        }
+        else
+        {
+            refineMode = EdgeRefine.CanonicalMode(settings.RemoveBgRefine);
+            refineOrigin = "settings";
+        }
+        evidence.Line($"tool remove-bg: refine={refineMode} ({refineOrigin}" +
+                      (refineMode == EdgeRefine.DefaultMode ? ", the default" : "") +
+                      $") r={EdgeRefine.RadiusGain:G}x upscale (cap {EdgeRefine.RadiusMax}) " +
+                      $"eps={EdgeRefine.Epsilon:G}");
+
         int journalRecovered = new TempJournal(TempJournal.DefaultPath()).RecoverStale();
         evidence.Line($"temp journal: recovered {journalRecovered} stale temp file(s)");
 
@@ -2873,7 +2927,8 @@ internal static class App
             // 會對上它自己的工作目錄，那不是這一端解析出來的那一個。
             if (!client.Start(new[] { source }, "", 100, outputDir: outputDir,
                               toolOp: WorkerProtocol.OpRemoveBg, out string? startError,
-                              removeBgModel: modelPath))
+                              removeBgModel: modelPath,
+                              removeBgRefine: refineMode == EdgeRefine.DefaultMode ? null : refineMode))
             {
                 evidence.Line($"--remove-bg FAILED: the worker did not start ({startError})");
                 return 3;
@@ -3071,6 +3126,33 @@ internal static class App
         evidence.Line($"remove-bg inspect: alpha min={minA / 255.0:F4} max={maxA / 255.0:F4} " +
                       $"mean={sum / total / 255.0:F4} opaque={opaque / (double)total:F4} " +
                       $"clear={clear / (double)total:F4}");
+
+        // 過渡帶（羽化）有多寬、裡面有多陡。**這是這一顆工具唯一在改的兩個數字**（邊緣精修把
+        // 模型那張 512 短邊的遮罩放大回來，代價就是過渡帶被放大倍率撐寬、梯度被撐平），
+        // 所以它們必須是**產品自己講得出來**的事實，而不是驗收腳本自己算的：驗收的 S22 直接
+        // 讀這兩欄，而引擎日誌那一行（在 worker 的日誌裡）用的也是同一個定義。
+        //   band ＝ 0 < alpha < 255 的像素佔比（羽化的比例，越小＝光暈越窄）
+        //   edge ＝ 過渡帶內 |grad alpha| 的平均（中央差分 ÷2，邊界像素不計；0..1／像素，
+        //          越大＝過渡越陡＝邊緣越硬）。與 alpha 一樣除以 255 正規化。
+        long band = 0;
+        double edgeSum = 0;
+        for (int y = 1; y < h - 1; y++)
+        {
+            int row = y * stride;
+            for (int x = 1; x < w - 1; x++)
+            {
+                int p = row + x * 4 + 3;
+                if (pixels[p] == 0 || pixels[p] == 255) continue;
+                band++;
+                double gx = (pixels[p + 4] - pixels[p - 4]) / 2.0;
+                double gy = (pixels[p + stride] - pixels[p - stride]) / 2.0;
+                edgeSum += Math.Sqrt(gx * gx + gy * gy) / 255.0;
+            }
+        }
+        evidence.Line($"remove-bg inspect: matte band={band / (double)total:F4} " +
+                      $"edge={(band > 0 ? edgeSum / band : 0):F4} " +
+                      "(fraction of pixels in the 0<a<255 transition; mean |grad alpha| " +
+                      "inside it, 0..1 per pixel)");
 
         (double cm, double cx) = BandStats(pixels, w, h, 0.30, 0.70, 0.30, 0.70);
         (double c1m, double c1x) = BandStats(pixels, w, h, 0.00, 0.10, 0.00, 0.10);
@@ -3640,16 +3722,28 @@ internal static class App
         // （與取得腳本下載的位置相同）：`--remove-bg-model` 是**診斷接縫**，存在的理由是讓
         // 「缺模型」與「模型損壞」兩個狀態在驗收裡真的被走過，不是一個使用者設定。
         string? removeBgModel = null;
+        // 邊緣精修（2026-10-08）：**正式路徑讀設定檔**（`RemoveBgRefine`），因為輪盤上沒有命令列，
+        // 而使用者要能自己決定這一刀要不要開。與模型路徑同一條規矩：預設值送 null（缺席語意
+        // ＝預設＝開），只有明確關掉才送 "off" 過去——那讓既有的 job 封包逐位元不變。
+        string? removeBgRefine = null;
         if (toolOp == WorkerProtocol.OpRemoveBg)
+        {
+            string refine = EdgeRefine.CanonicalMode(settings.RemoveBgRefine);
+            removeBgRefine = refine == EdgeRefine.DefaultMode ? null : refine;
             evidence.Line($"ENTER: remove-bg model resolves to " +
                           $"'{RemoveBgModel.ResolvePath(removeBgModel)}' (default beside the exe; " +
                           "PNG out, and no file at all when the mask is empty)");
+            evidence.Line($"ENTER: remove-bg refine={refine} (settings; " +
+                          $"r={EdgeRefine.RadiusGain:G}x the mask's upscale factor, cap " +
+                          $"{EdgeRefine.RadiusMax}, eps={EdgeRefine.Epsilon:G}; " +
+                          "the model runs once, the refinement is pixels only)");
+        }
         runner.Start(paths,
                      toolOp == null ? target : "",
                      toolOp == null ? settings.QualityFor(target) : 100,
                      centerX, centerY,
                      toolOp: toolOp, outputDir: outputDir, compression: compression,
-                     removeBgModel: removeBgModel);
+                     removeBgModel: removeBgModel, removeBgRefine: removeBgRefine);
         PendingPaths = Array.Empty<string>();
         PendingTools = Array.Empty<ToolDescriptor>();
         return true;

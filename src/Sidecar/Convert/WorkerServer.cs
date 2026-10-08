@@ -301,6 +301,18 @@ internal sealed class WorkerMessage
     /// 相對路徑會對上 worker 的工作目錄而不是 UI 的，那會變成兩邊各說各話。
     /// </summary>
     public string? removeBgModel { get; set; }
+
+    /// <summary>
+    /// 去背的**邊緣精修模式**（<see cref="WorkerProtocol.OpRemoveBg"/> 專用，
+    /// 正規值見 <see cref="EdgeRefine.Modes"/>）。
+    ///
+    /// ⚠ **缺席語意（<c>null</c>）＝<see cref="EdgeRefine.DefaultMode"/>（開）**：
+    /// 這正是「這個欄位還不存在的年代」的封包該有的意思，也就是預設行為，所以
+    /// 其餘每一個 op（以及不指定精修的 remove-bg）的封包**逐位元不變**（<c>WhenWritingNull</c>）。
+    /// 只有明確要關掉時才會送 <c>off</c> 過來——「預設值也送一次」會讓既有封包多一個欄位，
+    /// 而封包逐位元不變是這一顆扇形唯一的相容性契約。
+    /// </summary>
+    public string? removeBgRefine { get; set; }
     public int quality { get; set; }
     public int done { get; set; }
     public int total { get; set; }
@@ -461,7 +473,13 @@ internal static class WorkerServer
                       // 最現實的失效——兩邊的工作目錄不一樣）。null 印成 `(default beside exe)`
                       // 而不是空字串：那是「沒有指定」與「指定成空字串」的分別。
                       (op == WorkerProtocol.OpRemoveBg
-                          ? $" model={job.removeBgModel ?? "(default beside exe)"}" : ""));
+                          ? $" model={job.removeBgModel ?? "(default beside exe)"}" +
+                            // ⚠ 精修模式同樣只**附加在行尾**，而且**只有在明確指定時才出現**：
+                            // null＝預設（開），所以不指定精修的既有那一行逐字元不變。
+                            // 非印不可的理由與模型路徑相同：它是這一顆扇形新的跨管道事實，
+                            // 而「UI 以為關掉了、worker 其實照預設開著」在另一端完全看不出來。
+                            (job.removeBgRefine is { Length: > 0 } rm ? $" refine={rm}" : "")
+                          : ""));
         link.Send(new WorkerMessage
         {
             type = WorkerMessageTypes.Progress, jobId = job.jobId, done = 0, total = paths.Length,
@@ -543,7 +561,7 @@ internal static class WorkerServer
                 // 解析規則只有 RemoveBgModel.ResolvePath 那一份，worker 不是第二個擁有者
                 // （與 outputDir 交給 Settings／NamingPolicy 同一條規矩）。
                 WorkerProtocol.OpRemoveBg => engine.RemoveBg(paths[i], job.removeBgModel, journal,
-                                                             job.outputDir),
+                                                             job.outputDir, job.removeBgRefine),
                 _ => RejectUnknownOp(paths[i], op)
             };
             if (result.Ok) succeeded++; else failed++;

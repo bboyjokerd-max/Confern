@@ -2736,7 +2736,7 @@ function Invoke-S22([string]$fault) {
 
   # One remove-bg run on a fresh copy of a fixture, through the REAL worker process. The OUTPUT
   # FILE - not the request - is the only source of truth about the output.
-  function Invoke-RemoveBg([string]$name, [string]$fixture, [string]$modelPath) {
+  function Invoke-RemoveBg([string]$name, [string]$fixture, [string]$modelPath, [string[]]$extra = @()) {
     $d = Join-Path $Work "rembg-$name"
     New-Item -ItemType Directory -Force -Path $d | Out-Null
     $src = Join-Path $d (Split-Path -Leaf $fixture)
@@ -2747,6 +2747,9 @@ function Invoke-S22([string]$fault) {
 
     $argv = @('--remove-bg', $src)
     if ($modelPath -ne '') { $argv += @('--remove-bg-model', $modelPath) }
+    # S22.18-S22.21 pass the refinement switch (and a private --settings-file) through this hole.
+    # Every existing caller passes nothing here, so their argv is unchanged.
+    $argv += $extra
     $r = Invoke-Confern $name $argv
 
     $outFile = Get-NewestOutput $d $src
@@ -2785,6 +2788,7 @@ function Invoke-S22([string]$fault) {
     $alphaLine = Get-LogLine $r.Lines 'remove-bg inspect: alpha '
     $bandLine = Get-LogLine $r.Lines 'remove-bg inspect: band '
     $cornersLine = Get-LogLine $r.Lines 'remove-bg inspect: corners '
+    $matteLine = Get-LogLine $r.Lines 'remove-bg inspect: matte '
     $headLine = Get-LogLine $r.Lines 'remove-bg inspect: file='
     $min = 9.0; $max = -1.0; $mean = -1.0; $opaque = -1.0; $clear = -1.0
     $centre = -1.0; $corner = -1.0; $top = -1.0
@@ -2803,6 +2807,14 @@ function Invoke-S22([string]$fault) {
       $corner = [double]$m2.Groups[2].Value
       $top = [double]$m2.Groups[3].Value
     }
+    # The transition width and the edge steepness, as the PRODUCT measured them (added 2026-10-08
+    # with the refinement slice). Both default to a value that FAILS so a missing line cannot pass.
+    $bandPct = -1.0; $edgeAmt = -1.0
+    $m4 = [regex]::Match([string]$matteLine, 'band=([\d.]+) edge=([\d.]+)')
+    if ($m4.Success) {
+      $bandPct = [double]$m4.Groups[1].Value
+      $edgeAmt = [double]$m4.Groups[2].Value
+    }
     $m3 = [regex]::Match([string]$cornersLine, 'TL=([\d.]+) TR=([\d.]+) BL=([\d.]+) BR=([\d.]+)')
     if ($m3.Success) {
       $cornerTL = [double]$m3.Groups[1].Value
@@ -2815,6 +2827,7 @@ function Invoke-S22([string]$fault) {
       Min = $min; Max = $max; Mean = $mean; Opaque = $opaque; Clear = $clear
       Centre = $centre; Corner = $corner; Top = $top; Corners = $cornersLine
       CornerTL = $cornerTL; CornerTR = $cornerTR; CornerBL = $cornerBL; CornerBR = $cornerBR
+      MatteLine = $matteLine; MatteBand = $bandPct; MatteEdge = $edgeAmt
     }
   }
 
@@ -3230,6 +3243,360 @@ function Invoke-S22([string]$fault) {
     $noticeDetail = "no tracked notice at '$repoNotice' ; beside=$noticeBesideOk (an exe folder must not carry a notice the source tree does not have)"
   }
   Check 'S22.17 the model licence notice (apache-2.0, Xenova/modnet) ships beside the model it covers: the copy next to the exe is byte-identical to the committed notice and names the licence, the source and the measured length and sha256 - a release that carried the model without this file would fail here' $noticeOk $noticeDetail
+
+  # ---------------------------------------------------------------- S22.18-S22.21 the EDGE REFINEMENT
+  # WHY THESE FOUR EXIST (2026-10-08, the refinement slice). The model pins the SHORTEST EDGE of its
+  # input to 512 pixels, so on a 1920x1281 photo the mask it returns holds only 768x512 cells: every
+  # mask pixel stands for 2.5 image pixels once it has been scaled back up, and the matte loses the
+  # high-frequency part of its edge. The product now refines that mask at FULL resolution with a
+  # guided filter (He, Sun, Tang 2010) driven by the SOURCE image's luminance, and then narrows the
+  # transition by the very factor the mask was enlarged by.
+  #
+  # These checks assert the PRODUCT'S OWN numbers - --remove-bg-inspect prints
+  # `matte band=... edge=...` for the transition width and the edge steepness - and the BYTES it
+  # wrote, never the source code:
+  #   * the input is a HIGH-RESOLUTION one, built here at runtime by a 3x nearest upscale of the
+  #     committed 512x410 fixture (1536x1230). Its tensor comes back 640x512, i.e. a measured 2.40x
+  #     bottleneck, which is the defect this slice exists for. (The real-world case - a 1920x1281
+  #     photograph, 2.50x - cannot be committed, so its numbers live in the slice report.)
+  #   * the SWITCH: --remove-bg-refine off / guided / absent, where ABSENT must equal guided byte
+  #     for byte, because the refinement defaults to ON.
+  #   * the DIRECTION, with a margin: the refined matte must have a NARROWER transition and a
+  #     STEEPER edge than the unrefined one on the same file, so "it did nothing" cannot pass.
+  #   * DETERMINISM: the same input twice, both ways, byte for byte.
+  #   * the CONTROL: where the mask was NOT enlarged (the committed 512x410 fixture gets a 640x512
+  #     tensor, i.e. 0.80x) the refinement must leave the file EXACTLY as it was. The measured
+  #     reason is in EdgeRefine.MinBottleneck: at that scale the guided filter's own softening
+  #     (about 2r) costs more than the alignment buys - transition 4.56% -> 21.74%, edge
+  #     0.1856 -> 0.0456 when it was applied - so the product does not apply it at all.
+  $hiDir = Join-Path $Work 'rembg-hires'
+  New-Item -ItemType Directory -Force -Path $hiDir | Out-Null
+  $hiPath = Join-Path $hiDir 'portrait-3x.png'
+  $hiOk = $false
+  $hiDetail = 'not built'
+  if ($portraitFixtureOk) {
+    try {
+      $hiSrc = New-Object System.Drawing.Bitmap($fPortrait)
+      $hiW = $hiSrc.Width * 3; $hiH = $hiSrc.Height * 3
+      $hiBmp = New-Object System.Drawing.Bitmap($hiW, $hiH, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+      $hiG = [System.Drawing.Graphics]::FromImage($hiBmp)
+      $hiG.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+      $hiG.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+      $hiG.DrawImage($hiSrc, 0, 0, $hiW, $hiH)
+      $hiG.Dispose()
+      $hiBmp.Save($hiPath, [System.Drawing.Imaging.ImageFormat]::Png)
+      $hiBmp.Dispose(); $hiSrc.Dispose()
+      $hiOk = Test-Path -LiteralPath $hiPath
+      $hiDetail = "built ${hiW}x${hiH}"
+    } catch {
+      $hiOk = $false
+      $hiDetail = "3x nearest upscale failed: $($_.Exception.Message)"
+    }
+  } else {
+    $hiDetail = 'portrait fixture missing'
+  }
+  $hiSize = 'MISSING'
+  if ($hiOk) { $hiSize = Get-ImageSize $hiPath }
+
+  # A private settings file: the suite must never read or write the user's real one, and the
+  # refinement's own setting has to be demonstrable on the SAME input as the CLI switch.
+  $setDefaultPath = Join-Path $Work 'rembg-refine-default.json'
+  [System.IO.File]::WriteAllText($setDefaultPath, '{ "JpgQuality": 85 }', (New-Object System.Text.UTF8Encoding($false)))
+
+  $refOff = $null; $refOn = $null; $refDefault = $null
+  $refOff2 = $null; $refOn2 = $null
+  if ($haveModel -and $hiOk) {
+    $refOff = Invoke-RemoveBg 'refine-off' $hiPath $model @('--remove-bg-refine', 'off',
+                                                           '--settings-file', $setDefaultPath)
+    $refOn = Invoke-RemoveBg 'refine-on' $hiPath $model @('--remove-bg-refine', 'guided',
+                                                          '--settings-file', $setDefaultPath)
+    $refDefault = Invoke-RemoveBg 'refine-default' $hiPath $model @('--settings-file', $setDefaultPath)
+
+    $refOff2 = Invoke-RemoveBg 'refine-off-again' $hiPath $model @('--remove-bg-refine', 'off',
+                                                                   '--settings-file', $setDefaultPath)
+    $refOn2 = Invoke-RemoveBg 'refine-on-again' $hiPath $model @('--remove-bg-refine', 'guided',
+                                                                 '--settings-file', $setDefaultPath)
+  }
+
+  function Get-Sha12([string]$p) {
+    $s = Get-Sha $p
+    if ($s.Length -le 12) { return $s }
+    return $s.Substring(0, 12)
+  }
+
+  # ---- S22.18 the switch: off / guided / absent, and ABSENT means ON
+  $switchOk = $false
+  $switchDetail = "hires=($hiDetail) size=$hiSize haveModel=$haveModel"
+  if (($null -ne $refOff) -and ($null -ne $refOn) -and ($null -ne $refDefault)) {
+    $offSha = Get-Sha $refOff.Out; $onSha = Get-Sha $refOn.Out; $defSha = Get-Sha $refDefault.Out
+    $offLine = Get-LogLine $refOff.Lines 'tool remove-bg: refine='
+    $onLine = Get-LogLine $refOn.Lines 'tool remove-bg: refine='
+    $defLine = Get-LogLine $refDefault.Lines 'tool remove-bg: refine='
+    $offNamed = [bool]($offLine -match 'refine=off \(--remove-bg-refine\)')
+    $onNamed = [bool]($onLine -match 'refine=guided \(--remove-bg-refine, the default\)')
+    $defNamed = [bool]($defLine -match 'refine=guided \(settings, the default\)')
+    $switchOk = ($refOff.Exit -eq 0) -and ($refOn.Exit -eq 0) -and ($refDefault.Exit -eq 0) -and
+                ($refOff.OutSize -eq $hiSize) -and ($refOn.OutSize -eq $hiSize) -and
+                ($refDefault.OutSize -eq $hiSize) -and
+                $offNamed -and $onNamed -and $defNamed -and
+                ($offSha -ne $onSha) -and ($onSha -eq $defSha)
+    $switchDetail = "hires=($hiDetail) offExit=$($refOff.Exit)/$($refOff.OutSize) onExit=$($refOn.Exit)/$($refOn.OutSize) " +
+                    "defaultExit=$($refDefault.Exit)/$($refDefault.OutSize) ; offLine='$offLine' ; onLine='$onLine' ; " +
+                    "defaultLine='$defLine' ; offSha=$(Get-Sha12 $refOff.Out) onSha=$(Get-Sha12 $refOn.Out) " +
+                    "defaultSha=$(Get-Sha12 $refDefault.Out) differ=$($offSha -ne $onSha) absentIsGuided=$($onSha -eq $defSha)"
+  } else {
+    Inconclusive 'S22.18 needs a model and the built high-resolution input'
+  }
+  Check 'S22.18 the refinement switch is honoured on a high-resolution input (off vs guided produce different bytes) and NO flag means ON: the unflagged run is byte-identical to the explicit guided one, and each run says which mode it used' `
+    $switchOk $switchDetail
+
+  # ---- S22.19 the direction, measured by the product itself
+  $dirOk = $false
+  $dirDetail = 'no inspect'
+  if (($null -ne $refOff) -and ($null -ne $refOn) -and ($null -ne $refOff.Out) -and ($null -ne $refOn.Out)) {
+    $mOff = Get-RemoveBgInspect 'refine-off' $refOff.Out
+    $mOn = Get-RemoveBgInspect 'refine-on' $refOn.Out
+    # 2026-10-08, second round: the FIRST version of this check demanded band <= 0.9x AND edge >= 1.1x.
+    # That is what the reviewer objected to: the narrowing was strongest exactly where the guide is
+    # TEXTURED (fur, hair), and a real strand IS legitimately semi-transparent, so those pixels were
+    # pushed to 0 - measured on the 1920x1281 photo, only 30.4% of them survived. The gate polarity
+    # was inverted (see EdgeRefine.GateEpsilon), so the honest assertions now are: (a) the band must
+    # still NARROW in the LOW-texture half, which is where the coarse mask's staircase lives, and
+    # (b) the refined band must never be wider than the unrefined one - the guided filter alone
+    # widens it (15.09% -> 22.91% on the photo, 1.19x here), so a dropped narrowing goes red here.
+    # MEASURED margins on THIS input: band 0.9547x, edge 1.15x, lowTexBand 0.8839x, opaque 1.016x.
+    $bandOk = ($mOn.MatteBand -gt 0) -and ($mOff.MatteBand -gt 0) -and ($mOn.MatteBand -le (1.02 * $mOff.MatteBand))
+    $edgeOk = ($mOn.MatteEdge -gt 0) -and ($mOff.MatteEdge -gt 0) -and ($mOn.MatteEdge -ge (1.05 * $mOff.MatteEdge))
+    $opaqueOk = ($mOn.Opaque -ge $mOff.Opaque)
+    $dirOk = $bandOk -and $edgeOk -and $opaqueOk
+    $dirDetail = "band off=$($mOff.MatteBand) on=$($mOn.MatteBand) need on<=1.02*off ($([Math]::Round(1.02 * $mOff.MatteBand, 4))) -> $bandOk ; " +
+                 "edge off=$($mOff.MatteEdge) on=$($mOn.MatteEdge) need on>=1.05*off ($([Math]::Round(1.05 * $mOff.MatteEdge, 4))) -> $edgeOk ; " +
+                 "opaque off=$($mOff.Opaque) on=$($mOn.Opaque) -> $opaqueOk ; '$($mOn.MatteLine)'"
+  } else {
+    Inconclusive 'S22.19 needs the two refinement arms from S22.18'
+  }
+  Check 'S22.19 on the SAME high-resolution file the refined matte is never WIDER than the unrefined one and never loses its edge (product-measured: band <= 1.02x, edge >= 1.05x), with no fewer fully opaque pixels' `
+    $dirOk $dirDetail
+
+  # ---- S22.20 determinism, both ways
+  $detOk = $false
+  $detDetail = 'no repeat runs'
+  if (($null -ne $refOff2) -and ($null -ne $refOn2) -and ($null -ne $refOff) -and ($null -ne $refOn)) {
+    $offSame = (Get-Sha $refOff.Out) -eq (Get-Sha $refOff2.Out)
+    $onSame = (Get-Sha $refOn.Out) -eq (Get-Sha $refOn2.Out)
+    $untouched = $refOff.Untouched -and $refOn.Untouched -and $refOff2.Untouched -and $refOn2.Untouched
+    $sizesOk = ($refOff2.OutSize -eq $hiSize) -and ($refOn2.OutSize -eq $hiSize)
+    $detOk = $offSame -and $onSame -and $untouched -and $sizesOk
+    $detDetail = "off $(Get-Sha12 $refOff.Out) vs $(Get-Sha12 $refOff2.Out) same=$offSame ; " +
+                 "guided $(Get-Sha12 $refOn.Out) vs $(Get-Sha12 $refOn2.Out) same=$onSame ; " +
+                 "sourcesUntouched=$untouched sizesOk=$sizesOk"
+  } else {
+    Inconclusive 'S22.20 needs the repeat runs on the high-resolution input'
+  }
+  Check 'S22.20 the refinement is deterministic: the same input run twice gives byte-identical output with the refinement both OFF and ON, and every source copy is left alone' `
+    $detOk $detDetail
+
+  # ---- S22.21 the control: no bottleneck, no change - and the setting reaches the same switch
+  $ctlOk = $false
+  $ctlDetail = 'no arms'
+  if (($null -ne $refOff) -and ($null -ne $portrait.Out)) {
+    $portraitNoFlag = $portrait.Out
+    # S22.05 ran the committed 512x410 fixture through the DEFAULT path (which is the refinement ON).
+    # A second run on the same fixture with the switch OFF must be byte-identical to it.
+    $ctlOff = Invoke-RemoveBg 'refine-portrait-off' $fPortrait $model @('--remove-bg-refine', 'off',
+                                                                     '--settings-file', $setDefaultPath)
+    $portraitSame = ($null -ne $ctlOff.Out) -and
+                    ((Get-Sha $portraitNoFlag) -eq (Get-Sha $ctlOff.Out))
+    # The settings key (the wheel has no command line, so this is how a user turns the refinement off
+    # for good). MEASURED 2026-10-08: the --remove-bg SEAM never reads the settings file - with
+    # `{"RemoveBgRefine":"off"}` it still logged `outputDir=(source folder)` and `refine=guided`, and
+    # its log had no `settings: loaded from` line - so the key is asserted through the two verbs that
+    # DO read that file: --settings-set (the settings page's Save) and --settings-probe.
+    $keyFile = Join-Path $Work 'rembg-refine-key.json'
+    [System.IO.File]::WriteAllText($keyFile, '{ "JpgQuality": 85 }', (New-Object System.Text.UTF8Encoding($false)))
+    $probeBefore = Invoke-Confern 'refine-key-before' @('--settings-probe', $keyFile)
+    $keySet = Invoke-Confern 'refine-key-off' @('--settings-set', 'removeBgRefine=off', '--settings-file', $keyFile)
+    $probeAfter = Invoke-Confern 'refine-key-after' @('--settings-probe', $keyFile)
+    $keyBad = Invoke-Confern 'refine-key-junk' @('--settings-set', 'removeBgRefine=maybe', '--settings-file', $keyFile)
+    $beforeLine = Get-LogLine $probeBefore.Lines 'settings probe result:'
+    $afterLine = Get-LogLine $probeAfter.Lines 'settings probe result:'
+    $keyText = [System.IO.File]::ReadAllText($keyFile)
+    $fileHasOff = [bool]($keyText -match '"RemoveBgRefine": "off"')
+    $defaultOn = ($probeBefore.Exit -eq 0) -and [bool]($beforeLine -match 'refine=guided')
+    $turnsOff = ($keySet.Exit -eq 0) -and
+                [bool]((Get-LogLine $keySet.Lines 'settings set done:') -match 'applied=1 rejected=0') -and
+                [bool]($afterLine -match 'refine=off') -and $fileHasOff
+    $refusesJunk = ($keyBad.Exit -eq 4) -and
+                   [bool]((Get-LogLine $keyBad.Lines 'settings set done:') -match 'applied=0 rejected=1') -and
+                   [bool]((Get-LogLine $keyBad.Lines 'settings: reject removeBgRefine') -match 'expected one of')
+    # The rejected value must not have been written: the file still says off, and it still probes off.
+    $junkNotWritten = [bool](([System.IO.File]::ReadAllText($keyFile)) -match '"RemoveBgRefine": "off"')
+    $ctlOk = $portraitSame -and ($ctlOff.Exit -eq 0) -and $defaultOn -and $turnsOff -and $refusesJunk -and $junkNotWritten
+    $ctlDetail = "portrait 512x410 (tensor 640x512 = 0.80x): defaultPath=$(Get-Sha12 $portraitNoFlag) " +
+                 "switchOff=$(Get-Sha12 $ctlOff.Out) identical=$portraitSame ; settings key: defaultLine '$beforeLine' " +
+                 "setExit=$($keySet.Exit) afterLine '$afterLine' fileHasOff=$fileHasOff junkExit=$($keyBad.Exit) " +
+                 "refusesJunk=$refusesJunk notWritten=$junkNotWritten"
+  } else {
+    Inconclusive 'S22.21 needs the off arm and the S22.05 portrait output'
+  }
+  Check 'S22.21 the control, and the settings key: on an input whose mask was NOT enlarged the refinement changes nothing at all (byte-identical with the switch off), while the settings key the wheel reads is canonical - absent means ON, off is accepted and survives a round trip, and a junk value is refused with exit 4 and is not written' `
+    $ctlOk $ctlDetail
+
+  # ---- S22.22 the narrowing must NOT eat the genuinely soft pixels -------------------------
+  # The reviewer's finding of 2026-10-08, second round, measured on the 1920x1281 photo: the first
+  # version gated the narrowing on "the guide has an edge here", so it hardened exactly the TEXTURED
+  # regions - and a real hair strand IS legitimately semi-transparent, so those pixels were pushed
+  # to 0 (only 30.4% of them survived; 26286 became EXACTLY 0; the soft-hair population fell to
+  # 34% of the unrefined mask). The gate polarity was inverted (EdgeRefine.GateEpsilon).
+  # This check pins the new direction on THIS suite's own high-resolution input, and the numbers
+  # it rejects are the ones the old polarity measured on the very same file.
+  if (-not ('RembgSoftMetrics' -as [type])) {
+    Add-Type -Language CSharp -ReferencedAssemblies PresentationCore, WindowsBase, System.Xaml -TypeDefinition @'
+using System;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+
+public static class RembgSoftMetrics
+{
+    private static BitmapSource Load(string path)
+    {
+        BitmapFrame frame;
+        using (var fs = System.IO.File.OpenRead(path))
+            frame = BitmapFrame.Create(fs, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        return frame.Format == PixelFormats.Bgra32
+            ? (BitmapSource)frame
+            : new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+    }
+
+    private static byte[] AlphaPlane(string path, out int w, out int h)
+    {
+        BitmapSource bgra = Load(path);
+        w = bgra.PixelWidth; h = bgra.PixelHeight;
+        var px = new byte[w * h * 4];
+        bgra.CopyPixels(px, w * 4, 0);
+        var a = new byte[w * h];
+        for (int i = 0; i < a.Length; i++) a[i] = px[i * 4 + 3];
+        return a;
+    }
+
+    private static double[] LumaPlane(string path, out int w, out int h)
+    {
+        BitmapSource bgra = Load(path);
+        w = bgra.PixelWidth; h = bgra.PixelHeight;
+        var px = new byte[w * h * 4];
+        bgra.CopyPixels(px, w * 4, 0);
+        var y = new double[w * h];
+        for (int i = 0; i < y.Length; i++)
+            y[i] = (0.299 * px[i * 4 + 2] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4]) / 255.0;
+        return y;
+    }
+
+    // moving-sum box mean: O(1) per pixel, border normalised by the real window size
+    private static double[] BoxMean(double[] src, int w, int h, int r)
+    {
+        var tmp = new double[w * h];
+        var dst = new double[w * h];
+        for (int y = 0; y < h; y++)
+        {
+            int row = y * w;
+            double sum = 0;
+            for (int x = 0; x <= r && x < w; x++) sum += src[row + x];
+            for (int x = 0; x < w; x++)
+            {
+                int x0 = Math.Max(0, x - r), x1 = Math.Min(w - 1, x + r);
+                tmp[row + x] = sum / (x1 - x0 + 1);
+                if (x + r + 1 < w) sum += src[row + x + r + 1];
+                if (x - r >= 0) sum -= src[row + x - r];
+            }
+        }
+        for (int x = 0; x < w; x++)
+        {
+            double sum = 0;
+            for (int y = 0; y <= r && y < h; y++) sum += tmp[y * w + x];
+            for (int y = 0; y < h; y++)
+            {
+                int y0 = Math.Max(0, y - r), y1 = Math.Min(h - 1, y + r);
+                dst[y * w + x] = sum / (y1 - y0 + 1);
+                if (y + r + 1 < h) sum += tmp[(y + r + 1) * w + x];
+                if (y - r >= 0) sum -= tmp[(y - r) * w + x];
+            }
+        }
+        return dst;
+    }
+
+    // Soft = 0.05 <= alpha <= 0.60 (a strand really may be neither 0 nor 1).
+    // Textured = the 9x9 mean of |grad Y| >= texThr (hair/fur, not a flat area).
+    // The wisp population is taken from the UNREFINED mask only, so both arms measure one set.
+    public static string Compare(string guide, string offPng, string onPng, double texThr)
+    {
+        int w, h; byte[] aOff = AlphaPlane(offPng, out w, out h);
+        int w2, h2; byte[] aOn = AlphaPlane(onPng, out w2, out h2);
+        int gw, gh; double[] y = LumaPlane(guide, out gw, out gh);
+        if (w2 != w || h2 != h || gw != w || gh != h) return "SIZE MISMATCH";
+        int n = w * h;
+        var grad = new double[n];
+        for (int yy = 0; yy < h; yy++)
+            for (int xx = 0; xx < w; xx++)
+            {
+                int xm = xx > 0 ? xx - 1 : 0, xp = xx < w - 1 ? xx + 1 : w - 1;
+                int ym = yy > 0 ? yy - 1 : 0, yp = yy < h - 1 ? yy + 1 : h - 1;
+                double gx = (y[yy * w + xp] - y[yy * w + xm]) / 2.0;
+                double gy = (y[yp * w + xx] - y[ym * w + xx]) / 2.0;
+                grad[yy * w + xx] = Math.Sqrt(gx * gx + gy * gy);
+            }
+        double[] tex = BoxMean(grad, w, h, 4);
+        long bandOff = 0, bandOn = 0, lowBandOff = 0, lowBandOn = 0;
+        long wispN = 0, kept = 0, strictZero = 0, popOn = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double ao = aOff[i] / 255.0, an = aOn[i] / 255.0;
+            bool softOff = ao >= 0.05 && ao <= 0.60, softOn = an >= 0.05 && an <= 0.60;
+            bool inOff = aOff[i] != 0 && aOff[i] != 255, inOn = aOn[i] != 0 && aOn[i] != 255;
+            if (inOff) bandOff++;
+            if (inOn) bandOn++;
+            if (tex[i] < texThr) { if (inOff) lowBandOff++; if (inOn) lowBandOn++; }
+            else
+            {
+                if (softOff)
+                {
+                    wispN++;
+                    if (softOn) kept++;
+                    if (aOn[i] == 0) strictZero++;
+                }
+                if (softOn) popOn++;
+            }
+        }
+        return string.Format(
+            "wispN={0} kept={1} preservation={2:F4} populationRatio={3:F4} strictZero={4} strictZeroShare={5:F4} lowTexBandRatio={6:F4} bandRatio={7:F4}",
+            wispN, kept, wispN > 0 ? (double)kept / wispN : 0,
+            wispN > 0 ? (double)popOn / wispN : 0, strictZero,
+            wispN > 0 ? (double)strictZero / wispN : 0,
+            lowBandOff > 0 ? (double)lowBandOn / lowBandOff : 0,
+            bandOff > 0 ? (double)bandOn / bandOff : 0);
+    }
+}
+'@
+  }
+  $softOk = $false
+  $softDetail = 'no arms'
+  if (($null -ne $refOff) -and ($null -ne $refOn) -and $refOff.Out -and $refOn.Out) {
+    $softRaw = [RembgSoftMetrics]::Compare($hiPath, $refOff.Out, $refOn.Out, 0.03)
+    $pres = [double]([regex]::Match($softRaw, 'preservation=([0-9.]+)').Groups[1].Value)
+    $popr = [double]([regex]::Match($softRaw, 'populationRatio=([0-9.]+)').Groups[1].Value)
+    $zs = [double]([regex]::Match($softRaw, 'strictZeroShare=([0-9.]+)').Groups[1].Value)
+    $stair = [double]([regex]::Match($softRaw, 'lowTexBandRatio=([0-9.]+)').Groups[1].Value)
+    $bandr = [double]([regex]::Match($softRaw, 'bandRatio=([0-9.]+)').Groups[1].Value)
+    # Thresholds sit far from BOTH wrong answers measured on this same input: the old polarity
+    # scored preservation 0.3048 / population 0.4313 / strictZeroShare 0.5429, and a build with
+    # the narrowing dropped scores bandRatio 1.19 (the guided filter widens the band on its own).
+    $softOk = ($pres -ge 0.70) -and ($popr -ge 0.80) -and ($zs -le 0.15) -and
+              ($stair -le 0.98) -and ($bandr -le 1.02)
+    $softDetail = "$softRaw ; need preservation>=0.70 populationRatio>=0.80 strictZeroShare<=0.15 " +
+                  "lowTexBandRatio<=0.98 bandRatio<=1.02"
+  } else {
+    Inconclusive 'S22.22 needs the two refinement arms from S22.18'
+  }
+  Check 'S22.22 the narrowed matte keeps the GENUINELY soft pixels: of the pixels the unrefined mask leaves semi-transparent (0.05..0.60) in a high-texture neighbourhood (9x9 mean |grad Y| >= 0.03), at least 70% are still semi-transparent, the soft-hair population does not fall below 80% of the unrefined one, at most 15% were pushed to exactly 0, and the anti-staircase half survives (the low-texture band and the whole band are both narrower than unrefined)' $softOk $softDetail
 
   # ---- the two injections of this section, stated where a red run is read ----
   if ($fault -eq 'rembg-nosubject') {
@@ -3669,7 +4036,7 @@ foreach ($s in $sections) {
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
     'S21' { Expect 13; Invoke-S21 }
-    'S22' { Expect 17; Invoke-S22 $FaultInjection }
+    'S22' { Expect 22; Invoke-S22 $FaultInjection }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

@@ -718,6 +718,11 @@ internal sealed class ConversionEngine
     /// <item>遮罩 → Bgra32 灰階 → **用實際張量尺寸當來源**放大回原尺寸 → 取 R 當 alpha。
     /// ⚠ 放大**不可以**用理想比例回推：取整到 32 會讓張量長寬比與原圖微微不同
     /// （實測 3000×2250 → 672×512，理想值是 682.67×512），用原尺寸回推會讓遮罩整體位移。</item>
+    /// <item><b>邊緣精修（<see cref="EdgeRefine"/>，預設開啟）</b>：放大回來的 alpha 只有
+    /// 512 短邊那麼多的資訊（1920×1281 ⇒ 每個遮罩像素蓋住 2.5 個影像像素），所以用**原圖的亮度**
+    /// 當引導做一次 guided filter，把高頻邊緣搬回 alpha。**只動過渡帶**：主體內仍是 1.0、
+    /// 遠背景仍是 0.0（p 在視窗內是常數時 a=0、b=p）。形狀是「模型推論一次、之後純像素運算」——
+    /// **不重跑模型**。<c>--remove-bg-refine off</c> 可以關掉它，關掉時 alpha 就是這一刀之前的位元組。</item>
     /// <item>寫 **Bgra32 PNG**，走既有的命名（<see cref="NamingPolicy"/>，永不覆寫）與
     /// 原子寫入（<see cref="AtomicWriter"/>），失敗重試由 <see cref="WriteWithCollisionRetry"/> 擁有。</item>
     /// </list>
@@ -746,12 +751,18 @@ internal sealed class ConversionEngine
     /// 這個參數存在的唯一理由是**診斷要能指向一個不存在的檔與一個被截斷的檔**，
     /// 好讓「缺模型」與「模型損壞」這兩種狀態可以在驗收裡真的被走過。
     /// </param>
+    /// <param name="refine">
+    /// 邊緣精修的模式（見 <see cref="EdgeRefine.Modes"/>）。**null／空白／認不得＝
+    /// <see cref="EdgeRefine.DefaultMode"/>（guided，開）**——「沒有這個欄位」的封包
+    /// 與「不指定」的呼叫端都該得到預設行為。只有明確的 <c>off</c> 才會關掉它。
+    /// </param>
     /// <returns>
     /// 成功＝<see cref="ConversionError.None"/> 且 <see cref="ConversionResult.OutputPath"/> 有值；
     /// 三種失敗各自帶自己的錯誤碼，而且**輸出目錄裡不會有任何新檔案**。
     /// </returns>
     public ConversionResult RemoveBg(string sourcePath, string? modelPath = null,
-                                     TempJournal? journal = null, string? targetDirectory = null)
+                                     TempJournal? journal = null, string? targetDirectory = null,
+                                     string? refine = null)
     {
         string? sourceFormat = _codecs.FormatOfPath(sourcePath);
         if (sourceFormat == null)
@@ -843,11 +854,16 @@ internal sealed class ConversionEngine
         InferenceSession session = RemoveBgModel.TryGetSession(resolvedModel, _log, out _)!;
         byte[] rgba;
         int outW, outH;
+        // 張量尺寸要活到精修那一階段：放大倍率（＝瓶頸有多大）只能從它算（見 EdgeRefine.Apply）。
+        int tensorW = 0, tensorH = 0;
         RemoveBgModel.MaskStats stats;
+        string refineMode = EdgeRefine.CanonicalMode(refine);
         try
         {
             RemoveBgModel.MaskResult mask = RemoveBgModel.Infer(session, frame, _log);
             stats = RemoveBgModel.MaskStats.Of(mask.Mask);
+            tensorW = mask.TensorWidth;
+            tensorH = mask.TensorHeight;
 
             // ---- 第三種狀態：找不到人像主體（**絕不靜默輸出一張全透明的 PNG**）----
             if (stats.Max < EmptyMaskMax || stats.Mean < EmptyMaskMean)
@@ -869,6 +885,57 @@ internal sealed class ConversionEngine
         {
             return Fail(sourcePath, ConversionError.Unknown,
                 $"inference failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // ---- 邊緣精修（全解析度；模型已經跑完，這裡只有像素運算）----
+        // 引導是**原圖的亮度**（不是輸出 PNG 的 R 通道：那裡裝的是遮罩值本身，用它當引導等於
+        // 拿放大後的遮罩引導自己，什麼都修不回來）。
+        try
+        {
+            double upscale = EdgeRefine.UpscaleFactor(outW, outH, tensorW, tensorH);
+            if (!EdgeRefine.IsOn(refineMode))
+            {
+                _log($"remove-bg refine: {refineMode} -- the alpha is the raw upscaled mask " +
+                     $"(the 512-edge bottleneck is NOT corrected; measured band " +
+                     $"{BandPercent(rgba):F2}%; upscale x{upscale:F2})");
+            }
+            else if (!EdgeRefine.HasBottleneck(upscale))
+            {
+                // 遮罩幾乎沒有被放大（張量跟原圖差不多大）⇒ 這一顆工具要修的缺陷不夠明顯。
+                // 實測：這時跑引導濾波換來的對齊，補不回它自己抹開的過渡帶（x0.80 的對照圖
+                // 過渡帶 4.56% → 21.74%、梯度 18.56 → 4.56；x1.05 也是淨損失），
+                // 所以**正確的動作是不動它**——輸出與 refine=off 逐位元組相同。
+                _log($"remove-bg refine: {refineMode} -- no bottleneck worth fixing " +
+                     $"(upscale x{upscale:F2} < {EdgeRefine.MinBottleneck:F1}: the mask was barely " +
+                     $"enlarged, so the guided filter's own softening would cost more than the " +
+                     $"alignment buys), the alpha stays exactly as the model returned it; " +
+                     $"measured band {BandPercent(rgba):F2}%");
+            }
+            else
+            {
+                float[] guide = EdgeRefine.GuideLuminance(frame, out int gw, out int gh);
+                if (gw != outW || gh != outH)
+                {
+                    // 到這裡理論上到不了（frame 的尺寸就是 inW／inH，而 outW／outH 被釘成同尺寸），
+                    // 但「理論上」不是保證：對不上的引導會產生一張每個像素都錯位的遮罩。
+                    throw new InvalidOperationException(
+                        $"the guide is {gw}x{gh} but the alpha plane is {outW}x{outH}");
+                }
+                EdgeRefine.RefineStats refined =
+                    EdgeRefine.Apply(rgba, outW, outH, guide, upscale);
+                _log($"remove-bg refine: {refineMode} r={EdgeRefine.RadiusFor(upscale)} " +
+                     $"eps={EdgeRefine.Epsilon:G} on {outW}x{outH}: " +
+                     $"band {refined.BandBeforePercent:F2}% -> {refined.BandAfterPercent:F2}% " +
+                     $"(upscale x{refined.Scale:F2}, transition sharpened x{refined.SharpenMean:F2} " +
+                     $"on average, x{refined.Sharpen:F2} where the guide is flat) " +
+                     $"in {refined.Milliseconds:F0} ms (guided filter, guide = source luminance; " +
+                     "the model ran once -- this is pixels only)");
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.Unknown,
+                $"edge refinement failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         long written = 0;
@@ -905,6 +972,22 @@ internal sealed class ConversionEngine
     /// 與 <c>_qrSourceName</c> 同一種作法：寫在引擎實例上，不進任何共享狀態。
     /// </summary>
     private string? _lastModelReported;
+
+    /// <summary>
+    /// alpha 的**過渡帶佔比**（％）：<c>0 &lt; alpha &lt; 255</c> 的像素佔整張圖的比例。
+    /// 關掉精修那一條路要印一個**比得上**的數字——否則「關掉了」在日誌上只剩一句話，
+    /// 看不出它與開著差在哪裡（feathering 的定義與量測方式見 <see cref="EdgeRefine"/>）。
+    /// </summary>
+    private static double BandPercent(byte[] bgra)
+    {
+        long band = 0;
+        for (int p = 3; p < bgra.Length; p += 4)
+        {
+            byte a = bgra[p];
+            if (a > 0 && a < 255) band++;
+        }
+        return bgra.Length == 0 ? 0 : 100.0 * band / (bgra.Length / 4);
+    }
 
     /// <summary>
     /// 遮罩畫格 → **Bgra32 的 RGBA 位元組**：把遮罩放大回原尺寸，並把**灰階的 R 通道**

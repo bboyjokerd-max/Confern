@@ -137,10 +137,16 @@ internal sealed class ConversionClient : IDisposable
     /// 路徑**，**其餘 op 一律傳 null**（同一條規矩：null 不進訊息，既有封包逐位元不變）。
     /// ⚠ 呼叫端要送**絕對路徑**：相對路徑在 worker 那一側會對上**它自己的**工作目錄，
     /// 那不是 UI 解析出來的那一個（症狀是「UI 找到模型、worker 找不到」）。
+    ///
+    /// <paramref name="removeBgRefine"/>：`op=remove-bg` 的**邊緣精修模式**（正規值見
+    /// <see cref="EdgeRefine.Modes"/>），其餘 op 一律傳 null。⚠ **預設值也要傳 null**：
+    /// null 在 worker 那一側的意思正是「用預設（開）」，所以送 null 與送 "guided" 行為相同，
+    /// 但只有送 null 能讓既有封包逐位元不變。只有明確關掉才送 "off"。
     /// </summary>
     public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
                       string? toolOp, out string? error, CompressionPolicy? compression = null,
-                      CropSpec? crop = null, string? removeBgModel = null)
+                      CropSpec? crop = null, string? removeBgModel = null,
+                      string? removeBgRefine = null)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -235,7 +241,10 @@ internal sealed class ConversionClient : IDisposable
             cropRatio = crop?.RatioId,
             // 去背的模型路徑（只有 op=remove-bg 會填）。null＝執行檔旁邊的預設位置，
             // 也就是「沒有指定」時該有的行為——所以其餘 op 的封包一個位元組都沒變。
-            removeBgModel = removeBgModel
+            removeBgModel = removeBgModel,
+            // 去背的邊緣精修模式（只有 op=remove-bg 會填，而且只有明確關掉時才有值）。
+            // null＝預設（開）＝這個欄位還不存在的年代的意思，其餘 op 的封包一個位元組都沒變。
+            removeBgRefine = removeBgRefine
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
         // 裁切矩形也只在行尾、而且只有 op=crop 時才出現（既有那一行的其餘部分逐字元不變）。

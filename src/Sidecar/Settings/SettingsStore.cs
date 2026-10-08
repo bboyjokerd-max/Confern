@@ -49,6 +49,20 @@ internal sealed record Settings
     /// </summary>
     public int CompressionTargetKb { get; init; } = CompressionPolicy.DefaultTargetKb;
 
+    /// <summary>
+    /// 去背的**邊緣精修模式**（2026-10-08 M3 第七顆扇形，工具 id <c>remove-bg</c>）。
+    /// 正規值見 <see cref="EdgeRefine.Modes"/>（<c>guided</c>／<c>off</c>）。
+    ///
+    /// 為什麼這是一個設定而不是只有命令列旗標：模型只看得到 512 短邊的張量，放大回原尺寸的
+    /// alpha 每個像素蓋住 2.5 個影像像素（1920x1281），而真正在跑的那一條路（輪盤）**沒有命令列**。
+    /// 使用者要能自己決定「快一點、原始一點」還是「邊緣清楚一點」，所以它與其他設定同一條路：
+    /// 設定檔的鍵 ＝ 設定頁的值 ＝ 引擎實際用的模式。
+    ///
+    /// ⚠ **預設值是 <see cref="EdgeRefine.DefaultMode"/>（開）**，而一份**沒有這個欄位**的
+    /// 舊設定檔載入之後就是這個值——也就是「這個鍵不存在」與「使用者沒改過」是同一件事。
+    /// </summary>
+    public string RemoveBgRefine { get; init; } = EdgeRefine.DefaultMode;
+
     /// <summary>把超出範圍的值夾回規格允許的區間，並回報改了什麼（不靜默）。</summary>
     public Settings Normalized(out List<string> notes)
     {
@@ -87,13 +101,25 @@ internal sealed record Settings
             targetKb = 0;
         }
 
+        // 去背的邊緣精修（M3 第七顆扇形）。與壓縮同一條規矩：認不得的值**退回預設並說出來**，
+        // 一個例外都不准丟。空字串在這裡不是「沒有這個值」而是「打錯字」——欄位的預設值是
+        // guided，而一份沒有這個鍵的舊設定檔反序列化後拿到的就是它。
+        string refine = EdgeRefine.CanonicalModeOrEmpty(RemoveBgRefine);
+        if (refine.Length == 0)
+        {
+            notes.Add($"RemoveBgRefine '{RemoveBgRefine}' -> '{EdgeRefine.DefaultMode}' " +
+                      $"(not one of {string.Join("/", EdgeRefine.Modes)})");
+            refine = EdgeRefine.DefaultMode;
+        }
+
         return this with
         {
             JpgQuality = jpg,
             WebpQuality = webp,
             CaptureTimeoutSeconds = capture,
             CompressionMode = mode,
-            CompressionTargetKb = targetKb
+            CompressionTargetKb = targetKb,
+            RemoveBgRefine = refine
         };
     }
 
@@ -144,7 +170,8 @@ internal static class SettingsStore
 
     /// <summary>
     /// 規格 §8 的九個鍵 ＋ <see cref="Settings.OutputFolder"/>（規格 §9.5，2026-10-05 追加的第十個）
-    /// ＋ 壓縮政策的兩個鍵（M3，2026-10-06 追加的第十一與第十二個）。
+    /// ＋ 壓縮政策的兩個鍵（M3，2026-10-06 追加的第十一與第十二個）
+    /// ＋ 去背邊緣精修的一個鍵（M3 第七顆扇形，2026-10-08 追加的第十三個）。
     /// **唯一擁有者**：未知鍵警告、`--settings-set`、設定頁都走這裡。
     ///
     /// ⚠ <c>OutputFolder</c> 曾經漏列：設定檔裡出現它會被當成打錯字而警告一次
@@ -157,7 +184,8 @@ internal static class SettingsStore
         nameof(Settings.StartWithWindows), nameof(Settings.Language), nameof(Settings.NamingCollision),
         nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics),
         nameof(Settings.OutputFolder),
-        nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb)
+        nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb),
+        nameof(Settings.RemoveBgRefine)
     };
 
     public static string DefaultPath() => Path.Combine(
@@ -169,6 +197,7 @@ internal static class SettingsStore
     /// ⚠ <c>outputFolder=</c> 只**附加在行尾**（2026-10-05 的 C1）：既有驗收腳本比對的是這行的
     /// 前綴與各 <c>key=value</c> 欄位，插在中間會弄紅它們；行尾追加則兩種都保留。
     /// 2026-10-06 的 <c>compress=</c> 沿用同一條規矩（第二個行尾欄位，仍然只追加）。
+    /// 2026-10-08 的 <c>refine=</c>（去背邊緣精修）是第三個，同一條規矩。
     /// </summary>
     public static string Describe(Settings s) =>
         $"jpgQuality={s.JpgQuality} webpQuality={s.WebpQuality} capture={s.CaptureTimeoutSeconds} " +
@@ -176,7 +205,8 @@ internal static class SettingsStore
         $"diagnostics={s.Diagnostics} startWithWindows={s.StartWithWindows} language={s.Language} " +
         $"outputFolder={DescribeOutputFolder(s)} " +
         $"compress={CompressionPolicy.CanonicalMode(s.CompressionMode)}" +
-        $"{(s.CompressionTargetKb > 0 ? $"/{s.CompressionTargetKb}KB" : "")}";
+        $"{(s.CompressionTargetKb > 0 ? $"/{s.CompressionTargetKb}KB" : "")}" +
+        $" refine={EdgeRefine.CanonicalMode(s.RemoveBgRefine)}";
 
     /// <summary>
     /// <see cref="Settings.OutputFolder"/> 的顯示寫法（日誌與探針共用）。空字串＝**來源檔旁邊**，
@@ -395,6 +425,18 @@ internal static class SettingsStore
                     return false;
                 }
                 next = current with { CompressionTargetKb = targetKb };
+                return true;
+            case "removebgrefine":
+                // 去背的邊緣精修（M3 第七顆扇形）。「有哪些模式」只有 EdgeRefine 說了算；
+                // 認不得的值**拒絕並說出來**（靜默退回 guided＝使用者以為改成功了，而它沒有）。
+                string refineMode = EdgeRefine.CanonicalModeOrEmpty(v);
+                if (refineMode.Length == 0)
+                {
+                    log($"settings: reject removeBgRefine='{value}' " +
+                        $"(expected one of {string.Join(", ", EdgeRefine.Modes)})");
+                    return false;
+                }
+                next = current with { RemoveBgRefine = refineMode };
                 return true;
             case "language":
                 string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"
