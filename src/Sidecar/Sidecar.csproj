@@ -145,4 +145,45 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
+  <ItemGroup>
+    <!--
+      去背用的模型（`remove-bg`，第七顆扇形）與它的**授權聲明**要**隨產品出貨**，
+      所以它們是**輸出目錄的一部分**，不是「剛好放在某個資料夾」。
+
+      來源是 repo 根目錄的 `models\`（`tools\get-rembg-model.ps1` 把模型放在那裡；
+      `.gitignore` 只排除 `models/*` 的二進位檔，聲明檔 `MODEL-LICENSE.txt` 進版控）：
+
+        models\model_fp16.onnx    12,984,781 B 的模型（**不進版控**）
+        models\MODEL-LICENSE.txt  apache-2.0 授權聲明（**進版控**，4(a) 要求隨產品交付）
+
+      `Link` ＋ `TargetPath` 讓兩者落在輸出目錄的 `models\` 子資料夾——那正是程式讀
+      **預設路徑**的地方（`RemoveBgModel.ResolvePath` ＝
+      `AppContext.BaseDirectory\models\model_fp16.onnx`）。`bin\...\models\` 是建置輸出、
+      `bin\...\publish\models\` 是發佈輸出，同一條規則，所以 `dotnet build` 出來的東西
+      就地可用、`dotnet publish` 出來的東西開箱可用。
+
+      ⚠ **`Condition="Exists(...)"` 不是裝飾**：模型是 12.4 MB 的二進位檔、**刻意不進版控**，
+      所以沒有模型的人**必須照樣編得動**。沒有模型時建置成功，產品在執行期回**具名的狀態**
+      `ModelUnavailable`（exit 3、零檔案，訊息說出下一步：去跑取得腳本），不是建置失敗、
+      也不是崩潰。**出貨那一側由 `tools\publish-confern.ps1` 補回來**：它先取得並驗 sha256，
+      再斷言發佈目錄裡真的有三樣東西（`Confern.exe`、模型、聲明），少任何一樣就讓發佈失敗
+      ——「檔案剛好在某個資料夾」與「出貨」的差別就在那一支腳本。
+    -->
+    <Content Include="$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx"
+             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx')">
+      <Link>models\model_fp16.onnx</Link>
+      <TargetPath>models\model_fp16.onnx</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt"
+             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt')">
+      <Link>models\MODEL-LICENSE.txt</Link>
+      <TargetPath>models\MODEL-LICENSE.txt</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+  </ItemGroup>
 </Project>

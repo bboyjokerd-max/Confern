@@ -2664,6 +2664,15 @@ function Invoke-S22([string]$fault) {
   #
   #   Every assertion below reads the PRODUCT'S OWN ARTEFACTS: the exit code, the evidence log
   #   lines, the folder contents, and the pixels of the PNG it wrote.
+  #
+  #   S22.14-S22.17 (added 2026-10-08, the SHIPPING slice) leave the diagnostic seam and walk the side
+  #   no earlier check touched: the DEFAULT model path, asked with no --remove-bg-model at all (so both
+  #   the "works out of the box" and the "no model" answers are pinned), the same default path on a COPY
+  #   of the exe folder with the model deleted (which is what proves the path follows the RUNNING exe and
+  #   that a missing file is the NAMED state rather than a crash), the chain "repository store -> exe
+  #   folder" (same sha256 and the measured length, so the bytes that ship are the verified ones), and
+  #   the model's apache-2.0 licence notice, which has to travel beside the model it covers.
+  #   None of the four is ever a silent skip: each states the branch it took and asserts on BOTH branches.
 
   # ---------------------------------------------------------------- the fixtures (committed)
   # fixtures\rembg\real-512.png is a 512x410 downscale of a PUBLIC DOMAIN NASA photograph
@@ -2696,10 +2705,14 @@ function Invoke-S22([string]$fault) {
   # assuming it; when there is no model anywhere, every check that needs one is INCONCLUSIVE (and
   # this section then exits 3), never silently green.
   $exeDir = Split-Path -Parent $Exe
+  # Absolute, because S22.15 copies this folder: a relative -Exe would make every path below depend on
+  # the process's working directory, which is the very thing this section asserts the PRODUCT does not do.
+  if (-not [System.IO.Path]::IsPathRooted($exeDir)) { $exeDir = [System.IO.Path]::GetFullPath($exeDir) }
   $modelBesideExe = Join-Path $exeDir 'models\model_fp16.onnx'
+  $besideOk = Test-Path -LiteralPath $modelBesideExe
   $modelInRepo = Join-Path $repo 'models\model_fp16.onnx'
   $model = ''
-  if (Test-Path -LiteralPath $modelBesideExe) { $model = $modelBesideExe }
+  if ($besideOk) { $model = $modelBesideExe }
   elseif (Test-Path -LiteralPath $modelInRepo) { $model = $modelInRepo }
   $haveModel = $model -ne ''
   if (-not $haveModel) {
@@ -3044,6 +3057,179 @@ function Invoke-S22([string]$fault) {
   $fxCleanOk = ($fxNew.Count -eq 0) -and ($fxChanged.Count -eq 0)
   $fxDetail = "newInFixtures=($($fxNew -join ' | ')) changedFixtures=($($fxChanged -join ',')) fixtureTreeFiles=$($fxStateBefore.Count)"
   Check 'S22.13 the committed fixtures folder is left untouched: this section never writes next to a fixture and every fixture keeps its sha256' $fxCleanOk $fxDetail
+
+  # ---------------------------------------------------------------- S22.14 the DEFAULT path, both ways
+  # !! S22.01..S22.13 ALL PASS --remove-bg-model, so between them they walk the DIAGNOSTIC SEAM and never
+  # the path a user actually gets. That path is AppContext.BaseDirectory\models\model_fp16.onnx
+  # (RemoveBgModel.ResolvePath) - "beside the EXECUTABLE", not "beside the working directory", because the
+  # worker is started as Process.Start(exe, "--worker", ...) and its working directory is not the exe's.
+  #
+  # This check therefore runs the PLAIN command, with no model switch at all. It is decidable on both kinds
+  # of machine and NEITHER branch is a skip:
+  #   a model beside the exe   -> it must work out of the box: exit 0, one PNG, the source's own size
+  #   no model beside the exe  -> the default path must produce the NAMED state: exit 3, nothing written
+  # The branch that ran is part of the detail line, so a green check is never ambiguous about WHAT it tested.
+  $defaultRun = Invoke-RemoveBg 'defaultpath' $fPortrait ''
+  $defaultLine = $defaultRun.ModelPathLine
+  $defaultNames = ($defaultLine -match [regex]::Escape($modelBesideExe)) -and
+                  ($defaultLine -match '\(default beside the exe\)')
+  $defaultBranch = ''
+  $defaultOk = $false
+  if ($besideOk) {
+    $defaultBranch = 'model beside the exe -> out of the box'
+    $defaultOk = $defaultNames -and ($defaultRun.Exit -eq 0) -and ($null -ne $defaultRun.Out) -and
+                 ($defaultRun.OutSize -eq '512x410') -and ($defaultRun.WroteLine -match 'count=1')
+  } else {
+    $defaultBranch = 'no model beside the exe -> the NAMED state'
+    $defaultOk = $defaultNames -and ($defaultRun.Exit -eq 3) -and
+                 ($defaultRun.ModelPathLine -match 'exists=False') -and
+                 ($defaultRun.Failure -match $missingMsg) -and ($null -eq $defaultRun.Out) -and
+                 ($defaultRun.WroteLine -match 'count=0')
+  }
+  $defaultDetail = "branch='$defaultBranch' exit=$($defaultRun.Exit) out=$(Get-OutName $defaultRun.Out) " +
+                   "size=$($defaultRun.OutSize) wrote='$($defaultRun.WroteLine)' line='$defaultLine'"
+  Check 'S22.14 the DEFAULT model path, asked with no --remove-bg-model at all: with the model beside the exe the plain command works out of the box (exit 0, one PNG at the source size), and without one the same command is the NAMED state (exit 3, zero files)' $defaultOk $defaultDetail
+
+  # ---------------------------------------------------------------- S22.15 default = THE RUNNING EXE'S OWN FOLDER
+  # Machine-independent, and it exists because a working-directory-relative model is a REAL failure mode: it
+  # would work when the app is launched from its own folder and fail from a desktop/tray launch. The test
+  # copies the exe folder into the scratch directory, DELETES models\model_fp16.onnx IN THE COPY, and runs
+  # THAT copy - so nothing below depends on whether this machine has a model at all:
+  #   - the default path must be named against the COPY's own folder (it follows the RUNNING exe);
+  #   - the missing file must be the NAMED state: exit 3, "error=ModelUnavailable", zero files written;
+  #   - the run in the copy must not touch the ORIGINAL folder's model.
+  function Invoke-ConfernFrom([string]$exePath, [string]$name, [string[]]$argv) {
+    # The same shape as Invoke-Confern (quoting rule included), but for an arbitrary exe path. Defined here
+    # because PowerShell resolves a plain function call at CALL time (see the note at the top of this section).
+    $log = Join-Path $Work "$name.log"
+    if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+    $quoted = @()
+    foreach ($a in $argv) { if ([string]$a -match ' ') { $quoted += ('"' + $a + '"') } else { $quoted += $a } }
+    $all = @() + $quoted + @('--log', $log, '--quiet', '--no-autostart')
+    $p = Start-Process -FilePath $exePath -ArgumentList $all -Wait -PassThru -WindowStyle Hidden
+    return [pscustomobject]@{ Name = $name; Exit = $p.ExitCode; Log = $log; Lines = (Get-LogLines $log) }
+  }
+
+  $copyRoot = Join-Path $Work 'rembg-exe-copy'
+  if (Test-Path -LiteralPath $copyRoot) { Remove-Item -LiteralPath $copyRoot -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $copyRoot | Out-Null
+  $copyApp = Join-Path $copyRoot 'app'
+  # robocopy /E, skipping a publish subfolder: a build output may contain one, and it is a second full copy
+  # of the same application. Exit codes 0-7 mean "something was copied"; 8 and above is a real failure.
+  $rcArgv = @()
+  foreach ($a in @($exeDir, $copyApp, '/E', '/XD', (Join-Path $exeDir 'publish'), '/NFL', '/NDL', '/NJH', '/NJS', '/NP')) {
+    if ([string]$a -match ' ') { $rcArgv += ('"' + $a + '"') } else { $rcArgv += $a }
+  }
+  $rc = Start-Process -FilePath 'robocopy' -ArgumentList $rcArgv -Wait -PassThru -WindowStyle Hidden
+  $copyExe = Join-Path $copyApp (Split-Path -Leaf $Exe)
+  $copyModel = Join-Path $copyApp 'models\model_fp16.onnx'
+  $copyHadModel = Test-Path -LiteralPath $copyModel
+  if ($copyHadModel) { Remove-Item -LiteralPath $copyModel -Force }
+  $besideShaBefore = Get-Sha $modelBesideExe
+
+  $negDir = Join-Path $Work 'rembg-default-nomodel'
+  New-Item -ItemType Directory -Force -Path $negDir | Out-Null
+  $negSrc = Join-Path $negDir (Split-Path -Leaf $fPortrait)
+  Copy-Item -LiteralPath $fPortrait -Destination $negSrc -Force
+  $negSrcSha = Get-Sha $negSrc
+  $negSrcMtime = (Get-Item -LiteralPath $negSrc).LastWriteTimeUtc
+
+  $negRun = $null
+  if (Test-Path -LiteralPath $copyExe) {
+    $negRun = Invoke-ConfernFrom $copyExe 'defaultpath-nomodel' @('--remove-bg', $negSrc)
+  }
+  $negModelLine = 'NO RUN: the copy has no exe'
+  $negNamed = $false
+  $negWrote = ''
+  $negNew = @()
+  $negExit = -1
+  if ($null -ne $negRun) {
+    $negExit = $negRun.Exit
+    $negModelLine = Get-LogLine $negRun.Lines 'tool remove-bg: model path='
+    $negNamed = (Get-LogLine $negRun.Lines 'error=ModelUnavailable') -ne ''
+    $negWrote = Get-LogLine $negRun.Lines 'remove-bg wrote: '
+    $negNew = @(Get-ChildItem -LiteralPath $negDir -File | Where-Object { $_.FullName -ne $negSrc })
+  }
+  $negUntouched = ((Get-Sha $negSrc) -eq $negSrcSha) -and
+                  ((Get-Item -LiteralPath $negSrc).LastWriteTimeUtc -eq $negSrcMtime)
+  $negDefaultOk = ($null -ne $negRun) -and ($negExit -eq 3) -and $negNamed -and
+                  ($negModelLine -match [regex]::Escape($copyModel)) -and
+                  ($negModelLine -match 'exists=False') -and
+                  ($negModelLine -match '\(default beside the exe\)') -and
+                  ($negWrote -match 'count=0') -and ($negNew.Count -eq 0) -and $negUntouched -and
+                  ((Get-Sha $modelBesideExe) -eq $besideShaBefore)
+  $negDetail = "copy='$copyApp' (hadModel=$copyHadModel, removed) robocopyExit=$($rc.ExitCode) " +
+               "runExit=$negExit namedModelUnavailable=$negNamed wrote='$negWrote' extraFiles=$($negNew.Count) " +
+               "sourceUntouched=$negUntouched originalBesideUnchanged=$((Get-Sha $modelBesideExe) -eq $besideShaBefore) " +
+               "line='$negModelLine'"
+  Check 'S22.15 the default path follows the RUNNING exe (not the working directory, not the original folder): on a temp copy with the model deleted the plain command reports error=ModelUnavailable, exit 3 and zero files, and the original folder model is untouched' $negDefaultOk $negDetail
+
+  # ---------------------------------------------------------------- S22.16 the shipping chain: store -> exe folder
+  # "The model ships with the product" is a claim about two folders, so it is asserted as one. The build
+  # copies the bytes from the repository store (models\model_fp16.onnx - deliberately NOT in version
+  # control, .gitignore: models/*) into the output folder ONLY when the store file exists
+  # (Sidecar.csproj: Condition="Exists(...)"), which is what keeps a checkout without a model buildable.
+  # Both states of that chain are decidable, and neither is a skip:
+  #   store present -> the model beside the exe must exist and be BYTE-IDENTICAL to the store (sha256), i.e.
+  #                    this very exe is sitting next to the verified bytes the product looks for;
+  #   store absent  -> there is no shipping source on this machine, so the only thing that can be asserted is
+  #                    that whatever IS beside the exe is still the measured model (never "some file").
+  $storeModel = Join-Path $repo 'models\model_fp16.onnx'
+  $storeOk = Test-Path -LiteralPath $storeModel
+  $besideNowSha = Get-Sha $modelBesideExe
+  $measuredSha = '25F165DA9BFD30830A575F1F0490F1ACD995975CB349BC02F3D79332E1FE5CF6'
+  $measuredLen = '12984781'
+  $layoutOk = $false
+  $layoutDetail = ''
+  if ($storeOk) {
+    $storeSha = Get-Sha $storeModel
+    $storeLen = (Get-Item -LiteralPath $storeModel).Length
+    $layoutOk = $besideOk -and ($besideNowSha -eq $storeSha) -and ($besideNowSha -eq $measuredSha) -and
+                ($storeLen -eq [long]$measuredLen)
+    $layoutDetail = "store='$storeModel' len=$storeLen sha=$storeSha ; beside=$besideOk sha=$besideNowSha"
+  } else {
+    $layoutOk = (-not $besideOk) -or ($besideNowSha -eq $measuredSha)
+    $layoutDetail = "no repository store at '$storeModel' ; beside=$besideOk sha=$besideNowSha (a model there must still hash to the measured value)"
+  }
+  Check 'S22.16 the shipping chain store -> exe folder: when the repository model store exists the model beside the exe is byte-identical to it (same sha256, the measured length), and when the store does not exist whatever sits beside the exe is still the measured model - the build never places an unverified file there' $layoutOk $layoutDetail
+
+  # ---------------------------------------------------------------- S22.17 the model's licence notice ships too
+  # The model is apache-2.0, and section 4(a) of that licence requires the licence to reach whoever
+  # receives the product. So the notice is a SHIPPED FILE, not a line in a README: it is committed
+  # (models\MODEL-LICENSE.txt, deliberately the one file inside the ignored models\ folder that IS in
+  # version control) and the build copies it beside the model. Again, both states are decidable:
+  #   the tracked notice exists -> the copy beside the exe must exist, be byte-identical to it, and name the
+  #                                licence, the source repository and the measured length and sha256;
+  #   no such file in this tree -> the exe folder must not carry one either (nothing may claim a notice the
+  #                                source tree does not have).
+  $repoNotice = Join-Path $repo 'models\MODEL-LICENSE.txt'
+  $exeNotice = Join-Path $exeDir 'models\MODEL-LICENSE.txt'
+  $noticeSourceOk = Test-Path -LiteralPath $repoNotice
+  $noticeBesideOk = Test-Path -LiteralPath $exeNotice
+  $noticeOk = $false
+  $noticeDetail = ''
+  if ($noticeSourceOk) {
+    $noticeText = ''
+    if ($noticeBesideOk) { $noticeText = [System.IO.File]::ReadAllText($exeNotice) }
+    $noticeMissingBits = @()
+    foreach ($need in @(
+        @{ What = 'apache-2.0';                       Ok = ($noticeText -match '(?i)apache-2\.0') },
+        @{ What = 'the Apache-2.0 text';              Ok = ($noticeText -match 'Apache License') },
+        @{ What = 'Xenova/modnet';                    Ok = ($noticeText -match [regex]::Escape('Xenova/modnet')) },
+        @{ What = 'the model file name';              Ok = ($noticeText -match [regex]::Escape('model_fp16.onnx')) },
+        @{ What = 'the measured length';              Ok = ($noticeText -match $measuredLen) },
+        @{ What = 'the measured sha256';              Ok = ($noticeText -match $measuredSha) })) {
+      if (-not $need.Ok) { $noticeMissingBits += $need.What }
+    }
+    $noticeOk = $noticeBesideOk -and ($noticeMissingBits.Count -eq 0) -and
+                ((Get-Sha $exeNotice) -eq (Get-Sha $repoNotice))
+    $noticeDetail = "tracked='$repoNotice' sha=$((Get-Sha $repoNotice)) ; beside=$noticeBesideOk " +
+                    "sha=$((Get-Sha $exeNotice)) missingFromNotice=($($noticeMissingBits -join ', '))"
+  } else {
+    $noticeOk = -not $noticeBesideOk
+    $noticeDetail = "no tracked notice at '$repoNotice' ; beside=$noticeBesideOk (an exe folder must not carry a notice the source tree does not have)"
+  }
+  Check 'S22.17 the model licence notice (apache-2.0, Xenova/modnet) ships beside the model it covers: the copy next to the exe is byte-identical to the committed notice and names the licence, the source and the measured length and sha256 - a release that carried the model without this file would fail here' $noticeOk $noticeDetail
 
   # ---- the two injections of this section, stated where a red run is read ----
   if ($fault -eq 'rembg-nosubject') {
@@ -3483,7 +3669,7 @@ foreach ($s in $sections) {
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
     'S21' { Expect 13; Invoke-S21 }
-    'S22' { Expect 13; Invoke-S22 $FaultInjection }
+    'S22' { Expect 17; Invoke-S22 $FaultInjection }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

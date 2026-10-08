@@ -24,6 +24,13 @@ secrets.json
 # 缺這個檔是**一個具名的產品狀態**（ConversionError.ModelUnavailable），不是崩潰：
 # 輪盤上的扇形照樣出現，按下去會說出下一步（跑那支腳本）。
 #
-# ⚠ `models/` 只比對得出**這個路徑**；原始碼樹裡沒有第二個地方放模型，
+# ⚠ `models/*` 只比對得出**這個路徑**（repo 根目錄那一層）；原始碼樹裡沒有第二個地方放模型，
 #    所以不需要更寬的規則（例如 `*.onnx`）——那會連未來的測試用小模型一起擋掉。
-models/
+#
+# ⚠ 這條規則**必須是 `models/*` 而不是 `models/`**：`models/` 會把整個目錄排除掉，
+#    而被排除的目錄裡的檔案**再怎麼寫 `!` 都救不回來**。授權聲明 `models/MODEL-LICENSE.txt`
+#    是**文字檔、必須進版控**（apache-2.0 的 4(a)：必須把授權副本交給收到產品的人），
+#    所以目錄本身要留著、只排除裡面的內容，再把聲明那一個檔案加回來。
+#    模型二進位檔仍然被排除（已實測 `git check-ignore -v models/model_fp16.onnx` 命中）。
+models/*
+!models/MODEL-LICENSE.txt
