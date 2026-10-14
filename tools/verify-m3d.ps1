@@ -3491,6 +3491,42 @@ public static class RembgSoftMetrics
         return y;
     }
 
+    private static byte[] LoadPlane(string path, out int w, out int h)
+    {
+        BitmapSource bgra = Load(path);
+        w = bgra.PixelWidth; h = bgra.PixelHeight;
+        var px = new byte[w * h * 4];
+        bgra.CopyPixels(px, w * 4, 0);
+        return px;
+    }
+
+    /// <summary>
+    /// S22.23. Compares two images pixel for pixel over the SUBJECT (alpha &gt;= minAlpha) and
+    /// returns [0] = how many of those pixels have a different B/G/R, [1] = how many were
+    /// compared, [2] = how many DISTINCT colours the SOURCE has in that same population.
+    /// [2] is the anti-vacuity guard: on a grey source "no mismatch" would be true for any
+    /// output that is also grey, which is exactly the defect this check exists to catch.
+    /// A size mismatch returns [-1, 0, 0] so it can never look like a pass.
+    /// </summary>
+    public static int[] ColourMismatches(string sourcePath, string outputPath, int minAlpha)
+    {
+        int sw, sh, ow, oh;
+        var sp = LoadPlane(sourcePath, out sw, out sh);
+        var op = LoadPlane(outputPath, out ow, out oh);
+        if (sw != ow || sh != oh) return new[] { -1, 0, 0 };
+        int mismatch = 0, compared = 0;
+        var seen = new System.Collections.Generic.HashSet<int>();
+        for (int i = 0; i < sw * sh; i++)
+        {
+            if (op[i * 4 + 3] < minAlpha) continue;
+            compared++;
+            seen.Add((sp[i * 4 + 2] << 16) | (sp[i * 4 + 1] << 8) | sp[i * 4]);
+            if (sp[i * 4] != op[i * 4] || sp[i * 4 + 1] != op[i * 4 + 1] || sp[i * 4 + 2] != op[i * 4 + 2])
+                mismatch++;
+        }
+        return new[] { mismatch, compared, seen.Count };
+    }
+
     // moving-sum box mean: O(1) per pixel, border normalised by the real window size
     private static double[] BoxMean(double[] src, int w, int h, int r)
     {
@@ -3597,6 +3633,39 @@ public static class RembgSoftMetrics
     Inconclusive 'S22.22 needs the two refinement arms from S22.18'
   }
   Check 'S22.22 the narrowed matte keeps the GENUINELY soft pixels: of the pixels the unrefined mask leaves semi-transparent (0.05..0.60) in a high-texture neighbourhood (9x9 mean |grad Y| >= 0.03), at least 70% are still semi-transparent, the soft-hair population does not fall below 80% of the unrefined one, at most 15% were pushed to exactly 0, and the anti-staircase half survives (the low-texture band and the whole band are both narrower than unrefined)' $softOk $softDetail
+
+  # ---- S22.23 the COLOUR: the artefact must be a CUTOUT, not the matte -----------------------
+  # WHY THIS EXISTS (2026-10-14, the user's own finding, and the reason every check above passed
+  # while the tool was broken): S22.05..S22.22 all measure the ALPHA. None of them ever looked at
+  # B/G/R. The pipeline filled the matte into all four channels (RemoveBgModel.MaskToGrayFrame)
+  # and only copied R into A (ConversionEngine.ExpandMaskToAlpha), then encoded that buffer
+  # straight out - so the "cutout" was a white silhouette carrying a correct alpha channel. The
+  # user opened the artefact and asked whether CUTOUT was supposed to produce a mask; measured on
+  # this suite's own high-resolution input, 209794 of 209920 pixels (99.94% of the image, 100% of
+  # the subject) carried the mask value in B/G/R.
+  # This check reads BOTH files itself and compares them pixel for pixel. It deliberately does NOT
+  # read the product's own "remove-bg colour:" line: that is a self-report, and this project has
+  # already been burned once by trusting a query-shaped answer (see S21.01 vs S21.07).
+  # The source arm is a NearestNeighbor block copy (built above), so a correct output matches it
+  # EXACTLY - no resampling tolerance is allowed or needed, and any tolerance would hide the bug.
+  if ($refOff.Out -and $refOn.Out -and $hiPath -and (Test-Path $hiPath)) {
+    $rOff = [RembgSoftMetrics]::ColourMismatches($hiPath, $refOff.Out, 250)
+    $rOn = [RembgSoftMetrics]::ColourMismatches($hiPath, $refOn.Out, 250)
+    $mOff = [int]$rOff[0]; $cOff = [int]$rOff[1]; $dOff = [int]$rOff[2]
+    $mOn = [int]$rOn[0]; $cOn = [int]$rOn[1]; $dOn = [int]$rOn[2]
+    $colourOk = ($mOff -eq 0) -and ($mOn -eq 0) -and
+                ($cOff -ge 5000) -and ($cOn -ge 5000) -and
+                ($dOff -ge 64) -and ($dOn -ge 64)
+    $colourDetail = "off: mismatch=$mOff compared=$cOff sourceColours=$dOff ; " +
+                    "on: mismatch=$mOn compared=$cOn sourceColours=$dOn " +
+                    "(need mismatch=0 on both arms, compared>=5000, and the SOURCE itself must show " +
+                    ">=64 distinct colours over that population - otherwise a grey source would make " +
+                    "this check vacuous)"
+  } else {
+    Inconclusive 'S22.23 needs the two refinement arms from S22.18'
+  }
+  Check 'S22.23 the written PNG is a CUTOUT and not the matte: on the high-resolution input EVERY subject pixel (alpha >= 250) of both the refined and the unrefined output carries exactly the SOURCE pixel RGB, and the compared population is both large and genuinely colourful in the source, so the assertion cannot pass vacuously on a grey image' `
+    $colourOk $colourDetail
 
   # ---- the two injections of this section, stated where a red run is read ----
   if ($fault -eq 'rembg-nosubject') {
@@ -4036,7 +4105,7 @@ foreach ($s in $sections) {
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
     'S21' { Expect 13; Invoke-S21 }
-    'S22' { Expect 22; Invoke-S22 $FaultInjection }
+    'S22' { Expect 23; Invoke-S22 $FaultInjection }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

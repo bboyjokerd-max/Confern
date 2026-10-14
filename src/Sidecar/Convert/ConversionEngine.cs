@@ -723,6 +723,9 @@ internal sealed class ConversionEngine
     /// 當引導做一次 guided filter，把高頻邊緣搬回 alpha。**只動過渡帶**：主體內仍是 1.0、
     /// 遠背景仍是 0.0（p 在視窗內是常數時 a=0、b=p）。形狀是「模型推論一次、之後純像素運算」——
     /// **不重跑模型**。<c>--remove-bg-refine off</c> 可以關掉它，關掉時 alpha 就是這一刀之前的位元組。</item>
+    /// <item><b>顏色回填（2026-10-14 修，這一刀之前漏掉的一步）</b>：把**來源的 B／G／R** 放回輸出，
+    /// 只留下遮罩來的 alpha（見 <see cref="RestoreSourceColours"/>）。少了這一步，輸出是一張
+    /// 「遮罩＋alpha」——使用者一眼看出「這不是去背，是遮罩」。**不做 premultiply**。</item>
     /// <item>寫 **Bgra32 PNG**，走既有的命名（<see cref="NamingPolicy"/>，永不覆寫）與
     /// 原子寫入（<see cref="AtomicWriter"/>），失敗重試由 <see cref="WriteWithCollisionRetry"/> 擁有。</item>
     /// </list>
@@ -938,6 +941,29 @@ internal sealed class ConversionEngine
                 $"edge refinement failed: {ex.GetType().Name}: {ex.Message}");
         }
 
+        // ---- 顏色回填：把來源的 B／G／R 放回去，只留下遮罩來的 alpha ----
+        // WHY THIS STEP EXISTS (2026-10-14, 使用者回報): 到這裡為止 rgba 的 B／G／R 裝的是**遮罩自己的
+        // 灰值**——MaskToGrayFrame 刻意把遮罩灌進四個通道（放大時取樣才會一致），ExpandMaskToAlpha
+        // 只把 R 抄進 A，然後這份緩衝區就直接被編成輸出 PNG。於是使用者拿到的是一張
+        // 「**遮罩＋alpha**」而不是去背成品：透明背景是對的、半透明毛髮也是對的，**錯的是主體的顏色**。
+        // 他的原話是「去背不是應該把背景去掉留主體嗎？為何現在的 cutout 是做出一張 alpha 遮罩圖」，
+        // 而他是對的。實測（1920x1281 狗毛照）：主體非透明像素的 B／G／R **100% 等於遮罩灰值**。
+        // ⚠ 刻意**不做 premultiply**：PNG 存的是 straight alpha，先把顏色乘上 alpha 會讓半透明的
+        // 毛髮合成到深色背景時出現黑邊。正確的成品＝顏色照抄來源、只換 alpha。
+        int colourMismatched;
+        try
+        {
+            colourMismatched = RestoreSourceColours(frame, rgba, outW, outH);
+            _log($"remove-bg colour: source RGB restored over the matte " +
+                 $"({colourMismatched} of {outW * outH} px were still showing the mask value in " +
+                 "B/G/R when the matte was finished -- this counts what the step had to fix)");
+        }
+        catch (Exception ex)
+        {
+            return Fail(sourcePath, ConversionError.Unknown,
+                $"colour restore failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
         long written = 0;
         var timer = System.Diagnostics.Stopwatch.StartNew();
         ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal, stream =>
@@ -951,10 +977,12 @@ internal sealed class ConversionEngine
         // ⚠ 這一行的格式是**驗收斷言的一部分**（張量尺寸、遮罩統計、輸出尺寸）。
         // 統計數字必須印出來：它是「有沒有真的切到東西」唯一當場看得見的事實。
         _log($"remove-bg: {Path.GetFileName(sourcePath)} {inW}x{inH} -> {outW}x{outH} " +
-             $"(mask min={stats.Min:F4} max={stats.Max:F4} mean={stats.Mean:F4}, png, alpha) " +
+             $"(mask min={stats.Min:F4} max={stats.Max:F4} mean={stats.Mean:F4}, png, " +
+             $"colour from source, alpha from the matte) " +
              $"-> {Path.GetFileName(targetPath)} ({written}B in {timer.Elapsed.TotalMilliseconds:F0} ms)");
         return new ConversionResult(sourcePath, targetPath, ConversionError.None,
-            $"{inW}x{inH} -> {outW}x{outH} (alpha from the mask, max={stats.Max:F4} mean={stats.Mean:F4}; " +
+            $"{inW}x{inH} -> {outW}x{outH} (colour from the source, alpha from the mask, " +
+            $"max={stats.Max:F4} mean={stats.Mean:F4}; " +
             $"{written}B in {timer.Elapsed.TotalMilliseconds:F0} ms) -> {targetPath}");
     }
 
@@ -1029,6 +1057,64 @@ internal sealed class ConversionEngine
         // 所以取哪一個通道都一樣——**取 R** 只因為它與「遮罩值」在既有程式碼裡的說法一致。
         for (int p = 0; p + 3 < pixels.Length; p += 4) pixels[p + 3] = pixels[p + 2];
         return (pixels, bgra.PixelWidth, bgra.PixelHeight);
+    }
+
+    /// <summary>
+    /// 把來源畫格的 **B／G／R 放回輸出**，只保留既有緩衝區裡的 alpha（＝遮罩）。
+    ///
+    /// **為什麼需要這一步（2026-10-14，使用者回報的缺陷）**：<see cref="ExpandMaskToAlpha"/> 交出來的
+    /// 緩衝區，B／G／R **就是遮罩自己的灰值**（<see cref="RemoveBgModel.MaskToGrayFrame"/> 刻意把遮罩
+    /// 灌進四個通道，好讓放大時的取樣一致），所以直接寫檔得到的是一張「**遮罩＋alpha**」——
+    /// 使用者的說法是「去背不是應該把背景去掉留主體嗎？為何現在的 cutout 是做出一張 alpha 遮罩圖」，
+    /// 而他是對的：透明背景正確、半透明毛髮正確，**錯的是主體的顏色**（等於一張白色剪影）。
+    /// 實測（1920x1281 狗毛照）：主體的非全透明像素 B／G／R **100%** 等於遮罩灰值；
+    /// 而這一刀之前，整套驗收都只在量 alpha 的統計，所以這個缺陷可以完全躲過所有斷言。
+    ///
+    /// ⚠ **逐像素對齊是契約，不是巧合**：<paramref name="frame"/> 是**模型看到的那一張畫格**
+    /// （EXIF 方向已經烤進像素），而 alpha 平面已經被放大回同尺寸，所以兩者是同一格網——
+    /// 不需要、也不可以做任何重取樣。對不上就當場丟例外，絕不交出一張錯位的圖。
+    ///
+    /// ⚠ **刻意不做 premultiply**：PNG 存的是 straight alpha，先把顏色乘上 alpha 會讓半透明的毛髮
+    /// 合成到深色背景時出現黑邊（那正是這一顆工具最該保留的東西）。
+    /// </summary>
+    /// <returns>
+    /// 回填**之前** B／G／R 就與來源不同的像素數——也就是這一步真的修掉了多少像素。
+    /// 這個數字是**診斷**，不是斷言：它由本方法自己算，所以「有沒有把顏色放回去」必須由
+    /// 套件用一份獨立的像素比對來斷言（見 <c>verify-m3d.ps1</c> S22.23）。
+    /// </returns>
+    private static int RestoreSourceColours(BitmapSource frame, byte[] bgra, int width, int height)
+    {
+        if (frame.PixelWidth != width || frame.PixelHeight != height)
+        {
+            throw new InvalidOperationException(
+                $"the source frame is {frame.PixelWidth}x{frame.PixelHeight} but the matte is " +
+                $"{width}x{height}; the colours cannot be put back pixel for pixel");
+        }
+
+        BitmapSource sourceFrame = frame.Format == PixelFormats.Bgra32
+            ? frame
+            : new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+        int stride = sourceFrame.PixelWidth * 4;
+        var source = new byte[(long)stride * sourceFrame.PixelHeight];
+        sourceFrame.CopyPixels(source, stride, 0);
+        if (source.Length != bgra.Length)
+        {
+            throw new InvalidOperationException(
+                $"the source frame gave {source.Length} bytes but the matte has {bgra.Length}; " +
+                "both planes are Bgra32 at the same size, so this cannot differ");
+        }
+
+        int mismatched = 0;
+        for (int p = 0; p + 3 < bgra.Length; p += 4)
+        {
+            if (bgra[p] != source[p] || bgra[p + 1] != source[p + 1] || bgra[p + 2] != source[p + 2])
+                mismatched++;
+            bgra[p] = source[p];              // B
+            bgra[p + 1] = source[p + 1];      // G
+            bgra[p + 2] = source[p + 2];      // R
+            // p + 3（alpha）**不動**：那是遮罩，這一顆工具的價值就在它。
+        }
+        return mismatched;
     }
 
     /// <summary>
