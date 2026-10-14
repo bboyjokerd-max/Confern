@@ -175,7 +175,7 @@ internal static class RemoveBgModel
             state = ModelLoad.Ready;
             log($"remove-bg: model '{Path.GetFileName(modelPath)}' loaded in " +
                 $"{timer.Elapsed.TotalMilliseconds:F0} ms " +
-                $"(inputs={_session.InputMetadata.Count}, outputs={_session.OutputMetadata.Count}; " +
+                $"({DescribeIo(_session)}) " +
                 "cached for the rest of this process -- measured 139-190 ms to build vs 72-115 ms to run)");
             return _session;
         }
@@ -198,6 +198,39 @@ internal static class RemoveBgModel
     {
         int cut = text.IndexOfAny(new[] { '\r', '\n' });
         return cut < 0 ? text : text.Substring(0, cut);
+    }
+
+    /// <summary>
+    /// 模型介面的**一行摘要**：每一個輸入／輸出的名字、元素型別、形狀。
+    ///
+    /// 為什麼要在日誌裡印出來：換一顆模型時（<c>--remove-bg-model</c>），「輸入叫什麼、
+    /// 形狀是 512 還是 1024、輸出有幾個」正是**決定前處理怎麼寫**的三件事，而它們只有模型
+    /// 自己知道。少了這一行，換模型就只能靠猜，而猜錯的症狀是「跑得完，但遮罩是垃圾」——
+    /// 最難查的那一種。實測（2026-10-14，用這一行查出 BiRefNet 的介面）。
+    /// </summary>
+    private static string DescribeIo(InferenceSession session)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("inputs=").Append(session.InputMetadata.Count).Append(" [");
+        bool first = true;
+        foreach (var kv in session.InputMetadata)
+        {
+            if (!first) sb.Append("; ");
+            first = false;
+            sb.Append(kv.Key).Append(':').Append(kv.Value.ElementType).Append('[')
+              .Append(string.Join(",", kv.Value.Dimensions)).Append(']');
+        }
+        sb.Append("] outputs=").Append(session.OutputMetadata.Count).Append(" [");
+        first = true;
+        foreach (var kv in session.OutputMetadata)
+        {
+            if (!first) sb.Append("; ");
+            first = false;
+            sb.Append(kv.Key).Append(':').Append(kv.Value.ElementType).Append('[')
+              .Append(string.Join(",", kv.Value.Dimensions)).Append(']');
+        }
+        sb.Append(']');
+        return sb.ToString();
     }
 
     /// <summary>
@@ -237,6 +270,17 @@ internal static class RemoveBgModel
     }
 
     /// <summary>
+    /// ImageNet 正規化常數（BiRefNet 用）。**實抓自模型自己的
+    /// <c>preprocessor_config.json</c>**（2026-10-14，<c>onnx-community/BiRefNet-ONNX</c>）：
+    /// <c>do_rescale=true / rescale_factor=1/255 / image_mean=[0.485,0.456,0.406] /
+    /// image_std=[0.229,0.224,0.225]</c>。通道順序是 **RGB**，與下面的取樣一致。
+    /// </summary>
+    private static readonly float[] ImageNetMean = { 0.485f, 0.456f, 0.406f };
+
+    /// <inheritdoc cref="ImageNetMean"/>
+    private static readonly float[] ImageNetStd = { 0.229f, 0.224f, 0.225f };
+
+    /// <summary>
     /// 正規化：<c>x / 127.5 - 1</c>（⇒ [-1, 1]），通道順序 **RGB**（模型的輸入是 RGB，
     /// 而 WIC 給的是 BGRA ⇒ 取樣時要換過來）。
     ///
@@ -244,6 +288,21 @@ internal static class RemoveBgModel
     /// 走同一條路：**同一個縮放器用在兩個方向**，才不會出現「縮進去是一種插值、放大回來是另一種」。
     /// </summary>
     public static float[] ToTensor(BitmapSource source, int tensorWidth, int tensorHeight)
+        => ToTensor(source, tensorWidth, tensorHeight, ModelKind.Modnet);
+
+    /// <summary>
+    /// 兩種模型的正規化**不一樣**，而這是整個模型介面裡**唯一無法從 metadata 讀出來**的東西
+    /// （名字可以讀、形狀可以讀，正規化不行——它沒有寫在 ONNX 裡，只寫在下載頁旁邊的
+    /// `preprocessor_config.json`）：
+    /// <list type="bullet">
+    /// <item><b>MODNet</b>：<c>x/127.5 - 1</c> ⇒ [-1, 1]。</item>
+    /// <item><b>BiRefNet</b>：<c>(x/255 - mean) / std</c>，ImageNet 的 mean／std（見
+    /// <see cref="ImageNetMean"/>）。</item>
+    /// </list>
+    /// 餵錯的症狀是「跑得完、遮罩看起來也像人，但邊緣一團糊」——一種沒有錯誤訊息的錯，
+    /// 所以這裡沒有預設值可言：走哪一條由 <see cref="KindOf"/> 判出來的種類決定。
+    /// </summary>
+    private static float[] ToTensor(BitmapSource source, int tensorWidth, int tensorHeight, ModelKind kind)
     {
         var scaled = new TransformedBitmap(source, new ScaleTransform(
             (double)tensorWidth / source.PixelWidth, (double)tensorHeight / source.PixelHeight));
@@ -259,14 +318,24 @@ internal static class RemoveBgModel
 
         int plane = width * height;
         var data = new float[3 * plane];
+        bool imagenet = kind == ModelKind.BiRefNet;
         for (int i = 0; i < plane; i++)
         {
             float b = pixels[i * 4];
             float g = pixels[i * 4 + 1];
             float r = pixels[i * 4 + 2];
-            data[i] = r / 127.5f - 1f;
-            data[plane + i] = g / 127.5f - 1f;
-            data[2 * plane + i] = b / 127.5f - 1f;
+            if (imagenet)
+            {
+                data[i] = (r / 255f - ImageNetMean[0]) / ImageNetStd[0];
+                data[plane + i] = (g / 255f - ImageNetMean[1]) / ImageNetStd[1];
+                data[2 * plane + i] = (b / 255f - ImageNetMean[2]) / ImageNetStd[2];
+            }
+            else
+            {
+                data[i] = r / 127.5f - 1f;
+                data[plane + i] = g / 127.5f - 1f;
+                data[2 * plane + i] = b / 127.5f - 1f;
+            }
         }
         return data;
     }
@@ -281,17 +350,24 @@ internal static class RemoveBgModel
     /// <summary>
     /// 跑一次推論。**呼叫端必須先確認 <see cref="Check"/> 是 Ready**（不然這裡會回一個
     /// 沒有意義的結果或丟例外——這一層不重複做狀態判定，那只會變成第二份規則）。
+    ///
+    /// **輸入名／輸出名／張量形狀全部從 session 自己讀**，不再靠常數：2026-10-14 換上 BiRefNet
+    /// 時，實測介面是 <c>input_image</c>／<c>output_image</c>／固定 <c>1x3x1024x1024</c>，
+    /// 與 MODNet 的 <c>input</c>／<c>output</c>／短邊 512 完全不同。常數在那一天就變成了一種
+    /// 假的保證——它讓人以為「換模型只要改常數」，而真正要改的是前處理的每一格。
     /// </summary>
     public static MaskResult Infer(InferenceSession session, BitmapSource source, Action<string> log)
     {
-        (int tw, int th) = TensorSize(source.PixelWidth, source.PixelHeight);
-        float[] input = ToTensor(source, tw, th);
+        ModelKind kind = KindOf(session);
+        (int tw, int th) = TensorSizeFor(session, source.PixelWidth, source.PixelHeight, kind);
+        string inputName = FirstInputName(session);
+        string outputName = FirstOutputName(session);
+        float[] input = ToTensor(source, tw, th, kind);
 
         var sw = Stopwatch.StartNew();
-        using var results = session.Run(new[]
-        {
-            NamedOnnxValue.CreateFromTensor(InputName, new DenseTensor<float>(input, new[] { 1, 3, th, tw }))
-        });
+        using var results = session.Run(
+            new[] { NamedOnnxValue.CreateFromTensor(inputName, new DenseTensor<float>(input, new[] { 1, 3, th, tw })) },
+            new[] { outputName });
         var output = results.First().AsTensor<float>();
         float[] mask = output.ToArray();
         sw.Stop();
@@ -303,10 +379,104 @@ internal static class RemoveBgModel
                 $"(expected {tw * th}); the output shape is {string.Join(",", output.Dimensions.ToArray())}");
         }
 
-        log($"remove-bg: tensor {tw}x{th} from {source.PixelWidth}x{source.PixelHeight} " +
-            $"in {sw.Elapsed.TotalMilliseconds:F0} ms (fp16 model, shortest_edge={ShortestEdge}, " +
-            $"size_divisibility={SizeDivisibility}, do_pad=false)");
+        // 輸出是 logits 還是已經過 sigmoid：**量出來的**，不是假設的。
+        // MODNet 的輸出實測已在 [0,1]（min=0.0000、max=1.0000，見 MaskResult 的說明）；
+        // BiRefNet 吐的是 logits（未過 sigmoid），直接當 alpha 用會得到一張幾乎全白的遮罩。
+        // 判準放在「最大值遠大於 1」上，並把這個決定寫進日誌——不然「為什麼要 sigmoid」
+        // 就變成下一個人要重新量一次的事。
+        float peak = float.MinValue;
+        foreach (float v in mask) if (v > peak) peak = v;
+        bool logits = peak > 1.5f;
+        if (logits)
+        {
+            for (int i = 0; i < mask.Length; i++) mask[i] = 1f / (1f + MathF.Exp(-mask[i]));
+            log($"remove-bg: the model returned logits (max={peak:F3} > 1.5) -> sigmoid applied " +
+                "to turn them into alpha; MODNet's output is already in [0,1] and takes no sigmoid");
+        }
+
+        // ⚠ MODNet 這一行**維持逐字不變**：驗收套件讀的就是這一行的欄位（shortest_edge=…、
+        // size_divisibility=…、do_pad=false）。BiRefNet 走另一句，因為它的事實不一樣。
+        if (kind == ModelKind.Modnet)
+        {
+            log($"remove-bg: tensor {tw}x{th} from {source.PixelWidth}x{source.PixelHeight} " +
+                $"in {sw.Elapsed.TotalMilliseconds:F0} ms (fp16 model, shortest_edge={ShortestEdge}, " +
+                $"size_divisibility={SizeDivisibility}, do_pad=false)");
+        }
+        else
+        {
+            log($"remove-bg: tensor {tw}x{th} from {source.PixelWidth}x{source.PixelHeight} " +
+                $"in {sw.Elapsed.TotalMilliseconds:F0} ms (BiRefNet, fixed square input, " +
+                $"imagenet normalisation, rescaled to [0,1] first)");
+        }
         return new MaskResult(mask, tw, th);
+    }
+
+    // ==========================================================================================
+    // 模型介面：**從模型自己問出來**，不從檔名或常數猜。
+    // ==========================================================================================
+
+    /// <summary>
+    /// 這個 session 是哪一種模型。判準是**輸入張量的形狀**，不是檔名——檔名是人的約定，
+    /// metadata 是模型的實話。判錯的症狀是「跑得完，但遮罩是垃圾」，所以判準要跟著介面走。
+    /// </summary>
+    private enum ModelKind
+    {
+        /// <summary>MODNet：動態形狀、短邊 512、<c>x/127.5-1</c>、輸出已 sigmoid。</summary>
+        Modnet = 0,
+
+        /// <summary>BiRefNet：固定 <c>1x3x1024x1024</c>、ImageNet 正規化、輸出是 logits。</summary>
+        BiRefNet
+    }
+
+    private const int BiRefNetEdge = 1024;
+
+    private static ModelKind KindOf(InferenceSession session)
+    {
+        foreach (var kv in session.InputMetadata)
+        {
+            var d = kv.Value.Dimensions;
+            if (d.Length == 4 && d[1] == 3 && d[2] == BiRefNetEdge && d[3] == BiRefNetEdge)
+                return ModelKind.BiRefNet;
+        }
+        return ModelKind.Modnet;
+    }
+
+    /// <summary>第一個輸入的名字（ORT 保證至少有一個，否則 session 根本建不起來）。</summary>
+    private static string FirstInputName(InferenceSession session)
+    {
+        foreach (var kv in session.InputMetadata) return kv.Key;
+        throw new InvalidOperationException("the model has no inputs");
+    }
+
+    /// <summary>第一個輸出的名字（同上）。</summary>
+    private static string FirstOutputName(InferenceSession session)
+    {
+        foreach (var kv in session.OutputMetadata) return kv.Key;
+        throw new InvalidOperationException("the model has no outputs");
+    }
+
+    /// <summary>
+    /// 張量尺寸。MODNet 走原本那條路（短邊 512、取整到 32 的倍數，見 <see cref="ShortestEdge"/>）；
+    /// BiRefNet 是**固定正方形輸入**，所以不管來源是什麼比例都送 1024×1024（它自己的
+    /// `preprocessor_config.json` 就是這樣寫的，2026-10-14 實抓）。
+    /// 遮罩回到原尺寸時兩者走同一條 WIC 縮放路徑。
+    /// </summary>
+    private static (int Width, int Height) TensorSizeFor(InferenceSession session, int w, int h, ModelKind kind)
+    {
+        if (kind != ModelKind.BiRefNet) return TensorSize(w, h);
+        foreach (var kv in session.InputMetadata)
+        {
+            var d = kv.Value.Dimensions;
+            if (d.Length == 4 && d[2] > 0 && d[3] > 0)
+            {
+                if (d[3] != BiRefNetEdge || d[2] != BiRefNetEdge)
+                    throw new InvalidOperationException(
+                        $"BiRefNet was expected to take a {BiRefNetEdge}x{BiRefNetEdge} square but its input " +
+                        $"is [{string.Join(",", d)}]; the preprocessing below would be wrong");
+                return (d[3], d[2]);
+            }
+        }
+        throw new InvalidOperationException("BiRefNet's input tensor has no fixed spatial dimensions to follow");
     }
 
     /// <summary>
