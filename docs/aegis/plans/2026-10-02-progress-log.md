@@ -2164,3 +2164,53 @@ the model returned logits (max=18.284 > 1.5) -> sigmoid applied
 **⑪ 送出 edit 之前，先確認 old_string 是我真的想改的那段。** 一次「空操作」把兩行黏成一行、讓整支腳本變成語法錯誤；抓到它的是語法檢查，不是那 202 條綠燈——**沒有語法檢查的話，那個錯會活到我下一次跑套件為止**。⇒ 改 `.ps1` 之後一律先 `ParseFile` 再跑。
 
 ---
+
+## 2026-10-14（收工）打包：主包 19.8 MiB ＋ 選用包 490 MB
+
+### 〇、使用者的問題，與量出來的事實
+
+使用者測過之後問：「之後如果要打包這個軟體，這個模型怎麼辦？」⇒ 先去量，不猜。量到的第一件事就是**問題比問題本身大**：
+
+| | 整包 | `models\` 裡有什麼 |
+|---|---|---|
+| 建置輸出（他剛測的那一個） | 531.3 MiB | BiRefNet 467 MiB ＋ MODNet 12.4 MiB ＋ 兩份聲明 |
+| 發佈輸出（＝打包的那一個） | 32.2 MiB | **只有 MODNet** |
+
+⇒ **直接打包的話，他剛測到的乾淨度不會出現在出貨版裡。** `publish-confern.ps1` 從頭到尾只認得 `model_fp16.onnx`：它驗那顆的長度與 sha256、斷言它在、斷言它的聲明在、跑一次、再做一次負面演練——它甚至不知道大顆的存在。
+
+### 一、決定：主包 ＋ 選用包（使用者選的）
+
+大顆的是**整個發佈包的 16 倍大**，所以不進主包；但產品端的預設**已經**是「有檔案且長度相符就用它」，所以「選用包」這個做法**不需要動任何程式碼**——複製檔案進去就是了。這正是上午那個偏好順序設計的回報。
+
+### 二、`publish-confern.ps1` 加了什麼
+
+- **參數**：`-WithOptionalModel`、`-OptionalModelSource`（離線）、`-OptionalDir`（預設 `<release>-birefnet`），以及新的離開碼 **7**。
+- **實測常數**：選用模型的檔名／長度 489,666,272／sha256／來源 repo／MIT，全部是今天量到的值。
+- **主包的不在斷言**：發佈目錄是**砍掉重建**的，所以大顆的只可能因為有人改動 `Sidecar.csproj` 而出現。那會是「每個使用者下載的東西悄悄多了 490 MB」——這種事要讓它當場失敗，而不是等到下載頁面發現。
+- **step 6（選用包）**：取得 → 驗 sha256 與長度 → 用同一個守衛刪掉舊包（只刪「看起來像上一個包」的資料夾）→ 複製模型＋MIT 聲明＋一份 `README.txt`（純 ASCII，說明「把 `models\` 裡的檔案複製到 Confern.exe 旁邊的 `models\`」）→ 斷言包是完整的。
+- **然後是這一節最重要的一段：證明這個包能把已安裝的程式升級。** 把**發佈版**複製一份、把包**照說明**放進去、跑一次，斷言：真的走過大顆那顆（路徑就在複製出來的那個資料夾裡）、exit 0、寫出剛好一個 PNG、alpha 是完整範圍，而且**輸出不再是主包產出的那串位元組**。「有這個包」與「這個包有用」是兩個不同的宣稱，只有後者值得出貨。
+
+### 三、跑一次的實測
+
+```
+step 3  package: optional model absent from the base release=OK
+        released folder files=24 bytes=20737389              ← 主包 19.8 MiB
+step 4  out of the box: exit=0 defaultPath='...\publish\models\model_fp16.onnx' clear=0.459
+step 5  negative: exit=3 error=ModelUnavailable wrote='count=0 (none)'
+step 6  optional pack: length=489666272 sha256=3654C741… notice=… readme=…
+        INSTALLED-PROOF exit=0 defaultPath='...\packtest\app\models\ModelBiRefNet_1024x1024_fp16.onnx'
+        that output differs from the base release's (DD733B56385A86ED…)
+        alpha min=0.0000 max=1.0000
+```
+
+⇒ 兩包制是**驗過**的，不是「看起來可以」。
+
+（順帶一個交叉驗證：主包那一次的輸出 sha256 是 `DD733B56385A86ED…`，正是上午被誤認為「使用者傳來的照片」的那個檔案。當時我用位元組完全相等證明那張圖是**我自己的 MODNet 產物**；現在它出現在「MODNet 主包跑出來的東西」這個位置上，兩邊對上了。）
+
+### 四、出貨的樣子
+
+- 主包：`publish\` —— 19.8 MiB，MODNet，開箱即用，聲明隨行。
+- 選用包：`publish-birefnet\` —— 490 MB，使用者把 `models\` 裡的東西複製進安裝目錄的 `models\` 就生效；刪掉就退回 MODNet。
+- 兩邊的授權都齊（apache-2.0 與 MIT 各一份完整全文），而且**兩份聲明裡的數字都被斷言等於磁碟上的檔案**（S22.17、S22.25）。
+
+---

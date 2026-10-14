@@ -169,14 +169,17 @@
       再斷言發佈目錄裡真的有三樣東西（`Confern.exe`、模型、聲明），少任何一樣就讓發佈失敗
       ——「檔案剛好在某個資料夾」與「出貨」的差別就在那一支腳本。
 
-      **2026-10-14 追加：可選的第二顆模型（BiRefNet）。** 它 489,666,272 bytes，比 MODNet 大 38 倍，
-      而**預設現在是一個偏好順序**：旁邊若有 `ModelBiRefNet_1024x1024_fp16.onnx` 而且長度正是實測值，
-      就用它，否則用 MODNet（見 `RemoveBgModel.ResolvePath` 與它上面的偏好說明）。這裡**刻意不**把
-      模型本身放進 `<Content>`：每建置一次就複製 490 MB 是實質成本，而取得腳本
-      `tools\get-rembg-model-birefnet.ps1` 本來就把檔案放到**執行檔旁邊**（那正是程式讀的位置）。
+      **2026-10-14 追加：可選的第二顆模型（BiRefNet）。** 它 489,666,272 bytes，是**整個發佈包的 16 倍大**
+      （發佈包本身 32.2 MB），而**預設現在是一個偏好順序**：旁邊若有 `ModelBiRefNet_1024x1024_fp16.onnx`
+      而且長度正是實測值，就用它，否則用 MODNet（見 `RemoveBgModel.ResolvePath` 與它上面的偏好說明）。
+      這裡**刻意不**把模型本身放進 `<Content>`——建置時複製 490 MB 沒有意義，而「大顆的怎麼出貨」由
+      `tools\publish-confern.ps1` 的**第二包**負責（`-WithOptionalModel`）：它取得並驗 sha256、把
+      `models\` 包成一個獨立資料夾、然後**把發佈版複製一份、把包放進去、跑一次**，斷言它真的走過大顆
+      模型、而且輸出不再是主包產出的那串位元組——「有這個包」與「這個包能把已安裝的程式升級」是兩個
+      不同的宣稱，只有後者值得出貨。那一側同時斷言**主包裡沒有**大顆模型，因為發佈目錄是砍掉重建的，
+      它只可能因為有人改動這裡而出現。
       但**授權聲明要複製**——MIT 要求著作權與許可聲明隨每一份拷貝走，而一份只存在於某台機器上的
-      聲明不算聲明。（待辦：`tools\publish-confern.ps1` 也該在「要出貨的目錄裡有大顆模型」時斷言
-      它旁邊有 `MODEL-BIREFNET-LICENSE.txt`；目前那支腳本只守 MODNet 那一組。）
+      聲明不算聲明。
     -->
     <Content Include="$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx"
              Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx')">
