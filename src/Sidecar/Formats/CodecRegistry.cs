@@ -131,11 +131,32 @@ internal sealed class CodecRegistry
     public static bool HasLosslessMetadataStrip(string format) =>
         string.Equals(format, "JPG", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 這個**目標**格式是不是由「非 WIC」的路徑生產（切片「圖片 → 單頁 PDF」，2026-10-14）。
+    ///
+    /// 為什麼這必須住在這裡：它問的是「**誰生產這個格式**」，那是格式知識。散到引擎裡就會出現
+    /// 第二個知道格式清單的地方——與 <see cref="HasLosslessMetadataStrip"/> 同一條理由。
+    ///
+    /// 目前只有 `PDF`：<see cref="CreateEncoder"/> 給不出它（回傳型別是 <c>BitmapEncoder</c>，
+    /// 而 PDF 是一個放頁面與內嵌影像物件的容器），生產者是 <see cref="PdfFromImage"/>。
+    /// </summary>
+    public static bool IsNonImageTarget(string format) =>
+        string.Equals(format, "PDF", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>規格 §6.1 宣告的**輸入**格式（MVP 承諾）。</summary>
     private static readonly string[] MvpInputs = { "JPG", "PNG", "BMP", "TIF", "GIF", "WEBP", "HEIC" };
 
-    /// <summary>規格 §6.2 宣告的**輸出**格式（MVP 承諾）。**GIF 與 HEIC 不在其中。**</summary>
-    private static readonly string[] MvpOutputs = { "PNG", "JPG", "WEBP", "BMP", "TIF" };
+    /// <summary>
+    /// 規格 §6.2 宣告的**輸出**格式（MVP 承諾）。**GIF 與 HEIC 不在其中。**
+    ///
+    /// ⚠ **2026-10-14 修訂：加入 `PDF`**（切片「圖片 → 單頁 PDF」，使用者裁定原話：
+    /// 「目前感覺只有『圖片->PDF』我覺得可以做」「這項應該就塞進 M1 就好了吧?」）。
+    /// 這是**宣告**的修訂，不是偷偷放行：它讓 PDF 出現在第一層格式輪盤的目標清單裡，
+    /// 而輪盤的內容本來就是「宣告 ∩ 這台機器真的做得到」（見建構子的註解）。
+    /// **PDF 不是可解碼的來源**——`DeclarePdf` 的 `Decode` 仍然是 `No`，
+    /// 所以 `--convert <pdf>` 仍然被拒、PDF 也仍然不會出現在來源格式裡。
+    /// </summary>
+    private static readonly string[] MvpOutputs = { "PNG", "JPG", "WEBP", "BMP", "TIF", "PDF" };
 
     private readonly List<CodecCapability> _capabilities = new();
 
@@ -399,7 +420,7 @@ internal sealed class CodecRegistry
     /// <summary>
     /// 工具 `merge-pdf` 加入的第三個類別（2026-10-07，見 <see cref="PdfCategory"/>）。
     ///
-    /// **解碼與編碼都是 <c>false</c>，而且這不是「還沒做」而是「刻意不做」**：
+    /// **解碼永遠是 <c>false</c>，而且這不是「還沒做」而是「刻意不做」**：
     /// PDF 不是點陣圖，把它解成像素是另一件事（要一個 rasterizer），本工具也**不需要**它
     /// ——合併是整頁物件搬移，全程在 PDF 的物件模型上做（見 `ConversionEngine.MergePdf`）。
     /// 把它宣告成可解碼會讓它出現在第一層的來源格式裡、讓 `--convert` 對它放行，
@@ -408,13 +429,67 @@ internal sealed class CodecRegistry
     /// ⚠ 這裡**不呼叫** <see cref="ProbeDecode"/>（那條路是 WIC 的，而 WIC 沒有 PDF 解碼器），
     /// 也不探測「PDFsharp 在不在」——它是一個 <c>PackageReference</c>，在就是載得起來的東西；
     /// 探測一個編譯期相依會讓這一列在**建置成功**的前提下仍然可能說謊。
+    ///
+    /// **2026-10-14：編碼不再是 <c>false</c>，而是量出來的。** 切片「圖片 → 單頁 PDF」讓 PDF
+    /// 成為第一層的一個**輸出**格式（一張圖 → 一頁 PDF），生產者是 <see cref="PdfFromImage"/>
+    /// ——不是 WIC，所以 <see cref="CreateEncoder"/> 仍然給不出它。<c>CanEncode</c> 由
+    /// <see cref="ProbePdfEncoder"/> 決定（真的寫一份、再真的讀回來），失敗就不出現扇形（§7.2）。
+    /// **這與「解碼」是兩件獨立的事**：PDF 仍然永遠不是來源格式。
     /// </summary>
-    private void DeclarePdf() =>
-        _capabilities.Add(new CodecCapability("PDF", DecodeSupport.No, false,
-            "PDF is not a bitmap format: it is never decoded to pixels and never encoded here " +
-            "(merging copies whole page objects, it does not rasterise); the tool merge-pdf reads and " +
-            "writes the PDF object model directly through PDFsharp, so this row says only " +
-            "'the product can name a .pdf', not 'the product can rasterise one'"));
+    private void DeclarePdf()
+    {
+        (bool ok, string evidence) = ProbePdfEncoder();
+        _capabilities.Add(new CodecCapability("PDF", DecodeSupport.No, ok,
+            "decode is never provided on purpose: PDF is not a bitmap format and rasterising one is a " +
+            "different job (the merge tool copies whole page objects, it does not rasterise). " +
+            "encode is probed: " + evidence));
+    }
+
+    /// <summary>
+    /// PDF **輸出**的探測（2026-10-14）：真的寫一份 PDF，再真的用 PDFsharp 讀回來。
+    ///
+    /// 形狀與 <see cref="ProbeWicEncoders"/> 相同（那一條是「真的編碼一次、再真的解碼一次」），
+    /// 而且理由也相同：**做不到就不出現扇形**（規格 §7.2 禁止靜默失敗），而「做不到」這件事只有
+    /// 量過才知道。這裡量三件事：**頁數要是 1**、**頁面尺寸要是那張 2×2 圖算出來的點數**
+    /// （<see cref="PdfFromImage.PointsFromPixels"/>，96 dpi ⇒ 1.5 pt）、而且**真的讀得回來**。
+    ///
+    /// ⚠ 這一條**不是**在驗「PDFsharp 在不在」——它是編譯期相依，在就是載得起來。它驗的是
+    /// 「這一條路在這個執行環境裡真的走得完」，而那是執行期的事實。
+    /// </summary>
+    private static (bool Ok, string Evidence) ProbePdfEncoder()
+    {
+        try
+        {
+            using var buffer = new MemoryStream();
+            PdfFromImage.Write(MakeProbeBitmap(), buffer);
+            long bytes = buffer.Length;
+            buffer.Position = 0;
+
+            using PdfSharp.Pdf.PdfDocument read =
+                PdfSharp.Pdf.IO.PdfReader.Open(buffer, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
+
+            if (read.PageCount != 1)
+                return (false, $"wrote {bytes}B but read back {read.PageCount} page(s), expected 1");
+
+            PdfSharp.Pdf.PdfPage page = read.Pages[0];
+            double width = page.Width.Point;
+            double height = page.Height.Point;
+            double expectedWidth = PdfFromImage.PointsFromPixels(2, 96);
+            double expectedHeight = PdfFromImage.PointsFromPixels(2, 96);
+            if (Math.Abs(width - expectedWidth) > 0.01 || Math.Abs(height - expectedHeight) > 0.01)
+            {
+                return (false, $"page is {width:F2}x{height:F2} pt, expected " +
+                               $"{expectedWidth:F2}x{expectedHeight:F2}");
+            }
+
+            return (true, $"a 2x2 image round-tripped as a {bytes}B one-page PDF of " +
+                          $"{width:F2}x{height:F2} pt (written, then read back through PdfReader)");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"{ex.GetType().Name}: {Short(ex.Message)}");
+        }
+    }
 
     private static BitmapSource MakeProbeBitmap()
     {

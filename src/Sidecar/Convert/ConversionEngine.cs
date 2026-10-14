@@ -79,6 +79,15 @@ internal sealed class ConversionEngine
             return Fail(sourcePath, ConversionError.WriteDenied, $"{ex.GetType().Name}: {ex.Message}");
         }
 
+        // 4b) 這個目標格式不是 WIC 生產的（目前只有 PDF）⇒ 走另一條生產者。
+        //     為什麼分流放在這裡而不是更前面：上面四段（格式表、來源還在嗎、便宜探測、命名）
+        //     對 PDF 這一條**一字不差地適用**——它一樣要有可解碼的圖片、一樣要永不覆寫的
+        //     檔名（`NamingPolicy` 的 `(1)` 序號規則照用）。真正不同的是「誰把位元組做出來」。
+        //     ⚠ 這一條**不得**流到下面那個 CreateEncoder 去（它對 PDF 回 null，會變成
+        //     「做不到卻出現在扇形上」）。判定本身住在 CodecRegistry：那是格式知識。
+        if (CodecRegistry.IsNonImageTarget(targetFormat))
+            return ToPdf(sourcePath, targetPath, journal, targetDirectory, extension);
+
         // 5) 解碼一次，然後寫入（重試規則見 WriteWithCollisionRetry）
         BitmapSource frame;
         int frameCount;
@@ -1541,6 +1550,54 @@ internal sealed class ConversionEngine
         return new ConversionResult(first, targetPath, ConversionError.None,
             $"{paths.Length} file(s), {totalPages} page(s), {merged.LongLength}B in " +
             $"{timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}", null, 1);
+    }
+
+    /// <summary>
+    /// 工具：**圖片 → 一頁 PDF**（切片「圖片 → 單頁 PDF」，2026-10-14）。
+    ///
+    /// 與 <see cref="MergePdf"/> 是同族的第二條「非 WIC 生產者」：兩者都不經過
+    /// <see cref="CodecRegistry.CreateEncoder"/>（那一條的產物是 <c>BitmapEncoder</c>），
+    /// 但**寫檔契約一字不差**——<see cref="AtomicWriter.Exists"/> →
+    /// <see cref="CodecRegistry.ProbeDecode"/> → <see cref="NamingPolicy.ResolveOutputPath"/> →
+    /// 生產 → <see cref="WriteWithCollisionRetry"/>（含三次重試與同一組失敗分類）。
+    /// 規格 §5 只有一個擁有者，所以這裡**沒有**任何一句新的命名或寫檔規則。
+    ///
+    /// 與 <see cref="MergePdf"/> 的差別只有兩處，而且都是語意上的：①它吃**一個**檔案（一進一出，
+    /// 與其餘五顆扇形相同），②它的來源必須**可解碼**（合併只讀 PDF 的物件模型，不需要像素；
+    /// 這一條要把像素放進頁面，所以不可解碼的來源在上一關就被擋掉了）。
+    /// </summary>
+    private ConversionResult ToPdf(string sourcePath, string targetPath, TempJournal? journal,
+                                   string? targetDirectory, string extension)
+    {
+        BitmapSource frame;
+        try
+        {
+            (frame, _) = DecodeFirstFrame(sourcePath);
+        }
+        catch (Exception ex)
+        {
+            string format = _codecs.FormatOfPath(sourcePath) ?? "?";
+            return Fail(sourcePath, MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, format, sourcePath)),
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        // 頁面尺寸＝來源的實際 DPI（見 PdfFromImage 的說明）。先在這裡算出來，因為日誌要寫它，
+        // 而它是「這張圖印出來多大」的唯一答案。
+        double width = PdfFromImage.PointsFromPixels(frame.PixelWidth, frame.DpiX);
+        double height = PdfFromImage.PointsFromPixels(frame.PixelHeight, frame.DpiY);
+
+        ConversionResult done = WriteWithCollisionRetry(sourcePath, targetPath, journal,
+            stream => PdfFromImage.Write(frame, stream),
+            tried => NamingPolicy.ResolveOutputPath(sourcePath, extension, targetDirectory, tried.ToList()),
+            out targetPath);
+        if (!done.Ok) return done;
+
+        _log($"to-pdf: {Path.GetFileName(sourcePath)} -> {Path.GetFileName(targetPath)} " +
+             $"({frame.PixelWidth}x{frame.PixelHeight} px, {width:F2}x{height:F2} pt at " +
+             $"{frame.DpiX:F0}x{frame.DpiY:F0} dpi; one page; source untouched)");
+        return new ConversionResult(sourcePath, targetPath, ConversionError.None,
+            $"one-page PDF {frame.PixelWidth}x{frame.PixelHeight} px -> {width:F2}x{height:F2} pt " +
+            $"at {frame.DpiX:F0} dpi -> {targetPath}", null, 1);
     }
 
     /// <summary>一個檔案路徑在一批有序輸入裡的位置（1 起算）。同名的第二份檔仍然是合法輸入。</summary>
