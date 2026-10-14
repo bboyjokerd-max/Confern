@@ -3082,14 +3082,25 @@ function Invoke-S22([string]$fault) {
   #   a model beside the exe   -> it must work out of the box: exit 0, one PNG, the source's own size
   #   no model beside the exe  -> the default path must produce the NAMED state: exit 3, nothing written
   # The branch that ran is part of the detail line, so a green check is never ambiguous about WHAT it tested.
+  # 2026-10-14: the default path stopped being ONE FILE NAME and became a PREFERENCE ORDER
+  # (RemoveBgModel.ResolvePath): if the preferred model (BiRefNet, 1024x1024 fp16) is lying beside the
+  # exe AND its length matches, use it; otherwise use model_fp16.onnx. The reason is in the product's
+  # own comment: a 490 MB file only exists when a download finished, and a half-downloaded big file
+  # must not turn the tool from "edges are soft" into "the tool is broken". So the assertion moves
+  # with it: not "which file name" but "which state", with the branch recorded either way.
+  $prefBesideExe = Join-Path $exeDir 'models\ModelBiRefNet_1024x1024_fp16.onnx'
+  $prefLenOk = (Test-Path -LiteralPath $prefBesideExe) -and
+               ((Get-Item -LiteralPath $prefBesideExe).Length -eq 489666272)
+  $expectedDefault = if ($prefLenOk) { $prefBesideExe } else { $modelBesideExe }
   $defaultRun = Invoke-RemoveBg 'defaultpath' $fPortrait ''
   $defaultLine = $defaultRun.ModelPathLine
-  $defaultNames = ($defaultLine -match [regex]::Escape($modelBesideExe)) -and
+  $defaultNames = ($defaultLine -match [regex]::Escape($expectedDefault)) -and
                   ($defaultLine -match '\(default beside the exe\)')
   $defaultBranch = ''
   $defaultOk = $false
-  if ($besideOk) {
-    $defaultBranch = 'model beside the exe -> out of the box'
+  if ($besideOk -or $prefLenOk) {
+    $defaultBranch = if ($prefLenOk) { 'preferred model beside the exe -> out of the box (the preference was honoured, not just tolerated)' }
+                     else { 'model beside the exe -> out of the box' }
     $defaultOk = $defaultNames -and ($defaultRun.Exit -eq 0) -and ($null -ne $defaultRun.Out) -and
                  ($defaultRun.OutSize -eq '512x410') -and ($defaultRun.WroteLine -match 'count=1')
   } else {
@@ -3099,9 +3110,10 @@ function Invoke-S22([string]$fault) {
                  ($defaultRun.Failure -match $missingMsg) -and ($null -eq $defaultRun.Out) -and
                  ($defaultRun.WroteLine -match 'count=0')
   }
-  $defaultDetail = "branch='$defaultBranch' exit=$($defaultRun.Exit) out=$(Get-OutName $defaultRun.Out) " +
+  $defaultDetail = "branch='$defaultBranch' preferredPresent=$prefLenOk expectedDefault=$(Split-Path -Leaf $expectedDefault) " +
+                   "exit=$($defaultRun.Exit) out=$(Get-OutName $defaultRun.Out) " +
                    "size=$($defaultRun.OutSize) wrote='$($defaultRun.WroteLine)' line='$defaultLine'"
-  Check 'S22.14 the DEFAULT model path, asked with no --remove-bg-model at all: with the model beside the exe the plain command works out of the box (exit 0, one PNG at the source size), and without one the same command is the NAMED state (exit 3, zero files)' $defaultOk $defaultDetail
+  Check 'S22.14 the DEFAULT model path, asked with no --remove-bg-model at all: with a usable model beside the exe the plain command works out of the box (exit 0, one PNG at the source size) and it is the PREFERRED one whenever that one is present at its measured length, and without any model the same command is the NAMED state (exit 3, zero files)' $defaultOk $defaultDetail
 
   # ---------------------------------------------------------------- S22.15 default = THE RUNNING EXE'S OWN FOLDER
   # Machine-independent, and it exists because a working-directory-relative model is a REAL failure mode: it
@@ -3136,9 +3148,17 @@ function Invoke-S22([string]$fault) {
   $rc = Start-Process -FilePath 'robocopy' -ArgumentList $rcArgv -Wait -PassThru -WindowStyle Hidden
   $copyExe = Join-Path $copyApp (Split-Path -Leaf $Exe)
   $copyModel = Join-Path $copyApp 'models\model_fp16.onnx'
+  $copyPreferred = Join-Path $copyApp 'models\ModelBiRefNet_1024x1024_fp16.onnx'
   $copyHadModel = Test-Path -LiteralPath $copyModel
   if ($copyHadModel) { Remove-Item -LiteralPath $copyModel -Force }
+  # 2026-10-14: BOTH have to go. The default is a preference order now, so leaving the preferred model
+  # in the copy would make this run SUCCEED ("a model was found") while the check is about the other
+  # state entirely: "no model anywhere -> the NAMED unavailable state". Deleting only one of two is
+  # exactly the kind of half-true precondition that turns a green check into a decoration.
+  $copyHadPreferred = Test-Path -LiteralPath $copyPreferred
+  if ($copyHadPreferred) { Remove-Item -LiteralPath $copyPreferred -Force }
   $besideShaBefore = Get-Sha $modelBesideExe
+  $prefBesideShaBefore = Get-Sha $prefBesideExe
 
   $negDir = Join-Path $Work 'rembg-default-nomodel'
   New-Item -ItemType Directory -Force -Path $negDir | Out-Null
@@ -3170,10 +3190,12 @@ function Invoke-S22([string]$fault) {
                   ($negModelLine -match 'exists=False') -and
                   ($negModelLine -match '\(default beside the exe\)') -and
                   ($negWrote -match 'count=0') -and ($negNew.Count -eq 0) -and $negUntouched -and
-                  ((Get-Sha $modelBesideExe) -eq $besideShaBefore)
-  $negDetail = "copy='$copyApp' (hadModel=$copyHadModel, removed) robocopyExit=$($rc.ExitCode) " +
+                  ((Get-Sha $modelBesideExe) -eq $besideShaBefore) -and
+                  ((Get-Sha $prefBesideExe) -eq $prefBesideShaBefore)
+  $negDetail = "copy='$copyApp' (hadModel=$copyHadModel, hadPreferred=$copyHadPreferred, both removed) robocopyExit=$($rc.ExitCode) " +
                "runExit=$negExit namedModelUnavailable=$negNamed wrote='$negWrote' extraFiles=$($negNew.Count) " +
                "sourceUntouched=$negUntouched originalBesideUnchanged=$((Get-Sha $modelBesideExe) -eq $besideShaBefore) " +
+               "originalPreferredUnchanged=$((Get-Sha $prefBesideExe) -eq $prefBesideShaBefore) " +
                "line='$negModelLine'"
   Check 'S22.15 the default path follows the RUNNING exe (not the working directory, not the original folder): on a temp copy with the model deleted the plain command reports error=ModelUnavailable, exit 3 and zero files, and the original folder model is untouched' $negDefaultOk $negDetail
 
@@ -3243,6 +3265,7 @@ function Invoke-S22([string]$fault) {
     $noticeDetail = "no tracked notice at '$repoNotice' ; beside=$noticeBesideOk (an exe folder must not carry a notice the source tree does not have)"
   }
   Check 'S22.17 the model licence notice (apache-2.0, Xenova/modnet) ships beside the model it covers: the copy next to the exe is byte-identical to the committed notice and names the licence, the source and the measured length and sha256 - a release that carried the model without this file would fail here' $noticeOk $noticeDetail
+
 
   # ---------------------------------------------------------------- S22.18-S22.21 the EDGE REFINEMENT
   # WHY THESE FOUR EXIST (2026-10-08, the refinement slice). The model pins the SHORTEST EDGE of its
@@ -3666,6 +3689,79 @@ public static class RembgSoftMetrics
   }
   Check 'S22.23 the written PNG is a CUTOUT and not the matte: on the high-resolution input EVERY subject pixel (alpha >= 250) of both the refined and the unrefined output carries exactly the SOURCE pixel RGB, and the compared population is both large and genuinely colourful in the source, so the assertion cannot pass vacuously on a grey image' `
     $colourOk $colourDetail
+
+  # ---------------------------------------------------------------- S22.24 the preference is a PRODUCT, not a log string
+  # A preference order is worth nothing unless the user can tell which engine they got. S22.14 reads the UI-side line
+  # that NAMES the path; this check does not trust a name at all. It runs the SAME source twice - once with no switch
+  # at all (whatever the preference order picks), once with MODNet forced by --remove-bg-model - and compares BYTES:
+  #   preferred present -> the runs must DIFFER  (the preference changes what the user gets, not just a log line)
+  #   only MODNet       -> the runs must be IDENTICAL (the fallback is exactly the old behaviour, byte for byte)
+  # Both branches are decidable and neither is a skip, so this is a real assertion on every machine.
+  $prefA = Invoke-RemoveBg 'defaultpath-pref' $fPortrait ''
+  $prefB = Invoke-RemoveBg 'defaultpath-modnet' $fPortrait $modelBesideExe
+  $shaA = if (($null -ne $prefA) -and ($null -ne $prefA.Out)) { Get-Sha $prefA.Out } else { '' }
+  $shaB = if (($null -ne $prefB) -and ($null -ne $prefB.Out)) { Get-Sha $prefB.Out } else { '' }
+  $prefSame = ($shaA -ne '') -and ($shaA -eq $shaB)
+  $prefBranch = ''
+  $prefOk = $false
+  if ($prefLenOk) {
+    $prefBranch = 'preferred model present -> the default must DIFFER from forced MODNet'
+    $prefOk = ($shaA -ne '') -and ($shaB -ne '') -and (-not $prefSame) -and
+              (($null -ne $prefA) -and ($prefA.Exit -eq 0)) -and (($null -ne $prefB) -and ($prefB.Exit -eq 0))
+  } else {
+    $prefBranch = 'no preferred model -> the default must BE forced MODNet, byte for byte'
+    $prefOk = ($shaA -ne '') -and ($shaA -eq $shaB) -and
+              (($null -ne $prefA) -and ($prefA.Exit -eq 0)) -and (($null -ne $prefB) -and ($prefB.Exit -eq 0))
+  }
+  $prefDetail = "branch='$prefBranch' identical=$prefSame " +
+                "shaDefault=$($shaA.Substring(0, [Math]::Min(12, $shaA.Length))) " +
+                "shaForcedModnet=$($shaB.Substring(0, [Math]::Min(12, $shaB.Length))) " +
+                "exitDefault=$(if ($null -ne $prefA) { $prefA.Exit } else { 'NO RUN' }) " +
+                "exitForced=$(if ($null -ne $prefB) { $prefB.Exit } else { 'NO RUN' })"
+  Check 'S22.24 the DEFAULT preference is a different PRODUCT and not a different log string: with no --remove-bg-model the plain command and the same command with MODNet forced by name must produce DIFFERENT bytes when the preferred model is present (the user really gets the other engine), and BYTE-IDENTICAL output when it is absent (the fallback is exactly the old behaviour)' $prefOk $prefDetail
+
+  # ---------------------------------------------------------------- S22.25 the OPTIONAL model's notice
+  # S22.17 guards the model the product SHIPS. This one guards the model the default now PREFERS (2026-10-14).
+  # MIT requires the copyright notice and the permission notice to reach whoever receives a copy, so when that
+  # model sits beside the exe its notice must sit beside it too - and, sharper than S22.17, the numbers INSIDE
+  # the notice must equal the bytes ON DISK. A licence file that describes a different build than the one being
+  # handed out is worse than no file at all, because it looks like diligence. Both branches stay decidable:
+  #   preferred model beside the exe -> notice beside it, byte-identical to the committed one, and its length
+  #                                     and sha256 equal the real file's (not some earlier build's);
+  #   no preferred model             -> nothing for that notice to declare, so it must not be a bare copy of a
+  #                                     claim with no file behind it.
+  $prefNoticeRepo = Join-Path $repo 'models\MODEL-BIREFNET-LICENSE.txt'
+  $prefNoticeExe = Join-Path $exeDir 'models\MODEL-BIREFNET-LICENSE.txt'
+  $prefNoticeTracked = Test-Path -LiteralPath $prefNoticeRepo
+  $prefNoticeBeside = Test-Path -LiteralPath $prefNoticeExe
+  $prefNoticeOk = $false
+  $prefNoticeDetail = ''
+  if ($prefLenOk) {
+    $pText = if ($prefNoticeBeside) { [System.IO.File]::ReadAllText($prefNoticeExe) } else { '' }
+    $prefRealSha = (Get-FileHash -LiteralPath $prefBesideExe -Algorithm SHA256).Hash
+    $prefRealLen = (Get-Item -LiteralPath $prefBesideExe).Length
+    $prefMissing = @()
+    foreach ($need in @(
+        @{ What = 'the licence name (MIT)';                    Ok = ($pText -match '(?i)\bMIT\b') },
+        @{ What = 'the MIT text itself';                       Ok = ($pText -match 'Permission is hereby granted') },
+        @{ What = 'the copyright holder line';                 Ok = ($pText -match [regex]::Escape('Copyright (c) 2024 ZhengPeng')) },
+        @{ What = 'the source repository';                     Ok = ($pText -match [regex]::Escape('onnx-community/BiRefNet-ONNX')) },
+        @{ What = 'the upstream repository';                   Ok = ($pText -match [regex]::Escape('ZhengPeng7/BiRefNet')) },
+        @{ What = 'the model file name';                       Ok = ($pText -match [regex]::Escape('ModelBiRefNet_1024x1024_fp16.onnx')) },
+        @{ What = 'the length OF THE FILE ON DISK';            Ok = ($pText -match [regex]::Escape([string]$prefRealLen)) },
+        @{ What = 'the sha256 OF THE FILE ON DISK';            Ok = ($pText -match [regex]::Escape($prefRealSha)) })) {
+      if (-not $need.Ok) { $prefMissing += $need.What }
+    }
+    $prefNoticeOk = $prefNoticeTracked -and $prefNoticeBeside -and ($prefMissing.Count -eq 0) -and
+                    ((Get-Sha $prefNoticeExe) -eq (Get-Sha $prefNoticeRepo))
+    $prefNoticeDetail = "modelLen=$prefRealLen modelSha=$($prefRealSha.Substring(0, 12)) tracked=$prefNoticeTracked " +
+                        "beside=$prefNoticeBeside missingFromNotice=($($prefMissing -join ', '))"
+  } else {
+    $prefNoticeOk = (-not $prefNoticeBeside) -or ($prefNoticeTracked -and $prefNoticeBeside)
+    $prefNoticeDetail = "no preferred model beside the exe -> this notice has nothing to declare; " +
+                        "noticePresent=$prefNoticeBeside tracked=$prefNoticeTracked"
+  }
+  Check 'S22.25 the notice of the OPTIONAL model travels with it AND describes the bytes that are actually there: when the preferred model sits beside the exe its MIT notice must sit beside it, be byte-identical to the committed one, and carry the length and sha256 OF THE FILE ON DISK rather than of some earlier build; with no preferred model there is nothing for it to declare' $prefNoticeOk $prefNoticeDetail
 
   # ---- the two injections of this section, stated where a red run is read ----
   if ($fault -eq 'rembg-nosubject') {
@@ -4105,7 +4201,7 @@ foreach ($s in $sections) {
     'S19' { Expect 18; Invoke-S19 }
     'S20' { Expect 15; Invoke-S20 }
     'S21' { Expect 13; Invoke-S21 }
-    'S22' { Expect 23; Invoke-S22 $FaultInjection }
+    'S22' { Expect 25; Invoke-S22 $FaultInjection }
     default { Write-Host "section not implemented yet: $s" }
   }
 }

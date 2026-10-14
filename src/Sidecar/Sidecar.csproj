@@ -168,6 +168,15 @@
       也不是崩潰。**出貨那一側由 `tools\publish-confern.ps1` 補回來**：它先取得並驗 sha256，
       再斷言發佈目錄裡真的有三樣東西（`Confern.exe`、模型、聲明），少任何一樣就讓發佈失敗
       ——「檔案剛好在某個資料夾」與「出貨」的差別就在那一支腳本。
+
+      **2026-10-14 追加：可選的第二顆模型（BiRefNet）。** 它 489,666,272 bytes，比 MODNet 大 38 倍，
+      而**預設現在是一個偏好順序**：旁邊若有 `ModelBiRefNet_1024x1024_fp16.onnx` 而且長度正是實測值，
+      就用它，否則用 MODNet（見 `RemoveBgModel.ResolvePath` 與它上面的偏好說明）。這裡**刻意不**把
+      模型本身放進 `<Content>`：每建置一次就複製 490 MB 是實質成本，而取得腳本
+      `tools\get-rembg-model-birefnet.ps1` 本來就把檔案放到**執行檔旁邊**（那正是程式讀的位置）。
+      但**授權聲明要複製**——MIT 要求著作權與許可聲明隨每一份拷貝走，而一份只存在於某台機器上的
+      聲明不算聲明。（待辦：`tools\publish-confern.ps1` 也該在「要出貨的目錄裡有大顆模型」時斷言
+      它旁邊有 `MODEL-BIREFNET-LICENSE.txt`；目前那支腳本只守 MODNet 那一組。）
     -->
     <Content Include="$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx"
              Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx')">
@@ -181,6 +190,19 @@
              Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt')">
       <Link>models\MODEL-LICENSE.txt</Link>
       <TargetPath>models\MODEL-LICENSE.txt</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <!--
+      可選模型的授權聲明（MIT）。它**永遠複製**（檔案在版控裡，4 KB），因為「哪一顆模型真的被用到」
+      取決於執行階段那一台機器上有什麼，而不是取決於建置：同一份成品在這台機器上跑 BiRefNet、
+      在另一台上跑 MODNet，而兩種情況都可能被散布。宣告檔本身不佔空間，漏掉它才是問題。
+    -->
+    <Content Include="$(MSBuildThisFileDirectory)..\..\models\MODEL-BIREFNET-LICENSE.txt"
+             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-BIREFNET-LICENSE.txt')">
+      <Link>models\MODEL-BIREFNET-LICENSE.txt</Link>
+      <TargetPath>models\MODEL-BIREFNET-LICENSE.txt</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Visible>false</Visible>

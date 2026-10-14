@@ -1,0 +1,98 @@
+================================================================================
+THIRD-PARTY NOTICE -- the OPTIONAL high-quality portrait segmentation model
+================================================================================
+
+THIS FILE MUST SHIP WITH THE PRODUCT WHENEVER THE MODEL BELOW IS SHIPPED. MIT
+requires the copyright notice and the permission notice to travel with every
+copy or substantial portion of the software, and this file is how they travel.
+It is NOT decoration and it is NOT optional in that case.
+
+Unlike MODEL-LICENSE.txt (which covers model_fp16.onnx, the model this product
+ships by default), the model described here is NOT shipped with the product: it
+is an optional 490 MB download that makes CUTOUT measurably cleaner. The product
+works, and has always worked, without it.
+
+--------------------------------------------------------------------------------
+1. WHICH MODEL FILE THIS COVERS, AND WHAT LICENCE COVERS IT
+--------------------------------------------------------------------------------
+file name     : ModelBiRefNet_1024x1024_fp16.onnx
+length        : 489666272 bytes
+sha256        : 3654C741EB80BD926ADA8FED1713B506CCF8D30EB1F6487E87EB9F234F33DF09
+source        : https://huggingface.co/onnx-community/BiRefNet-ONNX
+                (file: onnx/model_fp16.onnx)
+licence       : MIT, as declared by that repository -- its model card carries
+                "license: mit" and "repo_url: https://github.com/ZhengPeng7/BiRefNet"
+                (read on 2026-10-14, not taken from a third-party summary)
+what it is    : BiRefNet -- "Bilateral Reference for High-Resolution Dichotomous
+                Image Segmentation"
+upstream work : https://github.com/ZhengPeng7/BiRefNet  (MIT, Copyright (c) 2024
+                ZhengPeng; the LICENSE text is reproduced in full in section 3)
+
+The length and the sha256 above are MEASURED VALUES of the bytes this build was
+tested against -- they were not copied from a web page. The model file is used
+UNMODIFIED. tools\get-rembg-model-birefnet.ps1 is the only way it enters a build:
+it verifies both numbers and refuses to install anything that does not match, so
+a truncated or substituted download is deleted and never used.
+
+Section 3 below reproduces the MIT licence text in full, which satisfies the
+"shall be included in all copies or substantial portions of the Software"
+condition.
+
+--------------------------------------------------------------------------------
+2. HOW THE PRODUCT FINDS IT, AND WHAT HAPPENS WHEN IT IS ABSENT
+--------------------------------------------------------------------------------
+RemoveBgModel.ResolvePath() resolves the default model as a PREFERENCE ORDER, not
+as a single file name:
+
+    <exe folder>\models\ModelBiRefNet_1024x1024_fp16.onnx   <- used when present
+                                                              AND its length is
+                                                              exactly the measured
+                                                              489666272 bytes
+    <exe folder>\models\model_fp16.onnx                    <- otherwise (MODNet)
+
+The length check is deliberate: this file is 490 MB and only exists when a
+download finished, and a half-downloaded big file must not turn the tool from
+"the edges are soft" into "the tool is broken". A file that is present at the
+right length but is not a usable ONNX is reported by name (ModelCorrupt, exit 3,
+nothing written) rather than silently ignored -- see RemoveBgModel.Check.
+
+Passing --remove-bg-model <path> overrides both and is what the verification
+suite uses. With neither file present the tool reports the named state
+ModelUnavailable, exit code 3, nothing written, and tells the user to run the
+fetch script; it never crashes.
+
+--------------------------------------------------------------------------------
+3. MIT LICENSE (full text)
+--------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2024 ZhengPeng
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+4. WHY THIS FILE IS IN VERSION CONTROL WHILE THE MODEL IS NOT
+--------------------------------------------------------------------------------
+The model is a 490 MB binary, so it is not committed (see .gitignore: models/*).
+This notice is 4 KB of text, so it IS committed, exactly like MODEL-LICENSE.txt:
+a licence notice that only exists on one machine is not a licence notice.
+
+The build copies this file next to the executable (see src\Sidecar\Sidecar.csproj)
+whenever it is present, so a build that carries the model also carries the notice
+that covers it.

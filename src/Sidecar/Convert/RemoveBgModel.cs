@@ -62,6 +62,27 @@ internal static class RemoveBgModel
     /// </summary>
     public const string DefaultFileName = "model_fp16.onnx";
 
+    /// <summary>
+    /// **偏好的**模型檔名：如果它就躺在執行檔旁邊，而且長度對得上，就用它。
+    ///
+    /// 為什麼是「偏好」而不是「取代」：它是 489.7 MB 的檔案，而它只在下載成功時才存在。
+    /// 一個**下載到一半**的大檔如果被選走，使用者會從「工具正常、只是邊緣軟」變成
+    /// 「工具直接說模型損壞」——那是更糟的狀態。所以這裡多問一句長度（見
+    /// <see cref="PreferredBytes"/>），對不上就若無其事地走原本的預設。
+    ///
+    /// 實測差別（同一張人物照 512x410）：半透明像素 7,624 → 3,144、真的被去掉的背景
+    /// 96,347 → 103,410 px、而 MODNet 留在左側那 5,272 px 的紅色殘留（照片左邊那面美國國旗）
+    /// 被清掉；反向的誤刪只有 292 px。
+    /// </summary>
+    public const string PreferredFileName = "ModelBiRefNet_1024x1024_fp16.onnx";
+
+    /// <summary>
+    /// 偏好模型的**實測長度**（bytes）。與 <see cref="ExpectedBytes"/> 同一個用途：
+    /// 只當便宜的第一道判斷，真正的權威仍是「session 建不建得起來」；
+    /// sha256 是取得腳本 <c>tools/get-rembg-model-birefnet.ps1</c> 的職責。
+    /// </summary>
+    public const long PreferredBytes = 489_666_272L;
+
     /// <summary>模型放的子資料夾名（與執行檔同層）。</summary>
     public const string DefaultFolderName = "models";
 
@@ -96,6 +117,11 @@ internal static class RemoveBgModel
     /// （<see cref="DefaultFileName"/> 在 <see cref="AppContext.BaseDirectory"/> 的
     /// <see cref="DefaultFolderName"/> 底下）。
     ///
+    /// **預設位置是一個偏好順序，不是一個檔名**：旁邊若躺著 <see cref="PreferredFileName"/>
+    /// 而且長度對得上，就用它；否則用 <see cref="DefaultFileName"/>。判斷「長度對得上」而不是
+    /// 只看「檔案在不在」，是為了不讓一個下載到一半的大檔把工具從「邊緣軟」變成「直接壞掉」。
+    /// 這件事是**刻意寫在使用者選了之後才改的**：在那之前，既有行為與驗收都靠這個函式不動。
+    ///
     /// 相對路徑一律轉成絕對路徑：診斷路徑會把這個字串**跨管道**送給 worker
     /// （<c>WorkerMessage.removeBgModel</c>），而相對路徑在另一端會對上**不同**的工作目錄
     /// ——那會變成「UI 找到模型、worker 找不到」這種兩邊都覺得自己對的分歧。
@@ -108,7 +134,21 @@ internal static class RemoveBgModel
             try { return Path.GetFullPath(given); }
             catch (Exception) { return given; }   // 連路徑都算不出來：原樣回，讓 File.Exists 判它不存在
         }
-        return Path.Combine(AppContext.BaseDirectory, DefaultFolderName, DefaultFileName);
+
+        string dir = Path.Combine(AppContext.BaseDirectory, DefaultFolderName);
+        string preferred = Path.Combine(dir, PreferredFileName);
+        try
+        {
+            var info = new FileInfo(LongPath.Prepare(preferred));
+            if (info.Exists && info.Length == PreferredBytes) return preferred;
+        }
+        catch (Exception)
+        {
+            // 連問都問不到（路徑過長、權限、磁碟消失…）⇒ 當它不存在，走原本的預設。
+            // 這裡**刻意吞掉例外**：解析路徑不該是會失敗的操作，而「問不到」的正確答案
+            // 就是「那就用另一個」。真正的權威仍然是 Check() 建不建得起來 session。
+        }
+        return Path.Combine(dir, DefaultFileName);
     }
 
     /// <summary>
