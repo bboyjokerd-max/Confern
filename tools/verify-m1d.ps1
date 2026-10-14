@@ -246,7 +246,11 @@ if ($offeredLine) {
   Expect 3
   $offered = ([regex]::Match($offeredLine, 'offered=\[([^\]]*)\]')).Groups[1].Value -split ','
   $sorted = ($offered | Sort-Object) -join ','
-  Check 'S12.9 offered outputs = declared n encodable' ($sorted -eq 'BMP,JPG,PNG,TIF') "offered=$sorted"
+  # 2026-10-14: PDF joined the declared output matrix (image -> one page PDF). This expectation
+  # is updated ON PURPOSE. A test holding its own expectation is correct practice, and catching
+  # this change is exactly its job -- unlike the duplicate that used to live in Program.cs,
+  # which was product code holding a copy of a product list (that one was a real defect).
+  Check 'S12.9 offered outputs = declared n encodable' ($sorted -eq 'BMP,JPG,PDF,PNG,TIF') "offered=$sorted"
   Check 'S12.9b GIF never offered (capable but not declared)' (-not ($offered -contains 'GIF')) ''
   Check 'S12.9c WEBP never offered (declared but not encodable here)' (-not ($offered -contains 'WEBP')) ''
 } else {

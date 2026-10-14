@@ -2271,3 +2271,34 @@ verify-m1c.ps1 -Section S9：checks=20 pass=20 fail=0
 - **其他區段的回歸**（m1a／m1b／m1d）：本刀動到 `Convert()` 這條五個既有格式共用的路徑，
   目前只跑了 S9；其餘區段還沒跑。
 - B（多張合成一份多頁 PDF）：使用者明確延後。
+
+### 2026-10-14（續）　回歸結果與一條舊帳
+
+**m1a**：`23/23 passed`（`fail=0`；20 條 inconclusive 要真滑鼠）。**m1d**：`74/74`。
+**m1b**：`54/65`，11 條紅分成兩類——10 條是 `S8.1`–`S8.13`「沒有觀察到真的 DragEnter（count=0）」，
+那是**環境限制**（這裡沒有真的滑鼠拖曳），不是程式壞了；1 條是**舊帳** ✗。
+
+**舊帳 `S7.29 single non-image -> Unsupported`**：它餵 `C:\Temp\doc.pdf` 並期望 `status=Unsupported`，
+但日誌是 `status=Ready source=PDF tools=7` ⇒ **2026-10-07 合併 PDF 那一刀刻意改成 Ready**
+（PDF 有工具適用 ⇒ 開工具層）。它自己的意圖（「單一檔 ≠ 混合選取」）是對的，只是拿 PDF 當
+「不支援」的樣本已經不成立。**不是 2026-10-14 這一刀造成的**，修法排在後面。
+
+**`S12.9` 則不是缺陷**：`Check 'S12.9 offered outputs = declared n encodable' ($sorted -eq 'BMP,JPG,PNG,TIF')`
+是**測試持有自己的期望值**——它**抓到** PDF 進了 offered 集合，那正是它該做的事。
+已更新為 `BMP,JPG,PDF,PNG,TIF`（附註解說明為什麼這是刻意更新）。重跑 m1d ⇒ **74/74**。
+
+⚠ 我一度把 `S12.9` 與 `Program.cs:7188` 當成同一種病，**判斷錯了**：兩者性質相反——
+`Program.cs` 是**產品程式碼持有產品清單的複本**（真缺陷，已修）；測試持有獨立期望值是**正確做法**，
+改成「去問產品」反而會讓斷言變成同義反覆。
+
+### 2026-10-14（續）　下一刀：多張圖 → 一份多頁 PDF
+
+使用者要求（原話）：「如果一次選多個圖檔，可以新增一個『合併成PDF』的功能嗎?」
+裁定：入口＝擴大既有的 `merge-pdf` 讓它同時吃圖片；頁序＝用既有排序視窗；**頁面大小要能選**；先做這個。
+計畫：`docs/aegis/plans/2026-10-14-merge-images-to-pdf.md`。
+
+**調查量到的關鍵缺口**（唯讀調查，非推論）：`ToolDescriptor.AppliesTo` 的簽名只收
+`string? sourceFormat` ⇒ **拿不到檔案數**，而「圖片合併」的必要條件正是 **≥2 張**。
+所以這一刀的核心是**擴充那個契約**（`PayloadVerdict` 加 `FileCount`、`AppliesTo` 改收判決），
+不是多寫一個 PDF 產生器。另外：品質只有設定頁一個入口（輪盤上沒有旋鈕，2026-10-06 的裁定）、
+`pageSize` 是**新欄位** ⇒ `WorkerProtocol.Version` 3 → 4。
