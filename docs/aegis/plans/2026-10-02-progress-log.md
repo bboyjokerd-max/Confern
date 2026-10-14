@@ -2214,3 +2214,60 @@ step 6  optional pack: length=489666272 sha256=3654C741… notice=… readme=…
 - 兩邊的授權都齊（apache-2.0 與 MIT 各一份完整全文），而且**兩份聲明裡的數字都被斷言等於磁碟上的檔案**（S22.17、S22.25）。
 
 ---
+
+---
+
+## 2026-10-14　切片：圖片 → 單頁 PDF（格式輪盤的第六個輸出格式）
+
+**使用者的裁定**（原話）：「目前感覺只有『圖片->PDF』我覺得可以做」「這項應該就塞進 M1 就好了吧?」；
+並在「A：每張圖各自一頁」與「B：多張合成一份多頁 PDF」之間選了 **A**（B 以後再說）。
+計畫：`docs/aegis/plans/2026-10-14-image-to-pdf.md`。提交：`6c08c58`。
+
+### 這一刀真正的接縫
+
+目標格式的唯一來源是 `CodecRegistry.OfferedOutputs`，第一層扇形由 `FormatCatalog.TargetsFor` 算，
+所以**加一個格式，輪盤會自己長出來**（`FormatCatalog` 一行都不用改）。但 `CreateEncoder` 的回傳型別是
+`BitmapEncoder`（WIC），而 PDF **不是** WIC 編碼器——它是一個放頁面與內嵌影像物件的容器。
+硬塞進那個抽象，五個既有格式的編碼路徑就一起長出分支。⇒ 先例早就存在：`ConversionEngine.MergePdf`
+（2026-10-07）就是一條「非 WIC 的生產者」，本刀照它的形狀再拉一條 `ToPdf`，寫檔契約一字不差
+（`AtomicWriter` → `NamingPolicy` → 三次重試 → 同一組失敗分類）。
+
+### 量到的（不是推論）
+
+```
+convert job: files=1 target=PDF quality=85 offered=[PNG,JPG,BMP,TIF,PDF]
+to-pdf: real-512.png -> real-512.pdf (512x410 px, 384.05x307.54 pt at 96x96 dpi; one page; source untouched)
+codec PDF: decode=no encode=yes :: … encode is probed: a 2x2 image round-tripped as a
+           2653B one-page PDF of 1.50x1.50 pt (written, then read back through PdfReader)
+merge-pdf inspect（產品自己的檢驗器讀回產物）: page=1 size=384.1x307.5 rotate=0 contents=64
+產物 real-512.pdf 507361 bytes；來源 sha256 不變
+verify-m1c.ps1 -Section S9：checks=20 pass=20 fail=0
+建置：0 警告 0 錯誤
+```
+
+`384.05` 而不是 `384.00` 是**對的**：那張 PNG 自己報的 DPI 不是剛好 96，而我刻意用**來源的實際 DPI**
+換算頁面尺寸（`pt = px × 72 / dpi`）——這樣「1000px @300dpi」印出來是 240pt 而不是 750pt，
+而且這一條可以客觀斷言。
+
+### 過程中真的抓到的東西（都是當場量到才知道的）
+
+- **一份隱藏的第二擁有者**：`Program.cs:7188` 自己抄了一份 `string[] declared = { "PNG","JPG","WEBP","BMP","TIF" }`。
+  PDF 一進宣告矩陣，那份複本立刻成為唯一說謊的地方，產品自己的自我檢查就 FAIL 了
+  （`FAIL  offered [PNG,JPG,BMP,TIF,PDF] is a subset of the declared MVP matrix`），而 offered 完全正確。
+  修法是**問唯一擁有者**（新增 `CodecRegistry.DeclaredOutputs`），不是把 PDF 也抄進去——抄進去只是把複本養大。
+  ⚠ 計畫的 Change Necessity 漏了這一份複本；「格式知識只有一個擁有者」這句話在這個 repo 裡仍然有例外。
+- **PowerShell 的續行是 backtick，不是 `+`**：我把一條斷言拆成三行、行尾用 `+` 串接，語法當場 6 個錯。
+  C# 的規矩套過來就會壞。
+- **here-string 的結束標記 `'@` 必須在行首**：我把它寫在行尾，於是那個 here-string 沒有結束，
+  把後面整段（包括我自己傳的參數）都吞了進去，`Swap` 的標籤印出一個莫名其妙的值。字串比對的編輯
+  在寫檔**之前**就該驗「舊字串真的不見了」。
+- **`--codec-probe` 要帶檔案路徑，常駐程式要 `--tray-exit-after` 才會自己結束**：我自己跑的時候漏了，
+  兩次都掛到逾時。套件裡的既有叫法就是範本，照抄就好。
+
+### 還沒做的
+
+- **規格修訂**（§3.2 把 PDF 由 M2 移入第一層輸出、§6.2 的輸出矩陣加一列）：程式面已經改了（`MvpOutputs`），
+  但**規格文件還沒改**——目前規格與程式的宣告不一致，這是下一刀的第一件事。
+- **其他區段的回歸**（m1a／m1b／m1d）：本刀動到 `Convert()` 這條五個既有格式共用的路徑，
+  目前只跑了 S9；其餘區段還沒跑。
+- B（多張合成一份多頁 PDF）：使用者明確延後。

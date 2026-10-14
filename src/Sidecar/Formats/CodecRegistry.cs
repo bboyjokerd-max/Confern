@@ -158,6 +158,17 @@ internal sealed class CodecRegistry
     /// </summary>
     private static readonly string[] MvpOutputs = { "PNG", "JPG", "WEBP", "BMP", "TIF", "PDF" };
 
+    /// <summary>
+    /// 規格 §6.2 宣告的輸出矩陣——**對外的唯一查詢點**（2026-10-14 從 `Program.cs` 移除複本）。
+    ///
+    /// 為什麼要有這個屬性（這是一次**真的不一致**的量測，不是潔癖）：`--codecs` 的自我檢查
+    /// 原本自己抄了一份 `string[] declared = { "PNG", "JPG", "WEBP", "BMP", "TIF" }`，
+    /// 於是 PDF 一加進宣告矩陣，那份複本立刻成為**唯一說謊的地方**——
+    /// `FAIL  offered [PNG,JPG,BMP,TIF,PDF] is a subset of the declared MVP matrix`，
+    /// 而真正的宣告矩陣早就有 PDF 了。格式知識只有一個擁有者：要問就問這裡。
+    /// </summary>
+    internal static IReadOnlyList<string> DeclaredOutputs => MvpOutputs;
+
     private readonly List<CodecCapability> _capabilities = new();
 
     public CodecRegistry()

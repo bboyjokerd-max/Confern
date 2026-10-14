@@ -7185,7 +7185,11 @@ internal static class App
         //   ③ declared = offered ∪ unavailable（宣告的每一個都必須有交代，不能默默消失）
         IReadOnlyList<string> encodable = registry.EncodableFormats;
         IReadOnlyList<string> offered = registry.OfferedOutputs;
-        string[] declared = { "PNG", "JPG", "WEBP", "BMP", "TIF" };
+        // 2026-10-14: 這一行原本是「宣告矩陣」的**第二份複本**，而它是唯一會說謊的那一份——
+        // PDF 加入宣告矩陣之後，這裡仍然只列五個，於是這一條自我檢查 FAIL，
+        // 而 offered 其實完全正確（見 CodecRegistry.DeclaredOutputs 的說明）。
+        // 修法是問唯一擁有者，而不是把 PDF 也抄進來（抄進來只是把第二份複本養大）。
+        IReadOnlyList<string> declared = CodecRegistry.DeclaredOutputs;
         Report($"offered [{string.Join(",", offered)}] is a subset of the declared MVP matrix", offered.All(declared.Contains));
         Report($"offered [{string.Join(",", offered)}] is a subset of what was measured", offered.All(encodable.Contains));
         Report($"every declared output is either offered or reported unavailable " +

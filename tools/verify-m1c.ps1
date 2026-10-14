@@ -148,8 +148,15 @@ function Invoke-S9 {
   # The five built-in WIC encoders are exercised for real: encode a bitmap, then
   # decode the bytes we just produced. On any Windows these must work; a failure
   # here is a finding about the machine, not about the instrument.
-  Check "S9.3 all five built-in encoders round-trip (encode+decode)" `
-    ((Count-Log $lines 'PASS  codec (PNG|JPG|BMP|TIF|GIF) encode\+decode round-trip') -eq 5)
+  #
+  # 2026-10-14: a SIXTH encoder joined them -- PDF (image -> one page). It is NOT a WIC
+  # encoder (PdfFromImage produces it, not CreateEncoder), so its round-trip is probed the
+  # product's own way: write a real PDF, then read it back through PdfReader and check the
+  # page count and the page size. Both halves are asserted separately, so "the five still
+  # work" and "the sixth really works" cannot hide behind each other.
+  Check "S9.3 all six encoders round-trip (five WIC encode+decode, PDF write+read-back)" `
+    ((Count-Log $lines 'PASS  codec (PNG|JPG|BMP|TIF|GIF) encode\+decode round-trip') -eq 5 `
+      -and (Count-Log $lines 'codec PDF: decode=no encode=yes .* encode is probed: a 2x2 image round-tripped as a \d+B one-page PDF of \d+\.\d+x\d+\.\d+ pt \(written, then read back through PdfReader\)') -eq 1)
 
   # Three invariants, each of which can fail:
   #   offered subset of the declared MVP matrix  (extra = promising what the spec never declared)
