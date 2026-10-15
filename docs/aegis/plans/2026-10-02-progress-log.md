@@ -2302,3 +2302,79 @@ verify-m1c.ps1 -Section S9：checks=20 pass=20 fail=0
 所以這一刀的核心是**擴充那個契約**（`PayloadVerdict` 加 `FileCount`、`AppliesTo` 改收判決），
 不是多寫一個 PDF 產生器。另外：品質只有設定頁一個入口（輪盤上沒有旋鈕，2026-10-06 的裁定）、
 `pageSize` 是**新欄位** ⇒ `WorkerProtocol.Version` 3 → 4。
+
+## 2026-10-15　切片：多張圖 → 一份多頁 PDF（`merge-pdf` 開始吃圖片）
+
+計畫：`docs/aegis/plans/2026-10-14-merge-images-to-pdf.md`。使用者原話：「如果一次選多個圖檔，
+可以新增一個『合併成PDF』的功能嗎?」；入口裁定＝**擴大既有的「合併 PDF」**；頁序＝**用既有的排序視窗**；
+頁面大小＝**「可以提供選擇嗎?」**；先做這個。
+
+### 已完成並提交（每一步都有當場量到的數字）
+
+| 提交 | 內容 |
+|---|---|
+| `a1c6a0c` | **T1+T2**　判決帶上檔案數與 `CanConvert`；`AppliesTo` 改收判決 |
+| `b080b85` | **T5**　`PdfFromImage.WriteMany`（一批畫格 → 一份多頁）＋引擎的圖片分支 |
+| `0543998` | **T4**　協議 `pageSize` 欄位，版本 3 → 4 |
+
+**T1+T2 的核心不是「多寫一個產生器」，而是一個契約缺口**：`ToolDescriptor.AppliesTo` 的簽名原本
+只收 `string? sourceFormat` ⇒ **拿不到「幾個檔」**，而「圖片合併」的必要條件正是 **≥2 張**。
+`PayloadVerdict` 因此加上 `FileCount` 與 `CanConvert`——後者是把 `Classify` 裡**本來就存在**的
+兩種 `Ready` 顯性化（判定①「可以轉成圖片」／判定②「不能轉但這個格式有工具適用」，例如 PDF）。
+判定知識仍然只有 `Classify` 一處，**沒有**新增任何格式清單。
+
+**實測（`--tools-list --wheel-payload`，走真正的 `FormatCatalog.Classify`）**：
+
+```
+1 個 JPG  -> count=6 tools=[rotate90,strip-metadata,compress,crop,read-qr,remove-bg]
+2 個 JPG  -> count=7 tools=[...,merge-pdf,...]
+2 份 PDF  -> count=7 tools=[...,merge-pdf,...]      ← 既有行為不變
+```
+
+**實測（三個真實檔案，走真正的 worker 路徑；順序＝頁序）**：
+
+```
+order=[AAA-first.png(512x384),BBB-second.png(2400x2400),CCC-third.png(512x512)]
+
+original  page=1 384.1x288    page=2 1800.3x1800.3  page=3 384.1x384.1
+first     page=1 384.1x288    page=2 384.1x288      page=3 384.1x288
+a4        page=1 595.3x841.9  page=2 595.3x841.9    page=3 595.3x841.9
+```
+
+`a4` 的 `595.3x841.9` 與 `210*72/25.4 × 297*72/25.4 = 595.28 × 841.89` 吻合；
+三張來源的 sha256 全部逐位元不變；協議日誌可見 `pageSize=first` / `pageSize=a4`。
+三次建置都是 **0 警告 0 錯誤**。
+
+### 這一刀當場抓到的三個真缺陷（都不是推論，是日誌說的）
+
+1. **產物叫 `AAA-first..pdf`（兩個點）**：`NamingPolicy.ResolveOutputPath` 要的是**不含點**的
+   `"pdf"`（單張那條路傳的就是 `CodecRegistry` 給的 `"pdf"`）。那個名字**還是開得起來**，
+   所以它只會在使用者看到檔名時才被發現。
+2. **`Program.cs:2806` 的輸出檔診斷拿「來源的副檔名」去找產物**。它對 `crop`（同格式進出）
+   與「PDF 合併 PDF」（`.pdf` 對 `.pdf`）**剛好都對**，圖片合併是第一次輸出格式與來源不同，
+   於是日誌吐出一句自相矛盾的「成功，但那個資料夾裡沒有新檔案」。**診斷說謊比沒有診斷更糟。**
+3. **`& $exe …` 會靜默地什麼都不做**（`$LASTEXITCODE` 甚至是空的、沒有輸出、沒有日誌檔）：
+   診斷一律要用 `Start-Process -PassThru -Wait -RedirectStandardOutput`。浪費了三輪才確認。
+
+### 還沒做的（照實寫）
+
+- **T3：排序視窗上的「頁面大小」三選一** ← **這是使用者明確要的那一項**，還沒做。
+  三種模式**已經在引擎與協議裡並且實測過**，但**畫面上還選不到** ⇒ 目前只有預設的
+  `original` 與一條診斷接縫 `--merge-page-size`。
+  已知的實作錨點：`MergeWindow.cs` 的 5 列版面（標題／清單／分頁／提示／按鈕，按鈕在第 4 列）、
+  `BuildFooter`、`Confirm()`；`MergeUi.Open` 的 5 個呼叫點（1 正式＋4 自測）；
+  `PendingMerges` 目前是 `ConcurrentQueue<string[]>`。`StartMerge` 的宣告**不在 `src\Sidecar` 裡**
+  （已用兩種 regex 找過都沒有），動手前要先找到它。
+- **T6：套件斷言 ＋ 假故障演練**（例如把 `a4` 的期望值改壞 ⇒ 必須紅）。
+- **上一刀（圖片→單頁 PDF）留下的規格不一致**：§3.2 仍把 PDF 列在 M2、§6.2 的輸出矩陣還沒加 PDF。
+- **`verify-m1b.ps1` 的舊帳 `S7.29`**：它拿 `C:\Temp\doc.pdf` 當「不支援」的樣本，而 2026-10-07
+  的合併 PDF 那一刀已經刻意把 PDF 改成 `Ready`（`status=Ready source=PDF tools=7`）。
+  它自己的意圖（「單一檔 ≠ 混合選取」）是對的，換一個真正不支援的樣本（例如 `.txt`）就好。
+
+### 使用者現在可以做的事
+
+開 `Confern.exe`，一次拖 **兩張以上的圖**（例如同一批掃描或截圖）→ 輪盤按 **Shift** 進工具層 →
+會看到 **MERGE PDF** → 按下去開排序視窗 → 排好頁序 → 確認 → 來源旁邊多一份**多頁 PDF**，
+**一頁一張**、**頁面大小＝每張圖自己的實際尺寸**、**來源檔完全沒動**。
+單張圖**不會**出現那一顆扇形（這是刻意的：按下去只會失敗的扇形不可以存在）。
+頁面大小的選擇目前只有預設值，介面（T3）還沒做。
