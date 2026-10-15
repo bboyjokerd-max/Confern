@@ -52,7 +52,7 @@ internal static class MergeUi
     ///   ⚠ <b>它是在 WPF UI 執行緒上被叫的</b>，而且**不是**主訊息迴圈執行緒：起 worker／碰視覺層
     ///   請自己排回主執行緒（正式路徑就是這樣做的：排進佇列，由既有的週期回呼抽乾）。取消時**不會**被呼叫。</param>
     /// <param name="log">日誌（可以不給）。開不起來時只記 log、什麼都不做（不回饋、不丟例外）。</param>
-    public static void Open(string[] paths, Action<string[]> onConfirmed, Action<string>? log)
+    public static void Open(string[] paths, Action<string[], string?> onConfirmed, Action<string>? log)
     {
         try
         {
@@ -239,7 +239,8 @@ internal static class MergeUi
                 {
                     // ⚠ 這裡仍然是 **UI 執行緒**（Closed 是在它上面發生的）。回呼的實作必須自己排回
                     //   主執行緒，理由見 Open 的說明。
-                    _confirmed?.Invoke(order);
+                    // 頁面大小跟著順序一起交出去（null＝這一批不是圖片，或使用者沒選）。
+                    _confirmed?.Invoke(order, window.PageSize);
                 }
             }
         }
@@ -260,7 +261,7 @@ internal static class MergeUi
     /// <c>Closed</c>（見 <see cref="OnMergeWindowClosed"/>），而那個事件處理常式是靜態的。
     /// 生命週期與 <see cref="_window"/> 完全相同：開窗時寫、關窗時清。
     /// </summary>
-    private static volatile Action<string[]>? _confirmed;
+    private static volatile Action<string[], string?>? _confirmed;
 
     // =====================================================================================
     // 自測接縫（驗收證據用；正式路徑不經過這裡）

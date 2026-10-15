@@ -106,6 +106,16 @@ internal sealed class MergeWindow : Window
     /// <summary>使用者按下「確認」時的順序。null ＝ 還沒確認（取消之後也是 null）。</summary>
     public string[]? Order { get; private set; }
 
+    /// <summary>
+    /// 使用者選的**頁面大小**模式 id：`original`／`first`／`a4`。
+    /// <c>null</c> ＝ 還沒確認，**或者**這一批不是圖片——PDF 合併是整頁物件搬移，
+    /// 頁面大小對它沒有任何意義，所以那一種批次連選項都不顯示（見 BuildPageSize）。
+    /// </summary>
+    public string? PageSize { get; private set; }
+
+    /// <summary>三顆單選鈕（只有圖片批次會被加進畫面）。順序＝畫面順序。</summary>
+    private readonly List<System.Windows.Controls.RadioButton> _pageSizeButtons = new();
+
     /// <summary>確認鈕／取消鈕（自測要按的是**真的按鈕**，不是另一條內部路徑）。</summary>
     public Button OkButton { get; }
     public Button CancelButton { get; }
@@ -132,6 +142,7 @@ internal sealed class MergeWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 清單
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 分頁列
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 提示
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 頁面大小
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 按鈕
         Content = root;
 
@@ -149,6 +160,7 @@ internal sealed class MergeWindow : Window
         OkButton.Click += (_, _) => Confirm();
         CancelButton.Click += (_, _) => CancelWithLog("cancel button");
 
+        BuildPageSize(root);
         BuildFooter(root);
 
         Sanitize();
@@ -255,6 +267,81 @@ internal sealed class MergeWindow : Window
         root.Children.Add(_noticeText);
     }
 
+    /// <summary>
+    /// 「頁面大小」三選一（使用者 2026-10-14：「可以提供選擇嗎?」）。
+    ///
+    /// ⚠ **只有圖片批次才顯示**：PDF 合併是把整頁物件原樣搬過去，頁面大小由來源決定，
+    /// 給 PDF 一個「頁面大小」的選項會是一個按了沒有任何效果的開關——那與「畫面上有的
+    /// 東西必須是真的」相衝。判定用 <see cref="FormatCatalog.Classify"/>（唯一的擁有者），
+    /// 這一支**不得**自己列一份「哪些格式算圖片」的清單。
+    /// </summary>
+    private void BuildPageSize(Grid root)
+    {
+        try
+        {
+            PayloadVerdict kind = new FormatCatalog(new CodecRegistry()).Classify(_original);
+            if (!(kind.Status == PayloadStatus.Ready && kind.CanConvert))
+            {
+                _log?.Invoke("merge ui: the page-size choice is not shown (these are not images, " +
+                             "so their page size is the source's own and there is nothing to choose)");
+                return;
+            }
+
+            var row = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+            var label = new TextBlock
+            {
+                Text = "頁面大小",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            row.Children.Add(label);
+
+            var choices = new (string Id, string Text)[]
+            {
+                ("original", "各自原始尺寸"),
+                ("first", "統一成第一張"),
+                ("a4", "A4 置中留邊")
+            };
+            foreach ((string id, string text) in choices)
+            {
+                var button = new System.Windows.Controls.RadioButton
+                {
+                    Content = text,
+                    GroupName = "mergePageSize",
+                    IsChecked = id == "original",   // 預設＝各自原始尺寸（與單張路徑一致）
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 14, 0),
+                    Tag = id
+                };
+                // ⚠ 不用 SettingsUi.StyleKit.PrimaryButton／SecondaryButton：那兩支吃的是 Button，
+                //    RadioButton 傳不進去。單選鈕自己上色就好（它本來就有圓鈕，不需要按鈕外框）。
+                button.Foreground = SettingsUi.StyleKit.TextMain;
+                button.FontFamily = SettingsUi.StyleKit.Font;
+                _pageSizeButtons.Add(button);
+                row.Children.Add(button);
+            }
+
+            Grid.SetRow(row, 4);
+            root.Children.Add(row);
+            _log?.Invoke("merge ui: the page-size choice is shown (3 modes; default original)");
+        }
+        catch (Exception ex)
+        {
+            // 版面少一列不是災難，讓它壞掉才是：這裡壞掉只記 log，視窗照樣能排序與確認。
+            _log?.Invoke($"merge ui: BuildPageSize threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>目前選到的模式 id。**畫面是唯一權威**（與 _order 同一條規矩）。</summary>
+    private string SelectedPageSize()
+    {
+        foreach (System.Windows.Controls.RadioButton button in _pageSizeButtons)
+        {
+            if (button.IsChecked == true && button.Tag is string id) return id;
+        }
+        return "original";
+    }
+
     private void BuildFooter(Grid root)
     {
         var footer = new StackPanel
@@ -264,7 +351,9 @@ internal sealed class MergeWindow : Window
         };
         footer.Children.Add(OkButton);
         footer.Children.Add(CancelButton);
-        Grid.SetRow(footer, 4);
+        // ⚠ 5 而不是 4：上面多了「頁面大小」那一列（見建構函式的列定義）。這一行的數字與那裡
+        //    是一對的——改了一邊沒改另一邊的症狀是**按鈕疊在提示文字上**，而且不會有任何錯誤。
+        Grid.SetRow(footer, 5);
         root.Children.Add(footer);
     }
 
@@ -590,6 +679,9 @@ internal sealed class MergeWindow : Window
                 return;
             }
             Order = _order.ToArray();
+            // ⚠ 與 Order 同一個地方、同一刻決定：兩者都是「使用者對這一次合併的決定」，
+            //    分兩次讀會產生「順序是這一版、頁面大小是上一版」的錯配。
+            PageSize = SelectedPageSize();
             _log?.Invoke($"merge ui: confirmed {Order.Length} file(s) in this order " +
                          $"=[{string.Join(",", Order.Select(Path.GetFileName))}]");
             Close();

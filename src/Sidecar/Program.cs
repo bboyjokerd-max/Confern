@@ -3655,13 +3655,14 @@ internal static class App
                           $"{paths.Length} file(s) (the commit will happen when the user confirms)");
             guard.OnUserResolved("enter");      // 收起輪盤
             string[] batch = paths;
-            MergeUi.Open(batch, ordered =>
+            MergeUi.Open(batch, (ordered, pageSize) =>
             {
                 // ⚠ 這裡是 **WPF UI 執行緒**。起 worker 會碰視覺層與進度藥丸（都屬於主執行緒），
                 // 所以只排隊，由既有的週期回呼（見 DrainPendingMerges）在主執行緒上接手。
-                PendingMerges.Enqueue(ordered);
+                PendingMerges.Enqueue((ordered, pageSize));
                 evidence.Line($"merge ui: the user confirmed the order " +
-                              $"[{string.Join(",", ordered.Select(Path.GetFileName))}] -> queued for the " +
+                              $"[{string.Join(",", ordered.Select(Path.GetFileName))}] pageSize={pageSize ?? "-"} " +
+                              "-> queued for the " +
                               "main thread (the worker starts there)");
             }, evidence.Line);
             PendingPaths = Array.Empty<string>();
@@ -3824,7 +3825,8 @@ internal static class App
     /// 所以這裡**不可以**排序、去重或做任何「整理」——那會讓視窗上顯示的順序與輸出不一致。
     /// </summary>
     private static bool StartMerge(Evidence evidence, ConversionRunner runner, string[] ordered,
-                                   int centerX, int centerY, Settings settings)
+                                   int centerX, int centerY, Settings settings,
+                                   string? pageSize = null)
     {
         if (ordered.Length == 0)
         {
@@ -3837,8 +3839,9 @@ internal static class App
                       $"outputDir={outputDir ?? "(source folder)"}");
         // targetFormat 給空字串、quality 固定 100：與其他工具同一條規矩（工具自己決定輸出格式；
         // 合併是**整頁物件搬移**，不重新編碼，所以品質這個參數在這一條路上不參與——見 ConversionEngine.MergePdf）。
+        evidence.Line($"merge: pageSize={pageSize ?? "(none: PDFs are copied page for page)"}");
         runner.Start(ordered, "", 100, centerX, centerY,
-                     toolOp: WorkerProtocol.OpMergePdf, outputDir: outputDir);
+                     toolOp: WorkerProtocol.OpMergePdf, outputDir: outputDir, pageSize: pageSize);
         return true;
     }
 
@@ -3849,8 +3852,9 @@ internal static class App
     /// </summary>
     private static void DrainPendingMerges(Evidence evidence, ConversionRunner? runner)
     {
-        while (PendingMerges.TryDequeue(out string[]? ordered))
+        while (PendingMerges.TryDequeue(out (string[] Order, string? PageSize) pending))
         {
+            string[] ordered = pending.Order;
             if (runner == null)
             {
                 evidence.Line("merge: confirmed, but this mode has no conversion runner (diagnostic path)");
@@ -3859,7 +3863,8 @@ internal static class App
             // 進度藥丸畫在**游標所在處**：使用者剛按下的就是排序視窗的確認鈕，結果出現在同一個
             // 位置最不需要東張西望（與裁切同一條理由）。
             (double anchorX, double anchorY) = CursorAnchor();
-            StartMerge(evidence, runner, ordered, (int)anchorX, (int)anchorY, _settings ?? new Settings());
+            StartMerge(evidence, runner, ordered, (int)anchorX, (int)anchorY, _settings ?? new Settings(),
+                       pending.PageSize);
         }
     }
 
@@ -3989,7 +3994,9 @@ internal static class App
     /// ⚠ 這一條佇列是「取消不產出」那條契約的關鍵：使用者按取消時**沒有任何東西會被排進來**，
     ///   所以主執行緒永遠不會收到一槍，輸出目錄也就不可能有新檔（見 CommitWheel 的說明）。
     /// </summary>
-    private static readonly ConcurrentQueue<string[]> PendingMerges = new();
+    // 佇列裡帶的是「使用者對這一次合併的**兩個**決定」：順序與頁面大小。
+    // 它們必須一起旅行——分開存會產生「順序是這一版、頁面大小是上一版」的錯配。
+    private static readonly ConcurrentQueue<(string[] Order, string? PageSize)> PendingMerges = new();
 
     /// <summary>
     /// 開機自動啟動的唯一擁有者（待辦 4）。常駐路徑建立它，診斷路徑建立的是**別的**子機碼
@@ -5371,7 +5378,7 @@ internal static class App
         // ---------------------------------------------------------------- `--merge-ui-dump` 那一條
         if (dumpOnly)
         {
-            MergeUi.Open(batch, _ => { }, lines.Enqueue);
+            MergeUi.Open(batch, (_, _) => { }, lines.Enqueue);
             bool up = WaitFor(() => MergeUi.IsOpen, 8000);
             if (!up)
             {
@@ -5391,7 +5398,7 @@ internal static class App
         // ① 開啟
         string[]? confirmed = null;
         int confirmCalls = 0;
-        MergeUi.Open(batch, order => { confirmed = order; confirmCalls++; }, lines.Enqueue);
+        MergeUi.Open(batch, (order, _) => { confirmed = order; confirmCalls++; }, lines.Enqueue);
         bool opened = WaitFor(() => MergeUi.IsOpen, 8000);
         bool windowPresent = false;
         string presentDetail = "(never asked)";
@@ -5422,7 +5429,7 @@ internal static class App
 
         // ③ 單一實例：開著的時候第二次 Open 不可以再開一個視窗，也不可以換掉回呼。
         int callsBeforeSecondOpen = confirmCalls;
-        MergeUi.Open(batch, _ => { confirmCalls += 100; }, lines.Enqueue);
+        MergeUi.Open(batch, (_, _) => { confirmCalls += 100; }, lines.Enqueue);
         bool stillOpen = MergeUi.IsOpen;
         bool singleInstance = stillOpen && confirmCalls == callsBeforeSecondOpen;
         evidence.Line($"merge ui selftest: a second open while the window is up was " +
@@ -5537,7 +5544,7 @@ internal static class App
 
         // ⑦ 關掉之後可以再開，而且**取消不帶回任何順序**
         confirmed = null;
-        MergeUi.Open(batch, order => confirmed = order, lines.Enqueue);
+        MergeUi.Open(batch, (order, _) => confirmed = order, lines.Enqueue);
         bool reopened = WaitFor(() => MergeUi.IsOpen, 8000);
         bool reopenedPresent = false;
         string reopenDetail = "(never asked)";
