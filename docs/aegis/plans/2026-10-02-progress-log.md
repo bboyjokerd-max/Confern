@@ -2473,3 +2473,33 @@ a4        page=1 595.3x841.9  page=2 595.3x841.9    page=3 595.3x841.9
 
 順帶更正一個誤解：`verify-m1b.ps1` 不只吃 `-Exe`，還要 `-Section`（預設**只跑 S6**）——
 我第一次沒給 `-Section S7` 就宣稱「S7.29 已修好」，那是錯的：它根本沒被執行。
+### 2026-10-15（續）　下一刀：拖一個資料夾 ⇒ 展開成裡面的檔（計畫已寫，尚未動工）
+
+使用者 2026-10-15 選定方向（我列的四條裡他挑了這條）。計畫：
+`docs/aegis/plans/2026-10-15-folder-drop.md`。他同時明說 **M2 的五個家族「不是一定要做」**。
+
+**開工前先量了地基（實測）**：
+
+```
+--tools-list --wheel-payload <一個裝了 3 張圖 + 2 份 PDF 的資料夾>
+tool list: count=0 tools=[] (source=UNKNOWN, status=Unsupported, notice=不支援的格式)
+tool list: FAILED the tool layer would be empty (the wheel would show nothing)
+```
+
+⇒ 產品**完全沒有**目錄概念（全庫只有 `QrDiagnostic.cs:378`、`NamingPolicy.cs:44` 用到
+`Directory.Exists`，都跟 payload 無關）。
+
+**這一刀真正的樣子**：不是新的合併功能，而是**在 `FormatCatalog.Classify` 之前**把資料夾換成
+裡面的檔案清單 ⇒ 下游**一行都不用改**。這正是上一刀那個契約修正的回報——`AppliesTo` 拿得到
+檔案數之後，「一個裝著 20 張圖的資料夾」會**自動**讓 MERGE PDF 出現，不必為它加新規則。
+
+**計畫裡已經定案的規則**：遞迴（深度上限 8、檔案數上限 1000，**超限要明說**）、
+只收這個產品認得的格式（用 `FormatCatalog` 判定，不自己列清單）、
+名稱**自然排序**（`scan2` 要在 `scan10` 前面——字典序的錯會直接印在成品頁序上）、
+跳過隱藏／系統檔、資料夾與檔案混合拖入一起判定、輪盤通知要說出
+「讀到 N 個檔（跳過 M 個）」。
+
+**一起要修的真缺陷（是這個功能的前提，不是加分項）**：`MergeImagesToPdf` 現在**先把每一張
+都解成 `BitmapSource` 收進一個 list**，200 張 12MP 掃描 ≈ 10 GB 常駐記憶體；而「拖一個資料夾」
+的主要情境正是這種批次。改成**逐頁串流**（解碼→寫頁→釋放），驗收是量**峰值工作集**
+不隨張數線性成長——那是個可量的數字。
