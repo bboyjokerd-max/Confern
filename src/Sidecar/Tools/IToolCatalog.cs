@@ -136,12 +136,21 @@ internal sealed record ToolDescriptor(string Id, string Label, string Descriptio
     /// 「畫面上有的東西必須是真的」在這裡的兌現方式是**選了它會說真話**，不是把它藏起來。
     /// </para>
     /// </summary>
-    public bool AppliesTo(string? sourceFormat) =>
-        Id != ToolCatalog.MergePdfId
-        // `merge-pdf` **只接受 PDF**（使用者 2026-10-07 裁定的產品語意）：它把多個 PDF 依序
-        // 合併成一個，對一張 JPEG 沒有任何可做的事。放行它是**錯的**，而且錯得看得出來：
-        // 一張 JPG 會看到一顆按下去只會回「無法合併這個 PDF」的扇形。
-        || string.Equals(sourceFormat, "PDF", StringComparison.OrdinalIgnoreCase);
+    public bool AppliesTo(PayloadVerdict verdict)
+    {
+        // 其餘六顆工具對「本產品支援的圖片」都成立。
+        if (Id != ToolCatalog.MergePdfId) return true;
+
+        // ① 整批都是 PDF ⇒ 適用（使用者 2026-10-07 裁定的產品語意）：整頁物件搬移，不重編碼。
+        if (string.Equals(verdict.SourceFormat, "PDF", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // ② **圖片 ⇒ 至少兩張才適用**（2026-10-14 追加，使用者裁定「一次選多個圖檔」）。
+        //    一張圖合成一份 PDF 沒有意義（而那件事已經有第一層的「圖片 → PDF」那條路），
+        //    所以放行它就會出現一顆按下去只會失敗的扇形——正是這一段註解一開始要擋的東西。
+        //    ⚠ `CanConvert` 問的是「這一批是不是可轉換類別（圖片）」，它由 `Classify` 填，
+        //    判定知識仍然只有那一個地方；這裡**不得**自己列一份格式清單。
+        return verdict.CanConvert && verdict.FileCount >= 2;
+    }
 }
 
 /// <summary>

@@ -96,12 +96,12 @@ internal sealed class FormatCatalog : IFormatCatalog
 
             if (category == null) { category = cat; firstFormat = format; }
             else if (!string.Equals(category, cat, StringComparison.Ordinal))
-                return new PayloadVerdict(PayloadStatus.Mixed, null);
+                return new PayloadVerdict(PayloadStatus.Mixed, null, paths.Count, false);
         }
 
         // 判定 ①：可以轉成圖片 ⇒ Ready，而且第一層格式扇形會出現。
         if (ConvertibleCategories.Contains(category!, StringComparer.Ordinal))
-            return new PayloadVerdict(PayloadStatus.Ready, firstFormat);
+            return new PayloadVerdict(PayloadStatus.Ready, firstFormat, paths.Count, CanConvert: true);
 
         // 判定 ②：不能轉成圖片，但這個格式**有工具適用** ⇒ 也 Ready（`SourceFormat` 必須填，
         // 否則 `ToolsFor` 無從判斷適用性），而且**不給第一層格式扇形**——呼叫端看到
@@ -111,9 +111,9 @@ internal sealed class FormatCatalog : IFormatCatalog
         if (!string.IsNullOrEmpty(firstFormat)
             && ToolFormats.Contains(firstFormat, StringComparer.OrdinalIgnoreCase)
             && HasApplicableTool(firstFormat))
-            return new PayloadVerdict(PayloadStatus.Ready, firstFormat);
+            return new PayloadVerdict(PayloadStatus.Ready, firstFormat, paths.Count, CanConvert: false);
 
-        return new PayloadVerdict(PayloadStatus.Unsupported, null);
+        return new PayloadVerdict(PayloadStatus.Unsupported, null, paths.Count, false);
     }
 
     /// <summary>
@@ -121,7 +121,10 @@ internal sealed class FormatCatalog : IFormatCatalog
     /// （`ToolsFor` → `ToolDescriptor.AppliesTo`），不是這裡的一張表。
     /// </summary>
     private static bool HasApplicableTool(string format) =>
-        new ToolCatalog().ToolsFor(new PayloadVerdict(PayloadStatus.Ready, format)).Count > 0;
+                // FileCount 填 1：這一問只發生在判定②（`ToolFormats`＝PDF），而 merge-pdf 對 PDF
+        // 的分支只看格式、不看張數，所以這個數字在這裡不影響答案；但它不可以留 0 假裝
+        // 「沒有檔案」——那會讓「≥2 張」那條新規則在未來被誤用到這一條路上。
+        new ToolCatalog().ToolsFor(new PayloadVerdict(PayloadStatus.Ready, format, 1, false)).Count > 0;
 
     /// <summary>不認得的副檔名 → 自己的類別鍵（小寫、不含點）。</summary>
     private static string UnknownKey(string path)

@@ -212,7 +212,7 @@ internal sealed class ToolCatalog : IToolCatalog
         //
         // `merge-pdf` 是第一個有細條件的工具：它**只接受 PDF**（見 AppliesTo 的說明）。
         // 一張 JPG 因此看不到它，而這正是「畫面上有的東西必須是真的」。
-        return Tools.Where(t => t.AppliesTo(verdict.SourceFormat)).ToList();
+        return Tools.Where(t => t.AppliesTo(verdict)).ToList();
     }
 
     /// <summary>`merge-pdf` 的穩定識別碼（進日誌與 worker 協議，**不得就地改字**）。</summary>

@@ -2100,7 +2100,10 @@ internal static class App
         // 扇區清單同樣來自唯一權威（ToolCatalog），這裡不硬寫任何工具名稱或圖示。
         // 示範用的酬載狀態一律當成 Ready——這是「假設檔案可以轉」的那個前提，
         // 與第一層示範同一套假設（真實路徑上這一格由 PayloadVerdict 決定）。
-        var tools = new ToolCatalog().ToolsFor(new PayloadVerdict(PayloadStatus.Ready, opt.WheelSource));
+        var tools = new ToolCatalog().ToolsFor(
+            // 示範路徑沒有真的檔案：張數填 1（單張）——於是「合併 PDF」不會出現在示範輪盤上，
+            // 與真實的單檔情境一致。要看圖片合併請用 --wheel-payload。
+            new PayloadVerdict(PayloadStatus.Ready, opt.WheelSource, 1, CanConvert: true));
         bool toolsMode = opt.WheelTools && tools.Count > 0;
         if (opt.WheelTools && !toolsMode)
             evidence.Line("--wheel-tools: catalog returned no tool for a Ready payload -> formats only");
@@ -4298,7 +4301,8 @@ internal static class App
         else
         {
             verdict = new PayloadVerdict(PayloadStatus.Ready,
-                                         string.IsNullOrEmpty(opt.WheelSource) ? "png" : opt.WheelSource);
+                                         string.IsNullOrEmpty(opt.WheelSource) ? "png" : opt.WheelSource,
+                                         1, CanConvert: true);
             how = "catalog query for --wheel-source (no payload: NOT the runtime path)";
         }
         IReadOnlyList<ToolDescriptor> tools = new ToolCatalog().ToolsFor(verdict);
