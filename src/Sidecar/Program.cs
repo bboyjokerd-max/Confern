@@ -2803,7 +2803,13 @@ internal static class App
         string full = Path.GetFullPath(sources[0]);
         string folder = Path.GetDirectoryName(full) ?? ".";
         string stem = Path.GetFileNameWithoutExtension(full);
-        string extension = Path.GetExtension(full);
+        // ⚠ **輸出的副檔名是 `.pdf`，不是來源的副檔名**（2026-10-14）。
+        // 原本這裡寫 `Path.GetExtension(full)`（來源的副檔名），而它在兩種情況下剛好都對：
+        // crop 是同格式進出，而「PDF 合併 PDF」的來源本來就是 `.pdf`。
+        // 圖片合併是**第一次**輸出格式與來源不同（`.png` 進、`.pdf` 出），於是這一問找不到
+        // 產物，日誌上就出現一句自相矛盾的「成功，但那個資料夾裡沒有新檔案」——
+        // 而檔案其實好好地在旁邊。診斷說謊比沒有診斷更糟。
+        string extension = ".pdf";
 
         var sourceSet = new HashSet<string>(
             sources.Select(s => Path.GetFullPath(s)), StringComparer.OrdinalIgnoreCase);

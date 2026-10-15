@@ -1380,7 +1380,8 @@ internal sealed class ConversionEngine
     /// **依序**要合併的 PDF。順序＝頁序（見方法說明）。空清單或 null ＝ 沒有東西可以合併。
     /// </param>
     public ConversionResult MergePdf(IReadOnlyList<string>? sourcePaths, TempJournal? journal = null,
-                                     string? targetDirectory = null)
+                                     string? targetDirectory = null,
+                                     PdfPageSize pageSize = PdfPageSize.Original)
     {
         string[] paths = sourcePaths?.ToArray() ?? Array.Empty<string>();
         if (paths.Length == 0)
@@ -1394,6 +1395,27 @@ internal sealed class ConversionEngine
         }
 
         string first = paths[0];
+
+        // ⓪ **這一批是什麼？**（2026-10-14：這一顆工具開始同時吃 PDF 與圖片）
+        //
+        // 判定知識**不在這裡**：`FormatCatalog.Classify` 是唯一擁有者，而它剛好回三種情形——
+        //   Ready + CanConvert=false + PDF ⇒ 整批 PDF（走下面的整頁物件搬移，一行都沒變）
+        //   Ready + CanConvert=true        ⇒ 整批圖片（走新的排版路徑）
+        //   Mixed                          ⇒ 圖片與 PDF 混在一起，具名拒絕
+        // ⚠ 為什麼混到必須拒絕，而不是「各做各的」：一份輸出不可能同時是「整頁物件複製」（PDF）
+        //    與「重新排版」（圖片）。默默挑一邊做，就是安靜地做錯另一半——而使用者拿到的那個檔
+        //    看起來完全正常。這一條與第一層的混合選取拒絕（規格 §4.3）是同一個道理。
+        PayloadVerdict kind = new FormatCatalog(_codecs).Classify(paths);
+        if (kind.Status == PayloadStatus.Mixed)
+        {
+            _log("merge-pdf: refusing the whole batch: it mixes images with PDFs (one output cannot be " +
+                 "both a page-object copy and a re-layout); fail-fast -> NO file is written");
+            return MergeFail(first, 1, ConversionError.Unsupported,
+                "the batch mixes images with PDFs; merging PDFs copies whole pages and merging images " +
+                "re-lays them out, so one output file cannot honestly be both");
+        }
+        if (kind.Status == PayloadStatus.Ready && kind.CanConvert)
+            return MergeImagesToPdf(paths, journal, targetDirectory, pageSize);
 
         // ① 先逐檔做**便宜的**檢查（存在嗎、是不是本產品認得的格式）：不必開檔就能說出原因。
         //    這一步刻意與其他工具的第一段同形（它們也是先看 AtomicWriter.Exists 與格式表）。
@@ -1553,6 +1575,91 @@ internal sealed class ConversionEngine
     }
 
     /// <summary>
+    /// <summary>
+    /// 一批**圖片** → **一份多頁** PDF（一頁一張，順序＝輸入順序）。
+    ///
+    /// 使用者 2026-10-14（原話）：「如果一次選多個圖檔，可以新增一個『合併成PDF』的功能嗎?」
+    /// 入口是**擴大既有的 <see cref="MergePdf"/>**（他的裁定），所以這一支不新增扇形、不新增
+    /// 工具 id：同一顆「合併 PDF」按下去，PDF 走整頁搬移、圖片走重新排版。
+    ///
+    /// ## 為什麼頁序不用問這裡
+    /// 順序就是 `paths` 的順序，而它來自排序視窗確認的那一份（<c>MergeWindow.Order</c>）。
+    /// 這一支**不得**自己排序（例如按檔名）：那會讓使用者在畫面上排的順序與產物不一致，
+    /// 而那種錯只看檔名是看不出來的——頁數、尺寸全都對，只有內容的次序不對。
+    ///
+    /// ## 與 <see cref="ToPdf"/> 的關係
+    /// 寫檔、命名、碰撞重試、失敗分類**全部沿用**（規格 §5 只有一個擁有者）：差別只在
+    /// ①這裡是 N 張畫格寫進同一份文件、②頁面大小由 <paramref name="pageSize"/> 決定。
+    /// </summary>
+    private ConversionResult MergeImagesToPdf(string[] paths, TempJournal? journal,
+                                               string? targetDirectory, PdfPageSize pageSize)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+
+        // ① 便宜的檢查先做（與 PDF 那條路同一條規矩）：不必解碼就能說出原因。
+        for (int i = 0; i < paths.Length; i++)
+        {
+            if (!AtomicWriter.Exists(paths[i]))
+            {
+                _log($"merge-pdf: refusing {Path.GetFileName(paths[i])}: it disappeared before the merge; " +
+                     "fail-fast -> NO file is written");
+                return MergeFail(paths[i], i + 1, ConversionError.SourceMissing,
+                    "source disappeared before the merge");
+            }
+        }
+
+        // ② 逐檔解第一頁畫格。多頁 TIFF／動畫 GIF 只取第一格（規格 §6.1）——**這一條要留下痕跡**：
+        //    否則「給了 5 頁的 TIFF、只拿到 1 頁」在日誌上完全看不出來，而它的產物看起來
+        //    跟一張正常的圖一模一樣（頁數對、尺寸對、大小也對）。
+        var frames = new List<BitmapSource>(paths.Length);
+        for (int i = 0; i < paths.Length; i++)
+        {
+            string path = paths[i];
+            try
+            {
+                (BitmapSource frame, int frameCount) = DecodeFirstFrame(path);
+                if (frameCount > 1)
+                    _log($"merge-pdf: {Path.GetFileName(path)} (第 {i + 1} 個檔) holds {frameCount} frame(s); " +
+                         "only the FIRST one becomes a page (spec 6.1: multi-page TIFF / animated GIF)");
+                frames.Add(frame);
+            }
+            catch (Exception ex)
+            {
+                string format = _codecs.FormatOfPath(path) ?? "?";
+                _log($"merge-pdf: refusing {Path.GetFileName(path)}: it cannot be decoded " +
+                     $"({ex.GetType().Name}); fail-fast -> NO file is written");
+                return MergeFail(path, i + 1,
+                    MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, format, path)),
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // ③ 排版與寫檔。輸出檔名沿用**第一個來源檔**（與 PDF 那條路一致：使用者看到的
+        //    「合併結果」就是第一個檔的名字，而 `(1)` 序號本身是「來源沒被覆寫」的證據）。
+        // ⚠ **不含點**：`NamingPolicy.ResolveOutputPath` 自己接上副檔名（單張那條路傳的是
+        // `CodecRegistry` 給的 `"pdf"`）。第一版這裡寫了 `".pdf"`，產物於是叫
+        // `AAA-first..pdf`——兩個點。那個名字本身還能開，所以它只會在使用者看到檔名時才被發現。
+        string extension = "pdf";
+        long written = 0;
+        ConversionResult done = WriteWithCollisionRetry(paths[0], paths[0], journal,
+            stream =>
+            {
+                PdfFromImage.WriteMany(frames, stream, pageSize);
+                written = stream.Length;
+            },
+            tried => NamingPolicy.ResolveOutputPath(paths[0], extension, targetDirectory, tried.ToList()),
+            out string targetPath);
+        if (!done.Ok) return done;
+
+        timer.Stop();
+        _log($"merge-pdf: merged {paths.Length} image(s) -> {Path.GetFileName(targetPath)} " +
+             $"({frames.Count} page(s), {written}B, pageSize={pageSize}, " +
+             $"{timer.Elapsed.TotalMilliseconds:F0} ms; sources untouched)");
+        return new ConversionResult(paths[0], targetPath, ConversionError.None,
+            $"{paths.Length} image(s), {frames.Count} page(s), {written}B in " +
+            $"{timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}", null, 1);
+    }
+
     /// 工具：**圖片 → 一頁 PDF**（切片「圖片 → 單頁 PDF」，2026-10-14）。
     ///
     /// 與 <see cref="MergePdf"/> 是同族的第二條「非 WIC 生產者」：兩者都不經過
