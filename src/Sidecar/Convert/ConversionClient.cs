@@ -146,7 +146,8 @@ internal sealed class ConversionClient : IDisposable
     public bool Start(string[] sourcePaths, string targetFormat, int quality, string? outputDir,
                       string? toolOp, out string? error, CompressionPolicy? compression = null,
                       CropSpec? crop = null, string? removeBgModel = null,
-                      string? removeBgRefine = null)
+                      string? removeBgRefine = null,
+                      string? pageSize = null)
     {
         error = null;
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
@@ -244,12 +245,16 @@ internal sealed class ConversionClient : IDisposable
             removeBgModel = removeBgModel,
             // 去背的邊緣精修模式（只有 op=remove-bg 會填，而且只有明確關掉時才有值）。
             // null＝預設（開）＝這個欄位還不存在的年代的意思，其餘 op 的封包一個位元組都沒變。
-            removeBgRefine = removeBgRefine
+            removeBgRefine = removeBgRefine,
+            // 合併圖片時的頁面大小（null＝original）。它是**新欄位**，所以協議版本升到 4：
+            // op=merge-pdf 當年不用升版，正是因為它一個欄位都沒加。
+            pageSize = pageSize
         });
         // op= 附加在行尾：既有套件比對的是 `worker: job 1 sent (N file(s), target=..., quality=...)`。
         // 裁切矩形也只在行尾、而且只有 op=crop 時才出現（既有那一行的其餘部分逐字元不變）。
         _log($"worker: job 1 sent ({sourcePaths.Length} file(s), target={targetFormat}, " +
-             $"quality={quality}, op={op})" + (crop != null ? $" crop={crop.Describe()}" : ""));
+             $"quality={quality}, op={op})" + (crop != null ? $" crop={crop.Describe()}" : "") +
+             (pageSize != null ? $" pageSize={pageSize}" : ""));
 
         _snapshot = new ConversionSnapshot(0, sourcePaths.Length, null, false, 0, 0,
                                            Array.Empty<string>(), null);

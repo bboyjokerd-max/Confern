@@ -71,7 +71,13 @@ internal static class WorkerProtocol
     /// 逐檔執行同一批路徑的症狀是「檔案被覆寫成同一個名字」或「產生 N 個合併檔」，
     /// 兩者都是靜默的錯。分派處因此讓它**只跑一次**。
     /// </summary>
-    public const int Version = 3;
+    /// **2026-10-14：升到 4。** 這一天 `merge-pdf` 開始吃圖片，而它帶來**一個新的請求欄位**
+    /// （<see cref="WorkerMessage.pageSize"/>，頁面大小）。上面兩段「不用升版」的理由這次**不成立**
+    /// ——那兩次的共同點是「沒有新欄位」，而這次有。
+    /// 為什麼升版是對的而不是保守：一個不認識這個欄位的 worker 會**安靜地**用 original 排版，
+    /// 而使用者明明選了 A4——那是一種不會有任何錯誤訊息的錯。兩半是同一支 exe，所以升版
+    /// 不會擋掉任何正常的組合；它只讓「不一致的兩半」當場連不上。
+    public const int Version = 4;
 
     /// <summary>
     /// `WorkerMessage.op` 的合法值：這件工作**要做什麼**。
@@ -314,6 +320,13 @@ internal sealed class WorkerMessage
     /// </summary>
     public string? removeBgRefine { get; set; }
     public int quality { get; set; }
+
+    /// <summary>
+    /// `op=merge-pdf` 且來源是**圖片**時的頁面大小：`original`（預設）／`first`／`a4`。
+    /// `null`＝original——缺席是 null 且 <see cref="Json"/> 設了 WhenWritingNull，
+    /// 所以「不傳」與「傳 original」在這一條路上是同一件事（見 <c>PdfPageSize</c>）。
+    /// </summary>
+    public string? pageSize { get; set; }
     public int done { get; set; }
     public int total { get; set; }
     public string? current { get; set; }
@@ -556,7 +569,7 @@ internal static class WorkerServer
                 // ——所以整批只會產生一個 result 封包與一個輸出檔，而 `total` 仍然是那一批的
                 // 檔案數（見 totalForResult：總數必須說出「這一輪處理了幾個檔」）。
                 WorkerProtocol.OpMergePdf => MergePdfBatch(paths, i, engine, journal, job.outputDir,
-                                                           evidence.Line),
+                                                           job.pageSize, evidence.Line),
                 // 去背：模型路徑**原封不動**傳下去（null＝執行檔旁邊的預設位置）。
                 // 解析規則只有 RemoveBgModel.ResolvePath 那一份，worker 不是第二個擁有者
                 // （與 outputDir 交給 Settings／NamingPolicy 同一條規矩）。
@@ -728,7 +741,7 @@ internal static class WorkerServer
     /// </summary>
     private static ConversionResult MergePdfBatch(string[] paths, int index, ConversionEngine engine,
                                                   TempJournal? journal, string? outputDir,
-                                                  Action<string> log)
+                                                  string? pageSize, Action<string> log)
     {
         if (index != 0)
         {
@@ -740,7 +753,27 @@ internal static class WorkerServer
             return new ConversionResult(paths[index], null, ConversionError.None,
                 "handled as part of the batch (no separate output)");
         }
-        return engine.MergePdf(paths, journal, outputDir);
+        return engine.MergePdf(paths, journal, outputDir, PdfPageSizeOf(pageSize, log));
+    }
+
+    /// <summary>
+    /// 協議上的字串 → <see cref="PdfPageSize"/>。
+    ///
+    /// ⚠ **不認識的值回 original 並且說出來**：靜默地當成 original 會讓「使用者選了 A4、
+    /// 拿到原文尺寸」變成一個沒有任何痕跡的錯（他只看得到產物，而產物看起來很正常）。
+    /// </summary>
+    private static PdfPageSize PdfPageSizeOf(string? value, Action<string> log)
+    {
+        switch (value)
+        {
+            case null: case "": case "original": return PdfPageSize.Original;
+            case "first": return PdfPageSize.First;
+            case "a4": return PdfPageSize.A4;
+            default:
+                log($"merge-pdf: pageSize='{value}' is not one of original|first|a4 -> using original " +
+                    "(the value is NOT silently accepted as if it were a known one)");
+                return PdfPageSize.Original;
+        }
     }
 
     private static bool DrainCancel(BlockingCollection<WorkerMessage> inbox, int jobId, Evidence evidence)

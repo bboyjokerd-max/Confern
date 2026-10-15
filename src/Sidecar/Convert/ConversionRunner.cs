@@ -34,7 +34,8 @@ internal sealed class ConversionRunner : IDisposable
     public bool Start(string[] sourcePaths, string targetFormat, int quality, int x, int y,
                       string? toolOp = null, string? outputDir = null,
                       CompressionPolicy? compression = null, CropSpec? crop = null,
-                      string? removeBgModel = null, string? removeBgRefine = null)
+                      string? removeBgModel = null, string? removeBgRefine = null,
+                      string? pageSize = null)
     {
         // 工具 read-qr **不顯示進度藥丸**（2026-10-07 切片 2）。藥丸的訊息是「N 個檔案、
         // 成功幾個、失敗幾個」——那是**產出檔案**的語意，而這一顆工具的產物是一段文字，
@@ -61,7 +62,7 @@ internal sealed class ConversionRunner : IDisposable
             if (!_client.Start(sourcePaths, targetFormat, quality,
                                outputDir: outputDir, toolOp: toolOp, out string? error,
                                compression: compression, crop: crop, removeBgModel: removeBgModel,
-                               removeBgRefine: removeBgRefine))
+                               removeBgRefine: removeBgRefine, pageSize: pageSize))
             {
                 _log($"conversion: worker did not start ({error}) -> reporting failure; UI stays usable");
                 // ⚠ 起不來時**也要**對 read-qr 說得出來：藥丸不顯示（見上面），但快照仍要標成

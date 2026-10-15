@@ -423,9 +423,12 @@ internal sealed class Options
           --qr-worker <path>        the same tool through the real WORKER process (op=read-qr over
                                     the pipe): proves the decoded text survives the cross-process
                                     field, which an in-process call cannot show; still writes nothing
-          --merge-pdf <p1;p2;...>   run tool merge-pdf on these PDFs IN THIS ORDER through the real
+          --merge-pdf <p1;p2;...>   run tool merge-pdf on these files IN THIS ORDER through the real
                                     WORKER process (op=merge-pdf over the pipe); the semicolon
-                                    order IS the page order (a;b and b;a are different requests);
+                                    order IS the page order (a;b and b;a are different requests).
+                                    The inputs may be PDFs (whole pages are copied) or images
+                                    (each image becomes one page); mixing the two is refused;
+          --merge-page-size <mode>  with --merge-pdf: original | first | a4 (default original)
                                     the product semantics ruled by the user on 2026-10-07 are
                                     fail-fast: if ANY file cannot be merged, NOT ONE output file is
                                     written and the message names the offending file and why; the
@@ -673,6 +676,13 @@ internal sealed class Options
     /// 頁序全錯、但每一個數字都對的檔。同一個行程內的呼叫驗不到那件事。
     /// </summary>
     public string? MergePdf;
+
+    /// <summary>
+    /// `--merge-page-size <original|first|a4>`：合併時的頁面大小（2026-10-14）。
+    /// 這是**診斷接縫**，正式路徑的權威是排序視窗上的選擇（見 MergeWindow.PageSize）。
+    /// 預設 original＝每一頁是那張圖自己的實際尺寸。
+    /// </summary>
+    public string? MergePageSize;
     /// <summary>
     /// M3 診斷（2026-10-07）：`--merge-pdf-inspect &lt;file&gt;` 印出一個 PDF 的**頁數**與
     /// **每一頁的尺寸（point）與旋轉角度**——**只讀、不寫**，而且讀的是**已經在磁碟上的檔**
@@ -1117,6 +1127,7 @@ internal sealed class Options
                 // ⚠ 這一條**不設** CropUiSource 那種東西：merge-pdf 沒有第二個視窗要吃這個路徑
                 // （排序視窗是下一個切片），所以這裡沒有對應的 ??= 那一行。
                 case "--merge-pdf": if (i + 1 < args.Length) o.MergePdf = args[++i]; break;
+                case "--merge-page-size": if (i + 1 < args.Length) o.MergePageSize = args[++i]; break;
                 case "--merge-pdf-inspect": if (i + 1 < args.Length) o.MergePdfInspect = args[++i]; break;
                 case "--remove-bg": if (i + 1 < args.Length) o.RemoveBg = args[++i]; break;
                 case "--remove-bg-model": if (i + 1 < args.Length) o.RemoveBgModel = args[++i]; break;
@@ -2702,7 +2713,8 @@ internal static class App
         try
         {
             if (!client.Start(paths, "", 100, outputDir: outputDir,
-                              toolOp: WorkerProtocol.OpMergePdf, out string? startError))
+                              toolOp: WorkerProtocol.OpMergePdf,
+                              out string? startError, pageSize: opt.MergePageSize))
             {
                 evidence.Line($"--merge-pdf FAILED: the worker did not start ({startError})");
                 return 3;
