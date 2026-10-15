@@ -2409,3 +2409,39 @@ a4        page=1 595.3x841.9  page=2 595.3x841.9    page=3 595.3x841.9
 **還沒做**：**T6**——把上面那些數字寫進套件斷言（含一次假故障演練：把 `a4` 的期望值改壞必須紅）。
 以及上一刀留下的兩件事：規格 §3.2／§6.2 的輸出矩陣修正、`verify-m1b.ps1` 的舊帳 `S7.29`
 （拿 PDF 當「不支援」的樣本，換成 `.txt` 就好）。
+### 2026-10-15（續）　T6：把這一刀的數字寫進套件（含假故障演練）
+
+新腳本 `tools\verify-merge-images.ps1`（**純 ASCII、無 BOM** ⇒ 不會踩 CP950 那個坑）。
+它自成一套，不進去動兩千行的 m3c／m3d：這個 repo 對「一個功能一支驗收腳本」已經有先例
+（`verify-orientation-matrix.ps1`）。
+
+**斷言的東西（全部從產品自己的輸出讀回，不是從程式碼推論）**：
+
+| 節 | 內容 |
+|---|---|
+| S1 | 1 張圖 ⇒ 工具層**沒有** merge-pdf；2 張圖 ⇒ **有**；2 份 PDF ⇒ **有**（2026-10-07 的行為不變） |
+| S2 | 三張圖 ⇒ **一份** PDF、**三頁**、頁序＝給定順序、檔名沿用第一張、**只有一個輸出**（不是 N 個） |
+| S3 | 三個模式逐頁比對尺寸：original 各自／first 全等於第一張／a4＝595.28×841.89 |
+| S4 | 圖片混 PDF ⇒ `worker result: ok=False error=Unsupported`，且**沒有**產物 |
+| S5 | 排序視窗：圖片批次**顯示**頁面大小、PDF 批次**不顯示**、視窗自測 20 項全綠 |
+| S6 | 三張來源 sha256 逐位元不變；診斷自報「1 output from 3 source(s)」 |
+
+**結果：`checks=22 pass=22 fail=0`。**
+
+**假故障演練**（把 `a4` 那一頁的期望值改成 123×456）：
+
+```
+[故意改壞]  checks=22 pass=21 fail=1
+   FAIL  S3.a4 every page has the expected size
+         [got=1:595.3x841.9 2:595.3x841.9 3:595.3x841.9 want=1:595.3x841.9 2:123x456 3:595.3x841.9]
+[還原後]    checks=22 pass=22 fail=0
+```
+
+⇒ 這一條斷言**會紅**，而且紅在**正確的那一頁**上。這是「斷言不是同義反覆」的證明。
+
+**腳本自己犯過的兩個錯（都寫在註解裡，免得下一個人再犯）**：
+① 用 `Get-ChildItem *.pdf | Remove-Item` 清輸出時，把**自己的 PDF fixture** 一起刪了
+（fixture 也叫 `.pdf`）⇒ 之後 S4／S5 全紅，而且症狀看起來像產品壞了。改成只清「輸出那個名字」。
+② 斷言的兩行（`merge-pdf: merged 3 image(s)`／`fail-fast -> NO file is written`）在
+**worker 的日誌檔**裡，不在診斷的日誌裡 ⇒ 改成斷言診斷真的看得到的
+`worker result: ok=False error=Unsupported` 與 `merge-pdf summary: ✓ 1 output from 3 source(s)`。
