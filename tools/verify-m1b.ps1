@@ -1,4 +1,4 @@
-# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
+﻿# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
 #
 # Sections:
 #   S6  two-layer stack: the visual layer must be click-through (automatic, NON-INVASIVE)
@@ -449,7 +449,13 @@ function Invoke-S7 {
   Check "S7.28 Mixed: Enter refused and the wheel stays" (Test-Log $r.Lines 'committed=False wheelVisibleAfter=True')
 
   # ---- a single unsupported file is a DIFFERENT message than mixed (spec 4.3) ----
-  $r = Get-PayloadRun 'C:\Temp\doc.pdf' 'unsupported'
+  # This sample EXPIRED on 2026-10-07: that slice deliberately made "PDF has an applicable tool"
+  # mean Ready (the tool layer opens and the merge-pdf sector appears), so a PDF is no longer
+  # Unsupported. The assertion's intent (a single unsupported file is NOT a mixed selection) is
+  # still right - only its sample was wrong. 2026-10-15: use .txt instead (the text family is
+  # second-milestone in 3.2 and this product does not support it), and .txt will not silently
+  # become Ready the way PDF did.
+  $r = Get-PayloadRun 'C:\Temp\doc.txt' 'unsupported'
   Check "S7.29 single non-image -> Unsupported" (Test-Log $r.Lines 'status=Unsupported')
   Check "S7.30 Unsupported: Enter refused and the wheel stays" (Test-Log $r.Lines 'committed=False wheelVisibleAfter=True')
 
