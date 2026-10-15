@@ -2503,3 +2503,41 @@ tool list: FAILED the tool layer would be empty (the wheel would show nothing)
 都解成 `BitmapSource` 收進一個 list**，200 張 12MP 掃描 ≈ 10 GB 常駐記憶體；而「拖一個資料夾」
 的主要情境正是這種批次。改成**逐頁串流**（解碼→寫頁→釋放），驗收是量**峰值工作集**
 不隨張數線性成長——那是個可量的數字。
+### 2026-10-15（續）　T1+T2 完成：拖一個資料夾 ⇒ 展開成裡面的檔
+
+新檔 `src\Sidecar\Files\PayloadPaths.cs`（**唯一**擁有者：哪些檔要收、怎麼排序、上限多少）。
+展開的位置在 `FormatCatalog.Classify` **之前** ⇒ 下游（判定、工具層、merge-pdf、頁面大小、
+排序視窗、引擎）**一行都沒改**。
+
+**實測（真實路徑 `--wheel-payload <資料夾> --wheel-tools --wheel-tool merge-pdf`）**：
+
+```
+payload paths: skipped (not a format we can use) 'notes.txt'
+payload paths: folder '…\scan-batch' -> 3 file(s) taken
+payload paths: in=1 folders=1 out=3 skipped=2 capped=False
+*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): 3 path(s) ***
+payload paths: in=3 folders=0 out=3 skipped=0 capped=False        ← 第二次展開是空操作（冪等）
+merge ui: window created for 3 file(s) in the given order =[scan1.png,scan2.png,scan10.png]
+worker: job 1 sent (3 file(s), target=, quality=100, op=merge-pdf) pageSize=original
+worker result: ok=True output=…\part2\scan1.pdf
+```
+
+⇒ 遞迴收到子資料夾裡的 `scan1.png` ✓、`notes.txt` 與 `Thumbs.db` 被跳過 ✓、
+**`scan2` 排在 `scan10` 前面**（自然排序 ✓，字典序會直接印錯頁序在成品上）、
+`pageSize=original` 從 T3 那個選擇器一路流到底 ✓、產物一份 4803 bytes ✓。
+同一批的 `strip-metadata` 也照常跑 ⇒ 資料夾對**每一個**工具都生效，不只合併。
+
+**三個情境的判定（`--tools-list --wheel-payload`）**：
+
+| 丟進去的 | 結果 |
+|---|---|
+| 只裝圖的資料夾（3 張，含一層子資料夾） | `count=7`、**有** `merge-pdf`、`status=Ready`、`資料夾展開：讀到 3 個檔（跳過 2 個）` |
+| 混合資料夾（圖＋PDF＋一堆 log） | `status=Mixed`、`讀到 8 個檔（跳過 17 個）` |
+| 子資料夾裡只有 **1** 張圖 | `count=6`、**沒有** `merge-pdf`（「只會失敗的扇形不可以存在」自動成立） |
+
+**當場抓到的設計陷阱**：診斷接縫（`--tools-list`）原本**不經過**真實拖曳那條路
+（它自己直接叫 `Classify`）⇒ 我的第一版只在真實路徑展開，診斷照樣報 `Unsupported`。
+**一個會說謊的接縫比沒有接縫更糟** ⇒ 兩個注入點都改成走同一條 `PayloadPaths.Expand`。
+第二次展開必須是**冪等**的（檔案原樣保留、不再排序），日誌裡 `in=3 folders=0` 那行就是證據。
+
+**還在做**：T3（把 `MergeImagesToPdf` 改成逐頁串流，量峰值工作集）、T4（`verify-folder-drop.ps1`）。

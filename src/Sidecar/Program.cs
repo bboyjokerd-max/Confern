@@ -1640,6 +1640,12 @@ internal static class App
         if (opt.WheelPayload != null)
         {
             string[] injected = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            // 拖曳的來源可以是**資料夾**（2026-10-15）。診斷接縫與真實拖曳必須走同一條路，
+            // 否則這個接縫會繼續報「不支援的格式」。下面那句 *** INJECTED PAYLOAD … N path(s) ***
+            // 因此報的是**展開之後**的張數。
+            injected = PayloadPaths.Expand(injected, new FormatCatalog(new CodecRegistry()),
+                                           evidence.Line, out string injectedNotice);
+            if (injectedNotice.Length > 0) evidence.Line($"    payload {injectedNotice}");
             if (opt.MergeUiAutoConfirm)
             {
                 // 必須在酬載進來**之前**開好：開窗是 Enter 那一刻發生的事，而那已經在下面了。
@@ -3334,6 +3340,13 @@ internal static class App
         var sw = Stopwatch.StartNew();
         Native.GetCursorPos(out Native.POINT p);
 
+        // 拖曳的來源可以是**資料夾**（2026-10-15）。展開**必須**在 Classify 之前：這樣一來
+        // 判定、工具層、merge-pdf、頁面大小三選一、排序視窗、引擎**全都不用改**——
+        // 一個裝著 20 張圖的資料夾會自動讓 MERGE PDF 出現（AppliesTo 已經拿得到檔案數）。
+        // ⚠ 展開之後 paths 就是「真正要處理的那一批」，下面每一句看到的都是它。
+        paths = PayloadPaths.Expand(paths, catalog, evidence.Line, out string expandNotice);
+        if (expandNotice.Length > 0) evidence.Line($"    payload {expandNotice}");
+
         PayloadVerdict verdict = catalog.Classify(paths);
         PendingPaths = paths;      // Enter 要用這一批（規格 §4.4：同一類別就全部轉）
         // 真實拖曳的檔案清單必須留證據（M1d 的批次輸出要用它；也讓「讀到什麼」可回溯）。
@@ -4320,8 +4333,12 @@ internal static class App
         if (!string.IsNullOrEmpty(opt.WheelPayload))
         {
             string[] paths = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            // 同站 1：來源可以是資料夾。這裡沒有 evidence，所以把「讀到幾個／跳過幾個」
+            // 併進 how 那一行——診斷講的話必須跟真實路徑一致。
+            paths = PayloadPaths.Expand(paths, catalog, null, out string expandNotice);
             verdict = catalog.Classify(paths);
-            how = $"runtime classification of {paths.Length} payload file(s) (FormatCatalog.Classify)";
+            how = $"runtime classification of {paths.Length} payload file(s) (FormatCatalog.Classify)" +
+                  (expandNotice.Length > 0 ? $"; {expandNotice}" : "");
         }
         else
         {
