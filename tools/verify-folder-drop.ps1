@@ -7,6 +7,7 @@
 #   S4  a directly dropped FILE list keeps the order the user gave (and is never filtered)
 #   S5  the expansion is idempotent (a second pass over files re-sorts nothing)
 #   S6  peak memory does NOT grow linearly with the page count
+#   S7  a Mixed batch says WHICH file is the odd one out, and the summary cannot grow into a page
 #
 # ASCII only on purpose: a BOM-less CJK .ps1 is read as CP950 by PowerShell 5.1 and produces
 # fake syntax errors. All assertions below use the ASCII fields of the product's log
@@ -62,6 +63,19 @@ function OrderOf([object]$r) {
     return ''
 }
 
+# The notice field, e.g. the localized "pick one kind" sentence. The line that carries it ends
+# differently per call site - the wheel line ends it with " latency=", the --tools-list line with
+# ", runtime classification" - so the caller passes the stop pattern. Callers assert only on ASCII
+# INSIDE the sentence (format labels, fixture file names, a count digit): the sentence is localized
+# and a CJK literal in this file would be read as CP950 by PowerShell 5.1.
+function NoticeOf([object]$r, [string]$anchor, [string]$end) {
+    $l = Line $r $anchor
+    if (-not $l) { return '' }
+    $m = [regex]::Match($l.ToString(), 'notice=(.*?)' + $end)
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+
 function MakeImage([string]$path, [int]$w, [int]$h) {
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
@@ -108,7 +122,7 @@ Copy-Item $made.FullName (Join-Path $mixed 'doc.pdf') -Force
 # NOTE: this section has to go through the REAL payload path. --tools-list logs nothing of its
 # own (it is handed a null logger and only folds the notice into its "how" text, which is
 # localized), so the ASCII counters below would never appear there.
-# ⚠ The merge writes its output NEXT TO THE FIRST SOURCE - i.e. straight into the folder we just
+# NOTE: the merge writes its output NEXT TO THE FIRST SOURCE - i.e. straight into the folder we just
 # dropped. Dropping $scan itself would leave a PDF inside it, and every later --tools-list run
 # would then see images AND that PDF and report Mixed (that is exactly how the first version of
 # this suite broke its own fixture). So the merge gets a pristine copy of its own.
@@ -169,6 +183,60 @@ Check 'S4.2 a dropped file is kept even if unsupported (it becomes Mixed, not Em
 Check 'S5.1 a batch of FILES is never treated as a folder (folders=0, no re-sort)' `
       (Has $rev 'payload paths: in=2 folders=0 out=2 skipped=0') `
       "no 'in=2 folders=0 out=2' line in the S4 run"
+
+"=== S7  a Mixed batch must say WHICH file is the odd one out (item 1, 2026-10-15) ==="
+# The bare "pick one kind" sentence never said WHICH file was the odd one - and in the case that
+# started this, the odd file was the product's OWN previous output sitting in that folder, so the
+# user had no way to tell it apart from a file he had put there himself.
+$odd = Join-Path $Work 'odd-one'
+New-Item -ItemType Directory -Force -Path $odd | Out-Null
+MakeImage (Join-Path $odd 'page1.png') 100 100
+MakeImage (Join-Path $odd 'page2.png') 100 100
+Copy-Item $made.FullName (Join-Path $odd 'odd.pdf') -Force
+
+# The REAL payload path: this is the line the wheel shows. The dump and the log stay OUTSIDE the
+# dropped folder so the fixture keeps exactly the three files the user put there (S1 got this wrong
+# once: the merge wrote its PDF into the folder it was merging, and the next run saw a mixed folder).
+$wr = Run @('--wheel-payload', $odd, '--wheel-dump', (Join-Path $Work 's7-wheel.png')) 's7-wheel'
+$wheelLine = Line $wr 'wheel from OLE payload:'
+Check 'S7.1 2 PNG + 1 PDF is still Mixed (item 1 explains, it does not re-judge)' `
+      ($wheelLine -and $wheelLine.ToString() -match 'status=Mixed') "line=$wheelLine"
+
+$note = NoticeOf $wr 'wheel from OLE payload:' '\s+latency='
+Check 'S7.2 the notice names both categories that are in the batch' `
+      ($note -match 'PNG' -and $note -match 'PDF') "notice=[$note]"
+Check 'S7.3 it names the MINORITY file - the one the user has to take out' `
+      ($note -match 'odd\.pdf') "notice=[$note]"
+Check 'S7.4 it does not accuse the majority files' ($note -notmatch 'page1\.png') "notice=[$note]"
+Check 'S7.5 every category carries its real count (2 PNG, 1 PDF)' `
+      ($note -match 'PNG.{0,3}2' -and $note -match 'PDF.{0,3}1') "notice=[$note]"
+
+# Both call sites must print the SAME sentence. Two copies of the wording is exactly how the old
+# sentence drifted between the wheel and --tools-list in the first place.
+$oddRun = Run @('--tools-list', '--wheel-payload', $odd) 's7-list'
+$oddNote = NoticeOf $oddRun 'tool list: count=' ',\s'
+Check 'S7.6 the tool list prints the identical sentence (one owner, two call sites)' `
+      (($oddNote.Length -gt 0) -and ($oddNote -eq $note)) "wheel=[$note] list=[$oddNote]"
+Check 'S7.7 a batch of ONE category raises no mixed notice at all (no false alarm)' `
+      ((NoticeOf $listRun 'tool list: count=' ',\s') -eq '-') `
+      "scan notice=[$(NoticeOf $listRun 'tool list: count=' ',\s')]"
+
+# The cap. A FOLDER cannot be used here: expansion drops unsupported files, so all five categories
+# survive only when the files are dropped directly (that asymmetry is S4.2's contract, not a bug).
+$fiveDir = Join-Path $Work 'five-kinds'
+New-Item -ItemType Directory -Force -Path $fiveDir | Out-Null
+foreach ($f in @('a.png', 'b.pdf', 'c.mp4', 'd.mp3', 'e.xyz')) {
+    Set-Content (Join-Path $fiveDir $f) 'x' -Encoding ASCII
+}
+$fivePayload = (@('a.png', 'b.pdf', 'c.mp4', 'd.mp3', 'e.xyz') |
+                ForEach-Object { Join-Path $fiveDir $_ }) -join ';'
+$fiveRun = Run @('--tools-list', '--wheel-payload', $fivePayload) 's7-five'
+$fiveNote = NoticeOf $fiveRun 'tool list: count=' ',\s'
+Check 'S7.8 five categories: only three are listed, the rest is summarised' `
+      ($fiveNote -match 'MP4' -and $fiveNote -notmatch 'MP3') "notice=[$fiveNote]"
+Check 'S7.9 the summary says how many there really were, and stays one short line' `
+      (($fiveNote -match '5') -and ($fiveNote.Length -lt 60)) `
+      "notice=[$fiveNote] len=$($fiveNote.Length)"
 
 "=== S6  peak memory must NOT grow linearly with the page count ==="
 $scale = Join-Path $Work 'scale'
