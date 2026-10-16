@@ -1379,9 +1379,21 @@ internal sealed class ConversionEngine
     /// <param name="sourcePaths">
     /// **依序**要合併的 PDF。順序＝頁序（見方法說明）。空清單或 null ＝ 沒有東西可以合併。
     /// </param>
+    /// <param name="onProgress">
+    /// 2026-10-16（四項優化②）：**這一輪已經處理完幾個檔**（`done`, `total`, 檔名）。
+    ///
+    /// **為什麼需要它**：合併是一顆「一次做完一整批」的工具，而兩百張圖要 ~24 秒。
+    /// 在這之前，畫面與日誌在整段時間裡**完全沒有動靜**——使用者唯一能得到的結論是
+    /// 「它當了」，於是再按一次（而第二次會撞上同一個輸出檔名）。
+    ///
+    /// ⚠ 這是一個**回呼**，不是這裡去碰管道或畫面：引擎不知道進度要送去哪裡（worker 的
+    /// 管道、命令列、測試），那是呼叫端的決定。這一支只負責「誠實地說出走到第幾個檔」。
+    /// `null`（預設）＝不報告，行為與這一刀之前**逐位元相同**。
+    /// </param>
     public ConversionResult MergePdf(IReadOnlyList<string>? sourcePaths, TempJournal? journal = null,
                                      string? targetDirectory = null,
-                                     PdfPageSize pageSize = PdfPageSize.Original)
+                                     PdfPageSize pageSize = PdfPageSize.Original,
+                                     Action<int, int, string>? onProgress = null)
     {
         string[] paths = sourcePaths?.ToArray() ?? Array.Empty<string>();
         if (paths.Length == 0)
@@ -1415,7 +1427,7 @@ internal sealed class ConversionEngine
                 "re-lays them out, so one output file cannot honestly be both");
         }
         if (kind.Status == PayloadStatus.Ready && kind.CanConvert)
-            return MergeImagesToPdf(paths, journal, targetDirectory, pageSize);
+            return MergeImagesToPdf(paths, journal, targetDirectory, pageSize, onProgress);
 
         // ① 先逐檔做**便宜的**檢查（存在嗎、是不是本產品認得的格式）：不必開檔就能說出原因。
         //    這一步刻意與其他工具的第一段同形（它們也是先看 AtomicWriter.Exists 與格式表）。
@@ -1494,6 +1506,10 @@ internal sealed class ConversionEngine
                     _log($"merge-pdf: {Path.GetFileName(path)} page {p + 1}/{pages} added " +
                          $"({w:0.###}x{h:0.###} pt)");
                 }
+
+                // ②：**這一個檔的每一頁都真的搬進去了**才回報（不是「開始處理它」）。
+                //    回報「開始」會讓最後一個檔看起來永遠差一步，而它其實已經做完了。
+                onProgress?.Invoke(position, paths.Length, Path.GetFileName(path));
             }
 
             // 整批都加完了才序列化。序列化失敗也還在記憶體裡 ⇒ 一樣是「一個檔都不寫」。
@@ -1592,7 +1608,8 @@ internal sealed class ConversionEngine
     /// ①這裡是 N 張畫格寫進同一份文件、②頁面大小由 <paramref name="pageSize"/> 決定。
     /// </summary>
     private ConversionResult MergeImagesToPdf(string[] paths, TempJournal? journal,
-                                               string? targetDirectory, PdfPageSize pageSize)
+                                               string? targetDirectory, PdfPageSize pageSize,
+                                               Action<int, int, string>? onProgress = null)
     {
         var timer = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1639,6 +1656,13 @@ internal sealed class ConversionEngine
                     _log($"merge-pdf: {Path.GetFileName(path)} (第 {i + 1} 個檔) holds {frameCount} frame(s); " +
                          "only the FIRST one becomes a page (spec 6.1: multi-page TIFF / animated GIF)");
                 yield return frame;
+
+                // ②：**`yield return` 之後**才是「這一頁已經被寫進 PDF 了」——消費者是
+                //    `PdfFromImage.WriteMany`，它把畫格拉走、寫成頁面、才回來要下一張。
+                //    所以這一行就是誠實的頁進度，而不是「已經解碼了」。
+                //    ⚠ 這也正是「一次只有一張在記憶體裡」那條不變式仍然成立的原因：
+                //    回報完才回頭解下一張，沒有任何東西被留下來（S6 會量峰值）。
+                onProgress?.Invoke(i + 1, paths.Length, Path.GetFileName(path));
             }
         }
 
@@ -1652,9 +1676,29 @@ internal sealed class ConversionEngine
         int pages = 0;
         string targetPath;
         ConversionResult done;
+
+        // ③a 先把**第一次要用的檔名**算出來（與 PDF 那條路 1565 行一字不差的形狀）。
+        //
+        // 🔴 2026-10-16（②的現場）：這裡原本傳的是 `paths[0]`——也就是**來源檔自己的路徑**
+        //    （`p0001.png`）。`WriteWithCollisionRetry` 的第一個嘗試因此是去寫那個**已經存在
+        //    的來源檔**，必定回 `ERROR_ALREADY_EXISTS (0x800700B7)`，然後才換名重試。
+        //    而 `writeContent` 是延遲序列：重試會**把整批重新解碼、重新排版一次**。
+        //    實測（200 張圖）：第一次嘗試 11.7 秒全部白做，整批合併因此固定是 ~24 秒
+        //    ——是應該的兩倍。日誌裡只看得到一行 `write retry`，而它讀起來像是「別人搶走了檔名」。
+        //    這一條與 ① 同一個病：**症狀把責任指到別的地方**。
         try
         {
-            done = WriteWithCollisionRetry(paths[0], paths[0], journal,
+            targetPath = NamingPolicy.ResolveOutputPath(paths[0], extension, targetDirectory);
+        }
+        catch (Exception ex)
+        {
+            return MergeFail(paths[0], 1, ConversionError.WriteDenied,
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        try
+        {
+            done = WriteWithCollisionRetry(paths[0], targetPath, journal,
                 stream =>
                 {
                     pages = PdfFromImage.WriteMany(Frames(), stream, pageSize);

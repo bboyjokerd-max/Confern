@@ -76,6 +76,25 @@ function NoticeOf([object]$r, [string]$anchor, [string]$end) {
     return ''
 }
 
+# The merge runs in a SEPARATE worker process, and everything it says about its own work
+# (progress, per-file retries, the "merged N image(s)" summary) lands in ONE shared file that
+# every run APPENDS to. Reading the tail blindly mixes in other runs - and the previous run of
+# this very suite is always in there. So: remember the line count before a run and read after it.
+# If the file was recreated (fewer lines than before) the whole file belongs to this run.
+function WorkerLogPath { Join-Path $env:LOCALAPPDATA 'Confern\worker.log' }
+function WorkerLogLineCount {
+    $p = WorkerLogPath
+    if (Test-Path $p) { return @(Get-Content $p -Encoding UTF8 -ErrorAction SilentlyContinue).Count }
+    return 0
+}
+function WorkerLogSince([int]$fromLines) {
+    $p = WorkerLogPath
+    if (-not (Test-Path $p)) { return @() }
+    $all = @(Get-Content $p -Encoding UTF8 -ErrorAction SilentlyContinue)
+    if ($fromLines -le 0 -or $all.Count -lt $fromLines) { return $all }
+    return @($all[$fromLines..($all.Count - 1)])
+}
+
 function MakeImage([string]$path, [int]$w, [int]$h) {
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
@@ -244,6 +263,7 @@ $base = Join-Path $scale 'base.png'
 New-Item -ItemType Directory -Force -Path $scale | Out-Null
 MakeImage $base 3000 2400     # 7.2 MP, like a real scan
 $peaks = @{}
+$workerTails = @{}
 foreach ($n in @(20, 200)) {
     $sub = Join-Path $scale "n$n"
     New-Item -ItemType Directory -Force -Path $sub | Out-Null
@@ -251,6 +271,7 @@ foreach ($n in @(20, 200)) {
     $list = (Get-ChildItem $sub -Filter *.png | Sort-Object Name | ForEach-Object { $_.FullName }) -join ';'
     $log = Join-Path $Work "scale-$n.log"
     Remove-Item $log -Force -ErrorAction SilentlyContinue
+    $workerFrom = WorkerLogLineCount
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $pr = Start-Process -FilePath $Exe -ArgumentList @('--merge-pdf', $list, '--quiet', '--log', $log,
         '--tray-exit-after', '300000') -PassThru -WindowStyle Hidden
@@ -269,6 +290,7 @@ foreach ($n in @(20, 200)) {
     }
     $pr.WaitForExit(30000) | Out-Null
     $peaks[$n] = [math]::Round($peak / 1MB, 0)
+    $workerTails[$n] = WorkerLogSince $workerFrom
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -277,6 +299,51 @@ Check 'S6.1 both scale runs finished' (($p20 -gt 0) -and ($p200 -gt 0)) "20=$p20
 $ratio = if ($p20 -gt 0) { $p200 / $p20 } else { 99 }
 Check "S6.2 10x the pages does not cost 10x the memory (ratio $([math]::Round($ratio,2)))" `
       ($ratio -lt 1.6) "20=$p20 MB 200=$p200 MB ratio=$([math]::Round($ratio,2))"
+
+"=== S8  a 200-page merge must say where it is, and must not do the work twice (item 2) ==="
+# Everything below is read from the WORKER's own log for the 200-page run just above. Two
+# different things are asserted, and the second one is not a nicety:
+#   1. the pill gets one message per page (that is what makes "37/200" move), while the LOG stays
+#      throttled - the user has said in so many words that repeated identical lines annoy him;
+#   2. the batch is written ONCE. On 2026-10-16 this run exposed the opposite: the images branch
+#      passed the SOURCE file as the first output name, so attempt 1 always hit
+#      ERROR_ALREADY_EXISTS (0x800700B7) and the whole batch was decoded and laid out a second
+#      time. 200 pages took 23.6 s instead of 11.5 s, and the log line blamed "another process".
+$w200 = $workerTails[200]
+$w200Text = ($w200 -join "`n")
+Check 'S8.1 the batch was written exactly ONCE (no wasted pass, no name-collision retry)' `
+      (((@($w200 | Select-String 'write retry')).Count -eq 0) -and
+       ((@($w200 | Select-String 'merged 200 image\(s\)')).Count -eq 1)) `
+      "retries=$((@($w200 | Select-String 'write retry')).Count) merged=$((@($w200 | Select-String 'merged ')).Count)"
+
+$report = Line ([pscustomobject]@{ Lines = $w200 }) 'progress reporting:'
+$sent = if ($report) { [regex]::Match($report.ToString(), '(\d+) message\(s\) on the pipe') } else { $null }
+Check 'S8.2 the pipe carried one progress message per page (200)' `
+      ($sent -and $sent.Success -and ($sent.Groups[1].Value -eq '200')) "reporting=[$report]"
+
+# The pill redraws in place (ProgressPresenter.Update only swaps the snapshot), so the log is the
+# only place a line count can be counted. 10 = one per 10%, plus the closing "reporting" line.
+$progressLines = @($w200 | Select-String 'merge-pdf: progress \d+/\d+ ')
+Check 'S8.3 the log stays throttled: at most 12 lines for 200 pages, not 200' `
+      ($progressLines.Count -le 12) "progressLines=$($progressLines.Count)"
+
+$seen = @()
+foreach ($l in $progressLines) {
+    $m = [regex]::Match($l.ToString(), 'progress (\d+)/(\d+)')
+    if ($m.Success) { $seen += [int]$m.Groups[1].Value }
+}
+$increasing = $true
+for ($i = 1; $i -lt $seen.Count; $i++) { if ($seen[$i] -le $seen[$i - 1]) { $increasing = $false } }
+Check 'S8.4 the reported progress only ever moves forward and ends at the last page' `
+      (($seen.Count -ge 4) -and $increasing -and ($seen[$seen.Count - 1] -eq 200)) `
+      "seen=[$($seen -join ',')]"
+
+# The outcome (not the progress) is what the user ends up with: a real 200-page PDF.
+$mergedPdf = Join-Path $scale 'n200\p0001.pdf'
+$ins = Run @('--merge-pdf-inspect', $mergedPdf) 's8-inspect'
+$insLine = Line $ins 'merge-pdf inspect done:'
+Check 'S8.5 the output is still one 200-page PDF (progress reporting changed nothing about it)' `
+      ($insLine -and $insLine.ToString() -match 'pages=200 read=200 ok=True') "inspect=[$insLine]"
 
 ""
 "checks=$script:checks pass=$script:pass fail=$script:fail"

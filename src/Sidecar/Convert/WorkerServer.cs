@@ -569,7 +569,8 @@ internal static class WorkerServer
                 // ——所以整批只會產生一個 result 封包與一個輸出檔，而 `total` 仍然是那一批的
                 // 檔案數（見 totalForResult：總數必須說出「這一輪處理了幾個檔」）。
                 WorkerProtocol.OpMergePdf => MergePdfBatch(paths, i, engine, journal, job.outputDir,
-                                                           job.pageSize, evidence.Line),
+                                                           job.pageSize, evidence.Line,
+                                                           MergeProgress(link, job, evidence.Line)),
                 // 去背：模型路徑**原封不動**傳下去（null＝執行檔旁邊的預設位置）。
                 // 解析規則只有 RemoveBgModel.ResolvePath 那一份，worker 不是第二個擁有者
                 // （與 outputDir 交給 Settings／NamingPolicy 同一條規矩）。
@@ -582,6 +583,11 @@ internal static class WorkerServer
             // ⚠ 合併（多輸入、單輸出）的 `total` **必須是那一批的檔案數**，不是 1：
             // 「這一輪處理了幾個檔」是使用者要看的那件事，而它是 3。
             int totalForResult = paths.Length;
+            // ②（2026-10-16）：`done` 也一樣。合併在 i == 0 那一輪就把**整批**做完了，
+            // 所以結果封包不可以說「1/3」——那會在藥丸上造成一個看得到的**倒退**
+            // （逐檔進度已經走到 200/200，結果封包卻把它拉回 1/200，然後才跳成「✓ 1」）。
+            // 其餘每一個 op 都是真的逐檔，`done = i + 1` 一個字都沒改。
+            int doneForResult = op == WorkerProtocol.OpMergePdf ? paths.Length : i + 1;
 
             link.Send(new WorkerMessage
             {
@@ -597,7 +603,7 @@ internal static class WorkerServer
                 // 「解出來的每一個字元」，所以中間不可以有任何加工（沒有 trim、沒有截斷）。
                 text = result.QrText,
                 detail = result.Detail,
-                done = i + 1,
+                done = doneForResult,
                 total = totalForResult,
                 current = Path.GetFileName(paths[i])
             });
@@ -741,7 +747,8 @@ internal static class WorkerServer
     /// </summary>
     private static ConversionResult MergePdfBatch(string[] paths, int index, ConversionEngine engine,
                                                   TempJournal? journal, string? outputDir,
-                                                  string? pageSize, Action<string> log)
+                                                  string? pageSize, Action<string> log,
+                                                  Action<int, int, string> progress)
     {
         if (index != 0)
         {
@@ -753,7 +760,61 @@ internal static class WorkerServer
             return new ConversionResult(paths[index], null, ConversionError.None,
                 "handled as part of the batch (no separate output)");
         }
-        return engine.MergePdf(paths, journal, outputDir, PdfPageSizeOf(pageSize, log));
+        return engine.MergePdf(paths, journal, outputDir, PdfPageSizeOf(pageSize, log), progress);
+    }
+
+    /// <summary>
+    /// ②（2026-10-16，四項優化）：合併的**逐檔進度**——一個檔真的搬完／排完了才回報一次。
+    ///
+    /// 兩件事在這一處定案，而兩件都是使用者偏好：
+    ///   ① **管道上每一個檔都送**。藥丸是**原地重畫**的（`ProgressPresenter.Update` 只換快照、
+    ///      不寫日誌），所以 200 個檔就是畫面從 `0/200` 一路走到 `200/200`，日誌一行都不多。
+    ///   ② **日誌每 10% 才一行**。使用者明講過討厭重複洗版，而 200 張要 24 秒——印 200 行
+    ///      他只會把日誌關掉。完成那一行一定印（`done == total`），否則日誌上根本看不出
+    ///      「它到底做完了沒」，那正是這一刀要修的病。
+    ///
+    /// 為什麼是**回呼**而不是讓引擎自己送：引擎不知道進度要送去哪裡（worker 的管道、
+    /// 命令列、測試）。管道的形狀只在 worker 這一層。
+    ///
+    /// ③ **重跑要說出來**（2026-10-16 實測踩到）：檔名撞到既有檔案時 `WriteWithCollisionRetry`
+    /// 會**整批重寫一次**（延遲序列是新的、每一頁都重新解碼），於是 `done` 從 200 掉回 1。
+    /// 那不是 bug 而是既有的失敗政策（不覆寫既有檔），但**畫面上看起來像進度倒退**——
+    /// 所以這裡把它講明。第一次量到的實例：`progress 200/200` 之後又出現一整輪，
+    /// 最終產物是 `p0001 (1).pdf`，日誌結尾寫著「400 message(s)」而當場沒有任何東西解釋那多出來的一輪。
+    /// </summary>
+    private static Action<int, int, string> MergeProgress(PipeLink link, WorkerMessage job,
+                                                           Action<string> log)
+    {
+        int sent = 0, logged = 0, lastLogged = 0, lastDone = 0, restarts = 0;
+        return (done, total, name) =>
+        {
+            link.Send(new WorkerMessage
+            {
+                type = WorkerMessageTypes.Progress, jobId = job.jobId,
+                done = done, total = total, current = name
+            });
+            sent++;
+            if (done < lastDone)
+            {
+                restarts++;
+                lastLogged = 0;
+                log($"merge-pdf: progress restarted at {done}/{total} — the output name collided with a file " +
+                    "that already exists, and the whole batch is written again under the next free name " +
+                    "(nothing is overwritten; the restart is reported so the count does not look like a bug)");
+            }
+            lastDone = done;
+            int step = Math.Max(1, total / 10);
+            if (done >= total || done - lastLogged >= step)
+            {
+                lastLogged = done;
+                logged++;
+                log($"merge-pdf: progress {done}/{total} ({done * 100 / Math.Max(1, total)}%) " +
+                    $"current={name}");
+            }
+            if (done >= total)
+                log($"merge-pdf: progress reporting: {sent} message(s) on the pipe, {logged} in the log, " +
+                    $"{restarts} restart(s) (the pill redraws in place; the log is throttled on purpose)");
+        };
     }
 
     /// <summary>
