@@ -515,7 +515,9 @@ internal sealed class Options
                                     remove a row, confirm, cancel and reopen (no screen, no mouse).
                                     It drives the same methods the real drag handlers call
           --merge-ui-dump <png>     render the merge sorting window to a PNG (offscreen composite);
-                                    the row order comes from --merge-ui-selftest
+                                    the row order comes from --merge-ui-selftest, so use it together
+                                    with that flag (at least 2 existing files) - on its own there is
+                                    nothing to draw and it says so instead of writing an empty image
           --tools-list              print the tool layer's sectors (ids, labels, icons) and exit;
                                     no window, no mouse, and it works while Confern is already running
           --wheel-source <FMT>      with --wheel-demo: source format label (default HEIC)
@@ -5435,11 +5437,28 @@ internal static class App
     internal static int RunMergeUiSelfTest(Options opt, Evidence evidence)
     {
         var lines = new ConcurrentQueue<string>();
-        bool dumpOnly = string.IsNullOrEmpty(opt.MergeUiSelfTest) && !string.IsNullOrEmpty(opt.MergeUiDump);
+        // ④（2026-10-16）：這裡原本是「**沒有** `--merge-ui-selftest` 才走 dump 那條路」，
+        //    可是 dump 要畫的那幾列**正是**由 `--merge-ui-selftest` 給的——兩個條件互相排斥。
+        //    於是 help 上寫的那種叫法（兩個一起給）走進 selftest、一張圖都不產（**exit 0**，
+        //    完全靜默）；只給 `--merge-ui-dump` 的那種叫法，視窗裡一列都沒有，開不起來。
+        //    實測：兩種叫法都不產檔。
+        //    對照組就在同一個檔案裡：裁切視窗的 `--crop-ui-dump <png> --crop-source <圖>` 可以用，
+        //    因為它的來源是**另一個**旗標，不是那個「有沒有要跑自測」的旗標。
+        //    所以判準改成「有沒有要 dump」，rows 仍然來自 `--merge-ui-selftest`。
+        bool dumpOnly = !string.IsNullOrEmpty(opt.MergeUiDump);
 
         string[] batch = (opt.MergeUiSelfTest ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries)
             .ToArray();
+        // 沒有 rows 就別開一個空視窗再等它 8 秒逾時——直接說是「少了什麼」。
+        // （這正是上面那個「只給 --merge-ui-dump」的叫法：它以前要等 9 秒才失敗。）
+        if (dumpOnly && batch.Length < 2)
+        {
+            evidence.Line($"merge ui dump: FAILED: --merge-ui-dump needs --merge-ui-selftest with at " +
+                          $"least 2 existing files - the window would have no rows to render " +
+                          $"(got {batch.Length}); nothing was written to '{opt.MergeUiDump}'");
+            return 1;
+        }
         if (!dumpOnly && batch.Length < 2)
         {
             evidence.Line($"merge ui selftest: FAILED to open: --merge-ui-selftest needs at least 2 files " +

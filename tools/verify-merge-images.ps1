@@ -7,6 +7,7 @@
 #   S4  an image+PDF batch is refused by name and writes NO file
 #   S5  the sort window shows the page-size choice for images and hides it for PDFs
 #   S6  sources are byte-identical afterwards (sha256), and the output never overwrites a source
+#   S7  the sort window can actually be rendered to a PNG (and a dump with no rows fails by name)
 #
 # ASCII only on purpose: a BOM-less CJK .ps1 is read as CP950 by PowerShell 5.1 and produces
 # fake syntax errors (see the 2026-10-14 log entry). Keep this file pure ASCII.
@@ -190,6 +191,37 @@ Check 'S6.1 every source is byte-identical (sha256)' $untouched ($detail -join '
 $summary = ($run.Lines | Select-String -Pattern 'merge-pdf summary' | Select-Object -First 1)
 Check 'S6.2 the run reported one output from three sources' `
       ($summary -and $summary.ToString() -match '1 output from 3 source') "line=$summary"
+
+"=== S7  the window can actually be rendered to a file (item 4b) ==="
+# --merge-ui-dump was unusable in BOTH of its documented forms, and neither failure was loud:
+#   * on its own there are no rows to draw - the rows come from --merge-ui-selftest - so the window
+#     refuses to open, and the run failed after 9.1 s with "there is nothing to order";
+#   * together with --merge-ui-selftest it took the SELFTEST branch and never reached the dump at
+#     all: exit 0, no file, and not one line in the log. The silence is the defect, not the PNG.
+# The crop window's --crop-ui-dump works because its rows come from a DIFFERENT flag
+# (--crop-source) - which is why "the row order comes from --merge-ui-selftest" was documented
+# and still broken.
+$dump = Join-Path $Work 'merge-window.png'
+Remove-Item $dump -Force -ErrorAction SilentlyContinue
+$dumpRun = Run @('--merge-ui-selftest', $order, '--merge-ui-dump', $dump) 's7-dump'
+$dumpBytes = 0
+if (Test-Path $dump) { $dumpBytes = (Get-Item $dump).Length }
+Check 'S7.1 the documented invocation writes a real PNG (exit 0, and a file > 5 KB)' `
+      (($dumpRun.Exit -eq 0) -and ($dumpBytes -gt 5000)) `
+      "exit=$($dumpRun.Exit) bytes=$dumpBytes"
+$dumpText = $dumpRun.Lines -join "`n"
+Check 'S7.2 it reports size and colour count, so a blank frame cannot pass' `
+      ($dumpText -match 'merge ui dump: ok=True detail=dump: .*\d+x\d+ .*\d+ bytes, \d+ distinct colours') `
+      (($dumpRun.Lines | Select-String 'merge ui dump' | Select-Object -First 1).ToString())
+
+$bare = Join-Path $Work 'merge-window-bare.png'
+Remove-Item $bare -Force -ErrorAction SilentlyContinue
+$bareRun = Run @('--merge-ui-dump', $bare) 's7-norows'
+$bareText = $bareRun.Lines -join "`n"
+Check 'S7.3 a dump with no rows FAILS BY NAME instead of writing an empty image' `
+      (($bareRun.Exit -ne 0) -and (-not (Test-Path $bare)) -and
+       ($bareText -match 'needs --merge-ui-selftest with at least 2 existing files')) `
+      "exit=$($bareRun.Exit) exists=$(Test-Path $bare)"
 
 ""
 "checks=$script:checks pass=$script:pass fail=$script:fail"
