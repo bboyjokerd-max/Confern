@@ -1,4 +1,4 @@
-# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
+﻿# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
 #
 # Sections:
 #   S6  two-layer stack: the visual layer must be click-through (automatic, NON-INVASIVE)
@@ -15,20 +15,10 @@
 param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S6',
-  # 4a (2026-10-16) -- ANSWERED, and this parameter is NOT the answer: it is declared and never
-  # used anywhere in this file. It is the vestigial hook where "drive S8 by machine" was going to
-  # go. What does exist for that is tools\dragsim: a separate process that starts a REAL OLE drag
-  # (DoDragDrop called INSIDE WM_LBUTTONDOWN, then SendInput MOVE/LEFTDOWN/LEFTUP). It works - its
-  # 2026-10-01 run is what proved that a registered IDropTarget means WM_DROPFILES never arrives
-  # (see src\Sidecar\Interaction\DropTarget.cs near line 124) - and it is NOT wired into this
-  # suite, on purpose:
-  #   * it drives the USER's pointer, and a private desktop does NOT isolate that: SendInput acts
-  #     on the INPUT desktop (tools\probe-private-desktop.ps1 Q2 exists to measure exactly this);
-  #   * its own usage note says the start point must be a blank part of the desktop, because the
-  #     synthesized press can hit a desktop icon - and this suite cannot see the desktop to pick one.
-  # So S8 stays human-guided. If it is ever automated it must be opt-in, with the start point given
-  # by the caller, and the pointer parked afterwards.
-  [string]$DragSim = '',
+  # 4a (2026-10-16): the vestigial `-DragSim` parameter that used to sit here has been REMOVED -
+  # a flag that is accepted and does nothing is the same class of lie as a diagnostic that produces
+  # no file. The full note (what tools\dragsim is, why it is not wired in, what automating S8 would
+  # cost) now lives in the S8 block below, which is the only place it is relevant.
   [int]$DemoX = 900,
   [int]$DemoY = 400,
   # The visual-layer window is anchored at (cursor - PadPx), NOT at the cursor:
@@ -515,9 +505,18 @@ function Invoke-S8([int]$Window) {
   # covered by S6/S7 here and by verify-m1a/m1c. What genuinely needs a human is the POINTER half:
   # a real drag loop calling IDropTarget::DragEnter/DragOver/Drop. Coordinates can only arrive that
   # way (WM_MOUSEMOVE is swallowed by the shell's drag loop), and no synthetic message can fake it:
-  # a registered IDropTarget means WM_DROPFILES never arrives at all. Without the gesture these 13
-  # checks are ENVIRONMENT RED BY DESIGN - that is the intended loud failure, not a broken suite.
-  Write-Host "      (no human within $Window s => these checks fail on purpose; see the DragSim note above)"
+  # a registered IDropTarget means WM_DROPFILES never arrives at all.
+  # A synthesized path DOES exist - tools\dragsim (a separate process that calls DoDragDrop from
+  # inside WM_LBUTTONDOWN, then SendInput MOVE/LEFTDOWN/LEFTUP; its 2026-10-01 run is what proved the
+  # WM_DROPFILES point above) - and it is deliberately NOT wired in here:
+  #   * it drives the USER's pointer, and a private desktop does NOT isolate that: SendInput acts on
+  #     the INPUT desktop (tools\probe-private-desktop.ps1 Q2 exists to measure exactly this);
+  #   * its own usage note says the start point must be a blank part of the desktop, because the
+  #     synthesized press can hit a desktop icon - and this suite cannot see the desktop to pick one.
+  # If S8 is ever automated it must be opt-in, with the start point given by the caller.
+  # Without the gesture these 13 checks are ENVIRONMENT RED BY DESIGN - that is the intended loud
+  # failure, not a broken suite.
+  Write-Host "      (no human within $Window s => these checks fail on purpose; the note above says why this one cannot be automated)"
   Stop-AllSidecar
 
   $root = (Get-Item -LiteralPath $Exe).Directory

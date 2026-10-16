@@ -210,9 +210,21 @@ Check 'S7.1 the documented invocation writes a real PNG (exit 0, and a file > 5 
       (($dumpRun.Exit -eq 0) -and ($dumpBytes -gt 5000)) `
       "exit=$($dumpRun.Exit) bytes=$dumpBytes"
 $dumpText = $dumpRun.Lines -join "`n"
-Check 'S7.2 it reports size and colour count, so a blank frame cannot pass' `
-      ($dumpText -match 'merge ui dump: ok=True detail=dump: .*\d+x\d+ .*\d+ bytes, \d+ distinct colours') `
+# The audit called the old name of this check an overclaim: it promised "a blank frame cannot pass"
+# while only asserting that the words "N distinct colours" appear - and "0 distinct colours" matches
+# that too. The number is now read out and given a floor: a frame carrying only the window chrome
+# would sit in the low tens, the real window measured 590.
+$colours = [regex]::Match($dumpText, '(\d+) distinct colours')
+$colourCount = if ($colours.Success) { [int]$colours.Groups[1].Value } else { -1 }
+Check "S7.2 the dump reports its size and colour count, and the count has a floor ($colourCount > 50)" `
+      (($colours.Success) -and ($colourCount -gt 50)) `
       (($dumpRun.Lines | Select-String 'merge ui dump' | Select-Object -First 1).ToString())
+# ④'s first fix made the dump work by taking "is a selftest running?" out of the picture - which meant
+# giving BOTH flags silently stopped running the selftest, while the new help teaches that exact
+# combination (audit finding). Two flags, two jobs: the dump AND the selftest.
+Check 'S7.4 giving both flags also runs the selftest (it used to be skipped in silence)' `
+      ($dumpText -match 'merge ui selftest done: ok=True') `
+      "selftestLines=$(@($dumpRun.Lines | Select-String 'merge ui selftest').Count)"
 
 $bare = Join-Path $Work 'merge-window-bare.png'
 Remove-Item $bare -Force -ErrorAction SilentlyContinue

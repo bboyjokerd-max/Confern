@@ -98,6 +98,21 @@ function WorkerLogFor([datetime]$since) {
     return @(Get-Content $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)
 }
 
+# An independent audit (2026-10-16) ran this suite while another flow ran it too, and "the newest
+# worker-*.log since the run started" gladly handed back THE OTHER RUN's log - which carries the
+# same 'merge-pdf:' / 'merged 200 image(s)' / 'progress reporting:' lines, so S8.1-S8.4 would have
+# gone green on somebody else's evidence. The worker log names no output path we could match on (it
+# prints the bare file name), so the identity has to come from the COUNT: one job, one log. If more
+# than one new log shows up inside our window, the evidence cannot be attributed - and that is a
+# failure to say out loud, not something to paper over with "newest".
+function WorkerLogsFor([datetime]$since) {
+    $dir = Join-Path $env:LOCALAPPDATA 'Confern'
+    if (-not (Test-Path $dir)) { return @() }
+    return @(Get-ChildItem $dir -Filter 'worker-*.log' -ErrorAction SilentlyContinue |
+             Where-Object { $_.LastWriteTime -ge $since } |
+             Sort-Object LastWriteTime -Descending)
+}
+
 function MakeImage([string]$path, [int]$w, [int]$h) {
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
@@ -267,8 +282,18 @@ New-Item -ItemType Directory -Force -Path $scale | Out-Null
 MakeImage $base 3000 2400     # 7.2 MP, like a real scan
 $peaks = @{}
 $workerTails = @{}
+# S8.0 (2026-10-16, audit): the worker log must be identified by SOMETHING THIS RUN OWNS, not by
+# "the newest one". An independent auditor ran this suite while another flow ran the same suite,
+# and "newest worker-*.log since the run started" happily returned the OTHER run's log - which
+# contains the same 'merge-pdf:' / 'merged 200 image(s)' / 'progress reporting:' lines, so S8.1-S8.4
+# would have gone green on somebody else's evidence. The scale folder is unique per invocation.
+$scaleSubs = @{}
+$workerLogCount = @{}
+$seenWorkerLogs = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Confern') -Filter 'worker-*.log' `
+                                 -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
 foreach ($n in @(20, 200)) {
     $sub = Join-Path $scale "n$n"
+    $scaleSubs[$n] = $sub
     New-Item -ItemType Directory -Force -Path $sub | Out-Null
     1..$n | ForEach-Object { Copy-Item $base (Join-Path $sub ("p{0:d4}.png" -f $_)) -Force }
     $list = (Get-ChildItem $sub -Filter *.png | Sort-Object Name | ForEach-Object { $_.FullName }) -join ';'
@@ -295,7 +320,18 @@ foreach ($n in @(20, 200)) {
     $peaks[$n] = [math]::Round($peak / 1MB, 0)
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
-    $workerTails[$n] = WorkerLogFor $runStart.AddSeconds(-1)
+    # "not there before" beats "newer than my start time": the previous iteration's log can land
+    # inside the next window (measured: the 20-page log was last written 1 s before the 200-page run
+    # started, so a pure timestamp filter counted 2). Anything left over that we did NOT have before
+    # is either ours (1) or somebody else's (2+) - and 2+ must fail, not be silently out-voted.
+    $cand = @(WorkerLogsFor $runStart.AddSeconds(-1) |
+              Where-Object { $seenWorkerLogs -notcontains $_.Name })
+    $workerLogCount[$n] = $cand.Count
+    $workerTails[$n] = if ($cand.Count -ge 1) {
+        @(Get-Content $cand[0].FullName -Encoding UTF8 -ErrorAction SilentlyContinue)
+    } else { @() }
+    $seenWorkerLogs = $seenWorkerLogs + @(WorkerLogsFor $runStart.AddSeconds(-1) |
+                                             ForEach-Object { $_.Name })
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -315,9 +351,11 @@ Check "S6.2 10x the pages does not cost 10x the memory (ratio $([math]::Round($r
 #      ERROR_ALREADY_EXISTS (0x800700B7) and the whole batch was decoded and laid out a second
 #      time. 200 pages took 23.6 s instead of 11.5 s, and the log line blamed "another process".
 $w200 = $workerTails[200]
-$w200Text = ($w200 -join "`n")
+$w200Own = $workerLogCount[200]
+$w200Merge = @($w200 | Select-String 'merge-pdf:').Count
 Check 'S8.0 the 200-page run found ITS OWN worker log (otherwise every check below is vacuous)' `
-      (@($w200 | Select-String 'merge-pdf:').Count -ge 1) "lines=$(@($w200).Count)"
+      (($w200Merge -ge 1) -and ($w200Own -eq 1)) `
+      "lines=$(@($w200).Count) newWorkerLogsInWindow=$w200Own (exactly 1 = attributable; >1 = another run's log is in the window) mergeHits=$w200Merge"
 Check 'S8.1 the batch was written exactly ONCE (no wasted pass, no name-collision retry)' `
       (((@($w200 | Select-String 'write retry')).Count -eq 0) -and
        ((@($w200 | Select-String 'merged 200 image\(s\)')).Count -eq 1)) `
@@ -397,6 +435,17 @@ $deepRun = Run @('--payload-expand', $deep) 's9-deep'
 $deepLine = Line $deepRun 'payload expand:'
 Check 'S9.5 12 levels deep: levels 1..8 are taken (9 files) and it does not crash or recurse away' `
       ($deepLine -and $deepLine.ToString() -match 'out=9 .*truncated=True') "line=$deepLine"
+# The audit found the docs quoting tooDeep=1 while NO check asserted it: the number that tells the
+# user "N folders below the limit were not taken" was the one number nobody pinned down. It is in
+# the expand owner's own line (not in the 'payload expand:' summary), together with capped=, and the
+# two limits must be told apart: the cap run is capped=True/tooDeep=0, the deep run is the opposite.
+$deepPaths = Line $deepRun 'payload paths: in='
+$capPaths = Line $capRun 'payload paths: in='
+Check 'S9.5b the refused folders are COUNTED (deep run: tooDeep=1), and the two limits differ' `
+      ($deepPaths -and $capPaths -and
+       ($deepPaths.ToString() -match 'tooDeep=1') -and ($deepPaths.ToString() -match 'capped=False') -and
+       ($capPaths.ToString() -match 'capped=True') -and ($capPaths.ToString() -match 'tooDeep=0')) `
+      "deep=[$deepPaths] cap=[$capPaths]"
 Check 'S9.6 the depth limit is now SAID OUT LOUD (it used to be silent)' `
       ((Line $deepRun 'payload expand notice:') -match '8') `
       "notice=[$(Line $deepRun 'payload expand notice:')]"
@@ -407,6 +456,30 @@ Check 'S9.8 the two limits are reported by NAME, not by one vague sentence' `
        ("$(Line $deepRun 'payload expand notice:')" -match '8') -and
        ("$(Line $capRun 'payload expand notice:')" -ne "$(Line $deepRun 'payload expand notice:')")) `
       "cap=[$(Line $capRun 'payload expand notice:')] deep=[$(Line $deepRun 'payload expand notice:')]"
+
+"=== S9.9  the sentence must reach the WHEEL, not just the diagnostic (audit finding, item 3) ==="
+# An independent auditor dragged 1002 files (501 PNG + 501 PDF) onto the real wheel and got ONLY
+# "mixed selection" - the truncation clause was swallowed, because the wheel only used it when
+# there was nothing else to say. S9.1-S9.8 all go through --payload-expand, which composes its own
+# sentence, so none of them could see it. This case is safe to drive for real: a mixed batch is
+# REFUSED, so the self-driving --wheel-payload writes nothing back into the source folder.
+$mix2 = Join-Path $Work 'mixed-capped'
+New-Item -ItemType Directory -Force -Path $mix2 | Out-Null
+foreach ($i in 1..501) { Copy-Item $made.FullName (Join-Path $mix2 ("m{0:d4}.pdf" -f $i)) -Force }
+1..501 | ForEach-Object { MakeImage (Join-Path $mix2 ("m{0:d4}.png" -f $_)) 40 40 }
+$mix2Before = (Get-ChildItem $mix2 -Recurse -File).Count
+$wheelMix = Run @('--wheel-payload', $mix2) 's9-wheel-mixed'
+$wheelNotice = Line $wheelMix 'wheel from OLE payload:'
+# NOTE: this file is ASCII-ONLY on purpose (a BOM-less CJK .ps1 is read as CP950 by PS 5.1, so a
+# Chinese literal in a pattern silently never matches - measured the hard way). Hence the verdict is
+# checked through its ASCII field 'status=Mixed' instead of the Chinese sentence.
+Check 'S9.9 the cap is announced on the WHEEL even when the batch is also Mixed' `
+      ($wheelNotice -and ($wheelNotice.ToString() -match 'files=1000') -and
+       ($wheelNotice.ToString() -match 'status=Mixed') -and
+       ($wheelNotice.ToString() -match 'notice=.*1000')) "line=$wheelNotice"
+Check 'S9.10 a refused (Mixed) batch still converts nothing, so the notice costs no side effect' `
+      ((Get-ChildItem $mix2 -Recurse -File).Count -eq $mix2Before) `
+      "before=$mix2Before after=$((Get-ChildItem $mix2 -Recurse -File).Count)"
 
 ""
 "checks=$script:checks pass=$script:pass fail=$script:fail"

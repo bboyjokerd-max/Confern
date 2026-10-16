@@ -622,7 +622,14 @@ internal static class WorkerServer
         {
             type = WorkerMessageTypes.Summary, jobId = job.jobId,
             okCount = succeeded, failedCount = failed,
-            done = succeeded + failed, total = paths.Length
+            // ②（2026-10-16）：**Summary 也**要走整批語意。上一版只改了上面的 Result，
+            // 而 `ConversionClient` 是用**這一包**的 done/total 去建最後那個快照的
+            // （`ProgressPresenter` 拿它畫底部藥丸）⇒ 已經走到 200/200 的進度，
+            // 被這一包拉回 1/200 才跳成「✓ 1」。獨立稽核在產品日誌上抓到這個倒退
+            // （`progress: ✓ 1 done=1/3 …`），所以「不再倒退」原本只做了一半。
+            // okCount／failedCount 仍然是**工作數**（合併是 1 件工作），那沒有錯。
+            done = op == WorkerProtocol.OpMergePdf ? paths.Length : succeeded + failed,
+            total = paths.Length
         });
     }
 

@@ -1668,14 +1668,13 @@ internal static class App
         if (opt.WheelPayload != null)
         {
             string[] injected = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
-            // 拖曳的來源可以是**資料夾**（2026-10-15）。診斷接縫與真實拖曳必須走同一條路，
-            // 否則這個接縫會繼續報「不支援的格式」。下面那句 *** INJECTED PAYLOAD … N path(s) ***
-            // 因此報的是**展開之後**的張數。
-            injected = PayloadPaths.Expand(injected, new FormatCatalog(new CodecRegistry()),
-                                           evidence.Line, out string injectedNotice, out bool injectedTruncated);
-            // ③：這條路只把通知寫進日誌（診斷不是畫面），截斷與否不需要另外分流。
-            _ = injectedTruncated;
-            if (injectedNotice.Length > 0) evidence.Line($"    payload {injectedNotice}");
+            // ③（2026-10-16，獨立稽核）：**這裡不可以自己展開**。
+            //   真實拖曳送進來的是「掉落的那個路徑」——資料夾就是資料夾，展開是
+            //   `ShowWheelFromPayload` **裡面**的事。診斷若先展開一次，輪盤收到的就只剩檔案，
+            //   它自己的 `truncated` 永遠是 false ⇒「只取前 1000 個」那句話在診斷上**永遠
+            //   測不到**（稽核就是拿 `--wheel-payload` 當反例，看到的正是這個假象）。
+            //   而這條接縫的合約本來就是「與真實拖曳走同一條路」（見這一段的開頭）——
+            //   一個會說謊的診斷比沒有診斷更糟。展開後的通知改由輪盤那條路自己報（它有畫面）。
             if (opt.MergeUiAutoConfirm)
             {
                 // 必須在酬載進來**之前**開好：開窗是 Enter 那一刻發生的事，而那已經在下面了。
@@ -1683,7 +1682,8 @@ internal static class App
                 evidence.Line("payload: --merge-ui-autoconfirm is on (the sorting window will confirm " +
                               "the order it shows, by pressing its own confirm button)");
             }
-            evidence.Line($"*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): {injected.Length} path(s) ***");
+            evidence.Line($"*** INJECTED PAYLOAD (diagnostic; NOT a real DragEnter): " +
+                          $"{injected.Length} argument(s) as dropped ***");
             // 依生產順序模擬：先捕捉（升起接收層），酬載才可能到達。
             guard.OnCaptured();
             ShowWheelFromPayload(presenter, catalog, evidence, injected);
@@ -3419,15 +3419,22 @@ internal static class App
             // `tools` 本來就是空的，畫面與改動前一樣。
         }
 
-        // ③（2026-10-16）：**截斷要說出來**——即使判定是 Ready。
+        // ③（2026-10-16）：**截斷要說出來**——即使判定是 Ready，**也即使判定已經是 Mixed**。
         //
         // 「讀到 N 個檔（跳過 M 個）」是給日誌的日常；但「只取前 1000 個」與「8 層以下沒收」
         // 是使用者必須知道的：他拿到的合併成品頁數、檔名、看起來全都正常，只是**少了後面那些**。
-        // 所以只有 `truncated`（＝上限或深度真的截掉了東西，由 `PayloadPaths` 說了算）
-        // 才把這句話推到畫面上；一般的資料夾拖曳畫面一個字都不會變。
-        if (notice == null && expandTruncated && expandNotice.Length > 0)
+        // 只有 `truncated`（＝上限或深度真的截掉了東西，由 `PayloadPaths` 說了算）才說話；
+        // 一般的資料夾拖曳畫面一個字都不會變。
+        //
+        // ⚠ 原本這裡是 `notice == null && …`，也就是「已經有別的話要說，就不提截斷了」。
+        //    獨立稽核的反例（2026-10-16）：1002 個檔（501 PNG ＋ 501 PDF）拖進輪盤 ⇒ 判定
+        //    Mixed ⇒ notice ＝「混合選取，請選同類別：PDF ×500、PNG ×500（例如 p0001.png）」，
+        //    截斷句一個字都沒有——而那個 500／500 還是**截斷之後**才數出來的。
+        //    兩句話講的是兩件不同的事，所以是**疊**，不是二選一：先講「少了什麼」，
+        //    再講「為什麼這一批還不能做」。
+        if (expandTruncated && expandNotice.Length > 0)
         {
-            notice = expandNotice;
+            notice = notice == null ? expandNotice : $"{expandNotice}；{notice}";
         }
 
         // 把「重畫另一層需要的輸入」存起來：Shift 切層時要憑它把原本那一層畫回來。
@@ -4470,7 +4477,14 @@ internal static class App
     internal static int RunCropUiSelfTest(Options opt, Evidence evidence)
     {
         var lines = new ConcurrentQueue<string>();
-        bool dumpOnly = !opt.CropUiSelfTest && !string.IsNullOrEmpty(opt.CropUiDump);
+        // ⚠ 2026-10-16（獨立驗收抓到的同類缺陷）：原本是
+        //     `dumpOnly = !opt.CropUiSelfTest && !string.IsNullOrEmpty(opt.CropUiDump)` ⇒
+        //     兩個旗標一起給（自測 ＋ dump）走**自測**那條，dump 一個字都不提、一張圖都不產，
+        //     而且 exit code 還可能是 0。這正是我剛在 `--merge-ui-dump` 修掉的同一類沉默，
+        //     在裁切這條路徑上原封不動。現在：`wantDump` 只看「有沒有要 dump」，
+        //     而兩個一起給時＝**兩件事都做**（自測照跑，dump 在視窗開好之後順手做）。
+        bool wantDump = !string.IsNullOrEmpty(opt.CropUiDump);
+        bool dumpOnly = wantDump && !opt.CropUiSelfTest;
 
         string? source = opt.CropUiSource;
         if (string.IsNullOrEmpty(source) || !File.Exists(LongPath.Prepare(source)))
@@ -4533,6 +4547,18 @@ internal static class App
             while (lines.TryDequeue(out string? early)) evidence.Line(early);
             evidence.Line($"crop ui selftest done: ok=False (opened={opened} windowPresent={windowPresent})");
             return 1;
+        }
+
+        // ⑨ `--crop-ui-dump`（2026-10-16）：要求的 dump 在這裡就做——視窗剛開好、還沒被自測
+        //    動過，畫面上是「剛打開的樣子」，那正是要審視的那一張。兩個旗標一起給＝兩件事都做。
+        bool dumpOk = !wantDump;
+        string stDumpDetail = "(not requested)";
+        if (wantDump)
+        {
+            Thread.Sleep(500);      // 沒畫完就截會得到半張圖，所以先讓它畫完
+            dumpOk = CropUi.DumpFrame(opt.CropUiDump, 8000, out stDumpDetail, lines.Enqueue);
+            while (lines.TryDequeue(out string? dl)) evidence.Line(dl);
+            evidence.Line($"crop ui dump: ok={dumpOk} detail={stDumpDetail} path={opt.CropUiDump}");
         }
 
         // ② 已經開著時**拒絕**第二次開啟（單一實例）
@@ -5416,7 +5442,8 @@ internal static class App
                       $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing} " +
                       $"reopened={reopened} reopenedPresent={reopenedPresent})");
         evidence.Line("crop ui selftest: ratio states: " + string.Join(" ; ", ratioLines));
-        return ok ? 0 : 1;
+        // ⑨ 的 dump 是**額外要求的產物**，不進上面的行為結論；但「要了卻沒做成」仍是這一場的失敗。
+        return (ok && dumpOk) ? 0 : 1;
     }
 
     /// <summary>
@@ -5444,22 +5471,27 @@ internal static class App
         //    實測：兩種叫法都不產檔。
         //    對照組就在同一個檔案裡：裁切視窗的 `--crop-ui-dump <png> --crop-source <圖>` 可以用，
         //    因為它的來源是**另一個**旗標，不是那個「有沒有要跑自測」的旗標。
-        //    所以判準改成「有沒有要 dump」，rows 仍然來自 `--merge-ui-selftest`。
-        bool dumpOnly = !string.IsNullOrEmpty(opt.MergeUiDump);
+        //
+        // ⚠ 第一版修成「有要 dump 就走 dump 那條、然後 return」——獨立稽核（2026-10-16）指出
+        //    那只是把沉默換個位置：`--merge-ui-selftest A;B --merge-ui-dump Y` 從此**不再跑自測**
+        //    （日誌零 `merge ui selftest:` 行），而新的 help 正是教人這樣叫。
+        //    兩個旗標講的是兩件事，就該兩件都做 ⇒ dump 改成自測那條路**裡面**的額外輸出；
+        //    「只給 dump」仍然當場失敗（沒有列可以畫，見下面那個 wantDump 檢查）。
+        bool wantDump = !string.IsNullOrEmpty(opt.MergeUiDump);
 
         string[] batch = (opt.MergeUiSelfTest ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries)
             .ToArray();
         // 沒有 rows 就別開一個空視窗再等它 8 秒逾時——直接說是「少了什麼」。
         // （這正是上面那個「只給 --merge-ui-dump」的叫法：它以前要等 9 秒才失敗。）
-        if (dumpOnly && batch.Length < 2)
+        if (wantDump && batch.Length < 2)
         {
             evidence.Line($"merge ui dump: FAILED: --merge-ui-dump needs --merge-ui-selftest with at " +
                           $"least 2 existing files - the window would have no rows to render " +
                           $"(got {batch.Length}); nothing was written to '{opt.MergeUiDump}'");
             return 1;
         }
-        if (!dumpOnly && batch.Length < 2)
+        if (!wantDump && batch.Length < 2)
         {
             evidence.Line($"merge ui selftest: FAILED to open: --merge-ui-selftest needs at least 2 files " +
                           $"(got {batch.Length}: '{opt.MergeUiSelfTest ?? "(none)"}')");
@@ -5483,26 +5515,7 @@ internal static class App
             return condition();
         }
 
-        // ---------------------------------------------------------------- `--merge-ui-dump` 那一條
-        if (dumpOnly)
-        {
-            MergeUi.Open(batch, (_, _) => { }, lines.Enqueue);
-            bool up = WaitFor(() => MergeUi.IsOpen, 8000);
-            if (!up)
-            {
-                while (lines.TryDequeue(out string? early)) evidence.Line(early);
-                evidence.Line("merge ui dump: FAILED to open the window");
-                return 1;
-            }
-            Thread.Sleep(500);      // 讓排版跑完，dump 才拿得到真正的畫面
-            bool dumped = MergeUi.DumpFrame(opt.MergeUiDump, 8000, out string dumpDetail, lines.Enqueue);
-            MergeUi.Close();
-            WaitFor(() => !MergeUi.IsOpen, 3000);
-            while (lines.TryDequeue(out string? line)) evidence.Line(line);
-            evidence.Line($"merge ui dump: ok={dumped} detail={dumpDetail} path={opt.MergeUiDump}");
-            return dumped ? 0 : 1;
-        }
-
+        // ---------------------------------------------------------------- 自測（＋要求的 dump）
         // ① 開啟
         string[]? confirmed = null;
         int confirmCalls = 0;
@@ -5522,6 +5535,20 @@ internal static class App
             while (lines.TryDequeue(out string? early)) evidence.Line(early);
             evidence.Line($"merge ui selftest done: ok=False (opened={opened} windowPresent={windowPresent})");
             return 1;
+        }
+
+        // ④（2026-10-16）：要求的 dump 在**這裡**做——窗已經開好、排版也跑完了，
+        //    不必為了同一張圖再開一次窗，而且兩個旗標一起給時自測仍然照跑（見上面那段註解）。
+        //    自測自己的結論（`merge ui selftest done: ok=…`）不受影響；但**被要求的 dump
+        //    沒有成功就是這一場的失敗** ⇒ 那個 exit code 要在最後一併算進來。
+        bool dumpOk = !wantDump;
+        string dumpDetail = "(not requested)";
+        if (wantDump)
+        {
+            Thread.Sleep(500);      // 讓排版跑完，dump 才拿得到真正的畫面
+            dumpOk = MergeUi.DumpFrame(opt.MergeUiDump, 8000, out dumpDetail, lines.Enqueue);
+            while (lines.TryDequeue(out string? dl)) evidence.Line(dl);
+            evidence.Line($"merge ui dump: ok={dumpOk} detail={dumpDetail} path={opt.MergeUiDump}");
         }
 
         // ② 初始順序**必須等於來源順序**。期望值來自命令列那一組檔（＝呼叫端給的順序），
@@ -5683,6 +5710,9 @@ internal static class App
                   && closed && handedMatches && removedNotHanded
                   && reopened && reopenedPresent && reopenOrderIsSource
                   && closedByCancel && cancelGaveNothing;
+        // ④（2026-10-16）：自測的結論**不含** dump（那是額外要求的產物，不是視窗行為的一部分），
+        // 所以上面那行 `merge ui selftest done: ok=…` 保持原意；但「被要求的 dump 沒成功」
+        // 仍然是這一場的失敗 ⇒ 只有 exit code 要把它算進來。兩個旗標一起給時，兩件事都做。
         evidence.Line($"merge ui selftest done: ok={ok} (opened={opened} windowPresent={windowPresent} " +
                       $"initialOrderMatches={initialMatches} singleInstance={singleInstance} " +
                       $"drag={dragged} dragSemantics={dragMatches} dragReturn={dragReturned} " +
@@ -5693,7 +5723,7 @@ internal static class App
                       $"reopened={reopened} reopenedPresent={reopenedPresent} " +
                       $"reopenOrderIsSource={reopenOrderIsSource} " +
                       $"cancelled={closedByCancel} cancelGaveNothing={cancelGaveNothing})");
-        return ok ? 0 : 1;
+        return (ok && dumpOk) ? 0 : 1;
     }
 
     /// <summary>

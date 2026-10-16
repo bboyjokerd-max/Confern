@@ -2464,10 +2464,15 @@ internal sealed class ConversionEngine
             catch (Exception ex) when (IsNameTaken(ex) && attempt < MaxWriteAttempts)
             {
                 tried.Add(targetPath);
+                // ⚠ 2026-10-16（獨立稽核）：這句原本寫成「was taken by another process … (a second
+                // --convert, or the resident Confern, is writing the same folder)」——那個「誰」是**猜的**。
+                // 它當時是在掩蓋一個 bug（圖片合併把來源檔當成第一版輸出名 ⇒ 每次必定碰撞），
+                // 那個 bug 修掉之後，走到這裡只剩兩種真原因：有另一個行程同時在寫，或那個名字
+                // 本來就躺著一個檔。訊息只講我們**知道**的事（名字在寫入當下已經存在），
+                // 要指名「誰」就得有證據。進度側自己的重啟另有 `progress restarted` 那條（不同事件）。
                 _log($"write retry {attempt}/{MaxWriteAttempts} for {Path.GetFileName(sourcePath)}: " +
-                     $"the output name '{Path.GetFileName(targetPath)}' was taken by another process " +
-                     $"({ex.GetType().Name} 0x{ex.HResult:X8}) -> picking another name " +
-                     "(a second --convert, or the resident Confern, is writing the same folder)");
+                     $"the output name '{Path.GetFileName(targetPath)}' already existed at write time " +
+                     $"({ex.GetType().Name} 0x{ex.HResult:X8}) -> picking another name");
                 string next = resolve(tried);
                 if (string.Equals(next, targetPath, StringComparison.OrdinalIgnoreCase))
                 {
