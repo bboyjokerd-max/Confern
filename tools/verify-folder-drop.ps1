@@ -8,6 +8,8 @@
 #   S5  the expansion is idempotent (a second pass over files re-sorts nothing)
 #   S6  peak memory does NOT grow linearly with the page count
 #   S7  a Mixed batch says WHICH file is the odd one out, and the summary cannot grow into a page
+#   S8  a 200-page merge reports progress, and writes the batch exactly once (no wasted pass)
+#   S9  the two limits actually fire: 1000 files (capped) and 8 levels deep (and both say so)
 #
 # ASCII only on purpose: a BOM-less CJK .ps1 is read as CP950 by PowerShell 5.1 and produces
 # fake syntax errors. All assertions below use the ASCII fields of the product's log
@@ -76,23 +78,24 @@ function NoticeOf([object]$r, [string]$anchor, [string]$end) {
     return ''
 }
 
-# The merge runs in a SEPARATE worker process, and everything it says about its own work
-# (progress, per-file retries, the "merged N image(s)" summary) lands in ONE shared file that
-# every run APPENDS to. Reading the tail blindly mixes in other runs - and the previous run of
-# this very suite is always in there. So: remember the line count before a run and read after it.
-# If the file was recreated (fewer lines than before) the whole file belongs to this run.
-function WorkerLogPath { Join-Path $env:LOCALAPPDATA 'Confern\worker.log' }
-function WorkerLogLineCount {
-    $p = WorkerLogPath
-    if (Test-Path $p) { return @(Get-Content $p -Encoding UTF8 -ErrorAction SilentlyContinue).Count }
-    return 0
-}
-function WorkerLogSince([int]$fromLines) {
-    $p = WorkerLogPath
-    if (-not (Test-Path $p)) { return @() }
-    $all = @(Get-Content $p -Encoding UTF8 -ErrorAction SilentlyContinue)
-    if ($fromLines -le 0 -or $all.Count -lt $fromLines) { return $all }
-    return @($all[$fromLines..($all.Count - 1)])
+# The merge runs in a SEPARATE worker process, and everything it says about its own work (progress,
+# per-file retries, the "merged N image(s)" summary) is written to that process's OWN log file,
+# flushed a line at a time. Read THAT one, found by "written during this run".
+#
+# Do NOT read the shared worker.log: it is a MIRROR that is flushed in batches, and this suite
+# kills Confern with Stop-Process -Force right after "worker result" shows up. A Force kill skips
+# Dispose, so the mirrored lines are lost - measured: the shared file grew by 0 lines for every
+# one of this suite's runs, while the hand-run merges (which exit by themselves) all showed up in
+# it. The first version of these checks read the mirror and reported "no progress, no merge" for a
+# run that had plainly produced a 200-page PDF.
+function WorkerLogFor([datetime]$since) {
+    $dir = Join-Path $env:LOCALAPPDATA 'Confern'
+    if (-not (Test-Path $dir)) { return @() }
+    $f = Get-ChildItem $dir -Filter 'worker-*.log' -ErrorAction SilentlyContinue |
+         Where-Object { $_.LastWriteTime -ge $since } |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $f) { return @() }
+    return @(Get-Content $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)
 }
 
 function MakeImage([string]$path, [int]$w, [int]$h) {
@@ -271,7 +274,7 @@ foreach ($n in @(20, 200)) {
     $list = (Get-ChildItem $sub -Filter *.png | Sort-Object Name | ForEach-Object { $_.FullName }) -join ';'
     $log = Join-Path $Work "scale-$n.log"
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    $workerFrom = WorkerLogLineCount
+    $runStart = Get-Date
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $pr = Start-Process -FilePath $Exe -ArgumentList @('--merge-pdf', $list, '--quiet', '--log', $log,
         '--tray-exit-after', '300000') -PassThru -WindowStyle Hidden
@@ -290,7 +293,9 @@ foreach ($n in @(20, 200)) {
     }
     $pr.WaitForExit(30000) | Out-Null
     $peaks[$n] = [math]::Round($peak / 1MB, 0)
-    $workerTails[$n] = WorkerLogSince $workerFrom
+    Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+    $workerTails[$n] = WorkerLogFor $runStart.AddSeconds(-1)
     Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -311,6 +316,8 @@ Check "S6.2 10x the pages does not cost 10x the memory (ratio $([math]::Round($r
 #      time. 200 pages took 23.6 s instead of 11.5 s, and the log line blamed "another process".
 $w200 = $workerTails[200]
 $w200Text = ($w200 -join "`n")
+Check 'S8.0 the 200-page run found ITS OWN worker log (otherwise every check below is vacuous)' `
+      (@($w200 | Select-String 'merge-pdf:').Count -ge 1) "lines=$(@($w200).Count)"
 Check 'S8.1 the batch was written exactly ONCE (no wasted pass, no name-collision retry)' `
       (((@($w200 | Select-String 'write retry')).Count -eq 0) -and
        ((@($w200 | Select-String 'merged 200 image\(s\)')).Count -eq 1)) `
@@ -344,6 +351,62 @@ $ins = Run @('--merge-pdf-inspect', $mergedPdf) 's8-inspect'
 $insLine = Line $ins 'merge-pdf inspect done:'
 Check 'S8.5 the output is still one 200-page PDF (progress reporting changed nothing about it)' `
       ($insLine -and $insLine.ToString() -match 'pages=200 read=200 ok=True') "inspect=[$insLine]"
+
+"=== S9  the two limits: 1000 files and 8 levels deep (item 3) ==="
+# Both limits were only ever exercised as "not hit" (capped=False). A limit that has never fired is
+# a promise with no evidence - and the DEPTH limit was worse than that: Collect() returned at the
+# top level with no log line and no notice, so a deep folder quietly produced a SHORT merge whose
+# page count, names and preview all still looked right.
+#
+# These runs use --payload-expand, not --wheel-payload. That is not a shortcut: --wheel-payload
+# also opens the wheel and then DRIVES it (rotate, press Enter) - that is its job - so asking it
+# "what did the folder expand to" costs a real conversion of the whole batch INTO THE SOURCE
+# FOLDER. Measured: the 1001-file folder below came back with 5001 files (jpg/bmp/tif alongside
+# every source). --payload-expand expands through the same owner (PayloadPaths) and writes nothing.
+$cap = Join-Path $Work 'cap-1001'
+New-Item -ItemType Directory -Force -Path $cap | Out-Null
+MakeImage (Join-Path $Work 'cap-base.png') 90 90
+1..1001 | ForEach-Object { Copy-Item (Join-Path $Work 'cap-base.png') (Join-Path $cap ("c{0:d4}.png" -f $_)) -Force }
+$capBefore = (Get-ChildItem $cap -Recurse -File).Count
+$capRun = Run @('--payload-expand', $cap) 's9-cap'
+$capLine = Line $capRun 'payload expand:'
+Check 'S9.1 the cap fires at 1000 files, not at 1001 and not later' `
+      ($capLine -and $capLine.ToString() -match 'out=1000 .*truncated=True') `
+      "files=$capBefore line=$capLine"
+Check 'S9.2 the capped notice says which limit was hit (it names 1000)' `
+      ((Line $capRun 'payload expand notice:') -match '1000') `
+      "notice=[$(Line $capRun 'payload expand notice:')]"
+Check 'S9.3 a capped batch is still usable - truncation is not a failure' `
+      ($capLine -and $capLine.ToString() -match 'status=Ready') "line=$capLine"
+Check 'S9.4 the diagnostic itself left the source folder alone (it converts nothing)' `
+      ((Get-ChildItem $cap -Recurse -File).Count -eq $capBefore) `
+      "before=$capBefore after=$((Get-ChildItem $cap -Recurse -File).Count)"
+
+# Depth: root + d1..d12, one image each. depth 0 is the dropped folder itself, so files in d1..d8
+# are collected (9 in total) and d9 is the first folder that is refused - and now REPORTED.
+$deep = Join-Path $Work 'deep-12'
+New-Item -ItemType Directory -Force -Path $deep | Out-Null
+MakeImage (Join-Path $deep 'f0.png') 60 60
+$cur = $deep
+foreach ($level in 1..12) {
+    $cur = Join-Path $cur ("d$level")
+    New-Item -ItemType Directory -Force -Path $cur | Out-Null
+    MakeImage (Join-Path $cur "f$level.png") 60 60
+}
+$deepRun = Run @('--payload-expand', $deep) 's9-deep'
+$deepLine = Line $deepRun 'payload expand:'
+Check 'S9.5 12 levels deep: levels 1..8 are taken (9 files) and it does not crash or recurse away' `
+      ($deepLine -and $deepLine.ToString() -match 'out=9 .*truncated=True') "line=$deepLine"
+Check 'S9.6 the depth limit is now SAID OUT LOUD (it used to be silent)' `
+      ((Line $deepRun 'payload expand notice:') -match '8') `
+      "notice=[$(Line $deepRun 'payload expand notice:')]"
+Check 'S9.7 a deep folder still produces a usable batch, not an empty one' `
+      ($deepLine -and $deepLine.ToString() -match 'status=Ready') "line=$deepLine"
+Check 'S9.8 the two limits are reported by NAME, not by one vague sentence' `
+      (("$(Line $capRun 'payload expand notice:')" -match '1000') -and
+       ("$(Line $deepRun 'payload expand notice:')" -match '8') -and
+       ("$(Line $capRun 'payload expand notice:')" -ne "$(Line $deepRun 'payload expand notice:')")) `
+      "cap=[$(Line $capRun 'payload expand notice:')] deep=[$(Line $deepRun 'payload expand notice:')]"
 
 ""
 "checks=$script:checks pass=$script:pass fail=$script:fail"

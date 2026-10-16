@@ -26,15 +26,23 @@ internal static class PayloadPaths
     /// 讓它們進判定會把整批變成 Mixed（實測：`C:\Temp\a.jpg;C:\Temp\doc.pdf` 就是這樣變 Mixed 的）。
     /// </summary>
     /// <param name="notice">給人看的一行「實際發生了什麼」；沒有特別的事就是空字串。</param>
+    /// <param name="truncated">
+    /// 「有東西**沒有**被收進來」。呼叫端要拿它決定「這句話要不要給使用者看」：
+    /// 平常那句「讀到 N 個檔（跳過 M 個）」是給日誌的，而截斷（1000 個上限、8 層深度）
+    /// 是使用者**必須**知道的——不然他拿到的是 1000 頁的成品，而且看起來完全正常。
+    /// 「什麼算截斷」只有這裡說了算。
+    /// </param>
     public static string[] Expand(IReadOnlyList<string> dropped, IFormatCatalog catalog,
-                                   Action<string>? log, out string notice)
+                                   Action<string>? log, out string notice, out bool truncated)
     {
         notice = "";
+        truncated = false;
         if (dropped == null || dropped.Count == 0) return Array.Empty<string>();
 
         var kept = new List<string>();
         int skipped = 0;
         int folders = 0;
+        int tooDeep = 0;
         bool capped = false;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -60,7 +68,7 @@ internal static class PayloadPaths
 
             folders++;
             int before = kept.Count;
-            Collect(entry, 0, catalog, log, kept, seen, ref skipped, ref capped);
+            Collect(entry, 0, catalog, log, kept, seen, ref skipped, ref capped, ref tooDeep);
             log?.Invoke($"payload paths: folder '{entry}' -> {kept.Count - before} file(s) taken");
             if (capped) break;   // 上限到了就別再去翻下一個資料夾
         }
@@ -74,17 +82,30 @@ internal static class PayloadPaths
 
         if (capped) notice = $"資料夾展開：已達上限，只取前 {MaxFiles} 個檔";
         else if (folders > 0) notice = $"資料夾展開：讀到 {kept.Count} 個檔（跳過 {skipped} 個）";
+        truncated = capped || tooDeep > 0;
+        // 🔴 2026-10-16（③）：深度上限原本是**靜默**的——`Collect` 到頂就 return，沒有任何一行
+        //    說出來。也就是說「拖了一個結構很深的資料夾」會安靜地少收檔案，而使用者拿到的
+        //    合併結果看起來完全正常（頁數對、檔名對），只是少了後面那幾層。
+        //    這一條與檔案數上限（capped）是同一條規矩：**截斷可以，靜默不行**。
+        if (tooDeep > 0)
+            notice += (notice.Length > 0 ? "；" : "") +
+                      $"另有 {tooDeep} 個資料夾在 {MaxDepth} 層以下，未收";
 
         log?.Invoke($"payload paths: in={dropped.Count} folders={folders} out={kept.Count} " +
-                    $"skipped={skipped} capped={capped}");
+                    $"skipped={skipped} capped={capped} tooDeep={tooDeep}");
         return kept.ToArray();
     }
 
     /// <summary>遞迴收集一個資料夾。深度到頂就停、數量到頂就停，兩者都不靜默。</summary>
     private static void Collect(string folder, int depth, IFormatCatalog catalog, Action<string>? log,
-                                List<string> kept, HashSet<string> seen, ref int skipped, ref bool capped)
+                                List<string> kept, HashSet<string> seen, ref int skipped, ref bool capped,
+                                ref int tooDeep)
     {
-        if (capped || depth > MaxDepth) return;
+        if (capped) return;
+        // 到頂了：**數出來**（呼叫端會把它寫進 notice 與日誌）。這裡數的是「沒有進去的資料夾」，
+        // 不是它底下有幾個檔——後者要把整棵子樹走一遍才知道，而這一條路的目的是「不要因為
+        // 一個意外的巨樹卡住」，不是精算。
+        if (depth > MaxDepth) { tooDeep++; return; }
 
         string[] files;
         string[] dirs;
@@ -116,7 +137,7 @@ internal static class PayloadPaths
         foreach (string dir in dirs)
         {
             if (IsJunk(dir)) { skipped++; continue; }
-            Collect(dir, depth + 1, catalog, log, kept, seen, ref skipped, ref capped);
+            Collect(dir, depth + 1, catalog, log, kept, seen, ref skipped, ref capped, ref tooDeep);
             if (capped) return;
         }
     }

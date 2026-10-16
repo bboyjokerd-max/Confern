@@ -297,6 +297,21 @@ internal static class Program
             return App.RunToolsList(opt, toolEvidence);
         }
 
+        // ③ 診斷（2026-10-16）：`--payload-expand <p1;p2;…>`——**只展開，什麼都不做**。
+        //
+        // 為什麼需要它：資料夾展開的結果（收了幾個、跳過幾個、有沒有撞到 1000 個上限、
+        // 有沒有 8 層以下的東西沒收）原本只能從 `--wheel-payload` 那條路看出來，而那一條
+        // **會自己轉輪盤、自己按 Enter**（那是它的工作：驗輪盤的互動）。於是「問一句展開收到什麼」
+        // 的代價是「把整批檔真的轉一遍」——實測：1001 個檔的資料夾被它轉成 5001 個檔
+        // （jpg／bmp／tif 各一份，就寫在來源資料夾裡）。
+        // 這一條路**不開視窗、不轉檔、不碰來源資料夾**，只有展開與那一行 `payload paths:`。
+        if (!string.IsNullOrEmpty(opt.PayloadExpand))
+        {
+            Native.AttachParentConsole();
+            using var expandEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunPayloadExpand(opt, expandEvidence);
+        }
+
         // M3 第四顆扇形：裁切視窗的生命週期與互動自測（不必畫面、**不必滑鼠**）。
         // 與上面的 `--crop` 是兩條不同的路：這一條驗的是**視窗**，那一條驗的是**引擎與協議**。
         if (opt.CropUiSelfTest || !string.IsNullOrEmpty(opt.CropUiDump))
@@ -517,6 +532,9 @@ internal sealed class Options
           --quality <60-100>        JPG/WebP quality for --convert (default 85)
           --worker <pipeName>       run as the conversion worker and connect back to this pipe (spec 9.1)
           --progress-dump <dir>     render the progress line to PNGs (verifies glyphs without a screen)
+          --payload-expand <p1;p2>  expand folders exactly like a real drop does (same recursion limit,
+                                    same cap) and print what was taken; no window and no conversion, so
+                                    the source folder is never touched
           --progress-dump-detail <png>
                                     render the spec 7.3 failure list (filename + reason) to a PNG and exit;
                                     with --convert the rows come from a real failing conversion, and with
@@ -860,6 +878,13 @@ internal sealed class Options
     /// 讓驗收能斷言「視窗長什麼樣、有沒有捲軸」。內容順序來自 `--merge-ui-selftest` 的那一組檔。</summary>
     public string MergeUiDump = "";
     /// <summary>
+    /// ③ `--payload-expand &lt;p1;p2;…&gt;`：**只展開，什麼都不做**——把「一個資料夾被拖進來之後
+    /// 到底收到哪些檔」變成一個不必開視窗、不必轉檔、**不會在來源資料夾裡留下東西**的問題。
+    /// 原本只有 `--wheel-payload` 問得到，而那一條會自己轉輪盤、自己按 Enter（那是它的工作），
+    /// 代價是整批檔真的被轉一遍：實測 1001 個檔的資料夾被轉成 5001 個檔。
+    /// </summary>
+    public string PayloadExpand = "";
+    /// <summary>
     /// `--merge-ui-autoconfirm`：讓下一個開起來的排序視窗**自己按確認**（走真視窗的確認鈕，
     /// 不注入合成滑鼠）。搭配 `--wheel-payload … --wheel-tool merge-pdf` 時，這一條診斷會
     /// **留下來等**那個延後的合併真的跑完——這是「畫面順序 → 確認回呼 → 排進佇列 → 抽乾 →
@@ -1149,6 +1174,7 @@ internal sealed class Options
                 case "--crop-ui-dump": if (i + 1 < args.Length) o.CropUiDump = args[++i]; break;
                 case "--merge-ui-selftest": if (i + 1 < args.Length) o.MergeUiSelfTest = args[++i]; break;
                 case "--merge-ui-dump": if (i + 1 < args.Length) o.MergeUiDump = args[++i]; break;
+                        case "--payload-expand": if (i + 1 < args.Length) o.PayloadExpand = args[++i]; break;
         case "--merge-ui-autoconfirm": o.MergeUiAutoConfirm = true; break;
                 case "--wheel-source": if (i + 1 < args.Length) o.WheelSource = args[++i]; break;
                 case "--wheel-targets":
@@ -1644,7 +1670,9 @@ internal static class App
             // 否則這個接縫會繼續報「不支援的格式」。下面那句 *** INJECTED PAYLOAD … N path(s) ***
             // 因此報的是**展開之後**的張數。
             injected = PayloadPaths.Expand(injected, new FormatCatalog(new CodecRegistry()),
-                                           evidence.Line, out string injectedNotice);
+                                           evidence.Line, out string injectedNotice, out bool injectedTruncated);
+            // ③：這條路只把通知寫進日誌（診斷不是畫面），截斷與否不需要另外分流。
+            _ = injectedTruncated;
             if (injectedNotice.Length > 0) evidence.Line($"    payload {injectedNotice}");
             if (opt.MergeUiAutoConfirm)
             {
@@ -3344,7 +3372,8 @@ internal static class App
         // 判定、工具層、merge-pdf、頁面大小三選一、排序視窗、引擎**全都不用改**——
         // 一個裝著 20 張圖的資料夾會自動讓 MERGE PDF 出現（AppliesTo 已經拿得到檔案數）。
         // ⚠ 展開之後 paths 就是「真正要處理的那一批」，下面每一句看到的都是它。
-        paths = PayloadPaths.Expand(paths, catalog, evidence.Line, out string expandNotice);
+        paths = PayloadPaths.Expand(paths, catalog, evidence.Line, out string expandNotice,
+                                    out bool expandTruncated);
         if (expandNotice.Length > 0) evidence.Line($"    payload {expandNotice}");
 
         PayloadVerdict verdict = catalog.Classify(paths);
@@ -3386,6 +3415,17 @@ internal static class App
             // 這一層沒有東西可選，但工具層可能有 ⇒ 工具清單**不跟著清掉**（見上面 ②）。
             // 若連工具都沒有（例如一個目錄認識、卻沒有任何工具適用的格式），
             // `tools` 本來就是空的，畫面與改動前一樣。
+        }
+
+        // ③（2026-10-16）：**截斷要說出來**——即使判定是 Ready。
+        //
+        // 「讀到 N 個檔（跳過 M 個）」是給日誌的日常；但「只取前 1000 個」與「8 層以下沒收」
+        // 是使用者必須知道的：他拿到的合併成品頁數、檔名、看起來全都正常，只是**少了後面那些**。
+        // 所以只有 `truncated`（＝上限或深度真的截掉了東西，由 `PayloadPaths` 說了算）
+        // 才把這句話推到畫面上；一般的資料夾拖曳畫面一個字都不會變。
+        if (notice == null && expandTruncated && expandNotice.Length > 0)
+        {
+            notice = expandNotice;
         }
 
         // 把「重畫另一層需要的輸入」存起來：Shift 切層時要憑它把原本那一層畫回來。
@@ -4325,6 +4365,33 @@ internal static class App
     /// （它誠實地回答「目錄過濾查詢」），但它**單獨存在時會讓人以為執行期路徑已經被覆蓋**。
     /// 所以現在：給了酬載就用酬載（等於執行期），只給 `--wheel-source` 才是目錄查詢。
     /// </summary>
+    /// <summary>
+    /// ③ `--payload-expand`：**只展開，什麼都不做**。
+    ///
+    /// 這一條路存在的理由就是「不要順手做別的事」：`--wheel-payload` 問得到同一件事，
+    /// 但它會把輪盤真的轉一輪、真的按 Enter（那是它的工作：驗輪盤的互動），代價是整批檔
+    /// 真的被轉一遍——實測 1001 個檔的資料夾被它轉成 5001 個檔（jpg／bmp／tif 各一份，
+    /// 就寫在來源資料夾裡）。驗收要問「展開收到什麼」的時候，不該付出那個代價。
+    ///
+    /// 輸出刻意**全部是 ASCII 欄位**（`in= / out= / capped= / tooDeep= / truncated=`）：
+    /// notice 那句話是給人看的中文，但可以斷言的東西不該靠中文字串。
+    /// </summary>
+    internal static int RunPayloadExpand(Options opt, Evidence evidence)
+    {
+        string[] dropped = (opt.PayloadExpand ?? "")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries);
+        var catalog = new FormatCatalog(new CodecRegistry());
+        string[] paths = PayloadPaths.Expand(dropped, catalog, evidence.Line,
+                                             out string notice, out bool truncated);
+        PayloadVerdict verdict = catalog.Classify(paths);
+        evidence.Line($"payload expand: in={dropped.Length} out={paths.Length} " +
+                      $"truncated={truncated} status={verdict.Status} " +
+                      $"source={verdict.SourceFormat ?? "-"}");
+        evidence.Line($"payload expand notice: {(notice.Length > 0 ? notice : "-")}");
+        foreach (string path in paths) evidence.Line($"payload expand kept: {path}");
+        return 0;
+    }
+
     internal static int RunToolsList(Options opt, Evidence evidence)
     {
         PayloadVerdict verdict;
@@ -4338,7 +4405,8 @@ internal static class App
             string[] paths = opt.WheelPayload.Split(';', StringSplitOptions.RemoveEmptyEntries);
             // 同站 1：來源可以是資料夾。這裡沒有 evidence，所以把「讀到幾個／跳過幾個」
             // 併進 how 那一行——診斷講的話必須跟真實路徑一致。
-            paths = PayloadPaths.Expand(paths, catalog, null, out string expandNotice);
+            paths = PayloadPaths.Expand(paths, catalog, null, out string expandNotice, out bool expandTruncated);
+        _ = expandTruncated;   // --tools-list 把通知整句併進 how（見 ①），不另外顯示
             verdict = catalog.Classify(paths);
             mixNotice = catalog.DescribeMix(paths);
             how = $"runtime classification of {paths.Length} payload file(s) (FormatCatalog.Classify)" +
