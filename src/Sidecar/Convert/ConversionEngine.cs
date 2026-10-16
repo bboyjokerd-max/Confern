@@ -1611,26 +1611,34 @@ internal sealed class ConversionEngine
         // ② 逐檔解第一頁畫格。多頁 TIFF／動畫 GIF 只取第一格（規格 §6.1）——**這一條要留下痕跡**：
         //    否則「給了 5 頁的 TIFF、只拿到 1 頁」在日誌上完全看不出來，而它的產物看起來
         //    跟一張正常的圖一模一樣（頁數對、尺寸對、大小也對）。
-        var frames = new List<BitmapSource>(paths.Length);
-        for (int i = 0; i < paths.Length; i++)
+        // ② 逐檔解第一頁畫格，**一次只有一張在記憶體裡**（2026-10-15：拖資料夾之後，批次動輒
+        //    兩百張，先把每一張都解成 BitmapSource 收起來會吃到 GB 級）。
+        //    多頁 TIFF／動畫 GIF 只取第一格（規格 §6.1）——**這一條要留下痕跡**：否則「給了 5 頁的
+        //    TIFF、只拿到 1 頁」在日誌上完全看不出來，而它的產物看起來跟一張正常的圖一模一樣。
+        // ⚠ 解不開的那張是在**寫入途中**才發現的（延遲序列），所以它不能像以前那樣當場 return：
+        //    它丟一個帶著名分的例外出來，由下面那個 catch 分類。這樣契約不變——
+        //    ①失敗仍然「具名 + 分類」（不是一句「PDF 寫入失敗」）②`WriteWithCollisionRetry`
+        //    底下的 AtomicWriter **不會** commit，所以不會留下半成品。
+        IEnumerable<BitmapSource> Frames()
         {
-            string path = paths[i];
-            try
+            for (int i = 0; i < paths.Length; i++)
             {
-                (BitmapSource frame, int frameCount) = DecodeFirstFrame(path);
+                string path = paths[i];
+                BitmapSource frame;
+                int frameCount;
+                try
+                {
+                    (frame, frameCount) = DecodeFirstFrame(path);
+                }
+                catch (Exception ex)
+                {
+                    throw new MergeFrameDecodeException(path, i + 1, ex);
+                }
+
                 if (frameCount > 1)
                     _log($"merge-pdf: {Path.GetFileName(path)} (第 {i + 1} 個檔) holds {frameCount} frame(s); " +
                          "only the FIRST one becomes a page (spec 6.1: multi-page TIFF / animated GIF)");
-                frames.Add(frame);
-            }
-            catch (Exception ex)
-            {
-                string format = _codecs.FormatOfPath(path) ?? "?";
-                _log($"merge-pdf: refusing {Path.GetFileName(path)}: it cannot be decoded " +
-                     $"({ex.GetType().Name}); fail-fast -> NO file is written");
-                return MergeFail(path, i + 1,
-                    MapDecodeStatus(CodecRegistry.ClassifyDecodeException(ex, format, path)),
-                    $"{ex.GetType().Name}: {ex.Message}");
+                yield return frame;
             }
         }
 
@@ -1641,23 +1649,59 @@ internal sealed class ConversionEngine
         // `AAA-first..pdf`——兩個點。那個名字本身還能開，所以它只會在使用者看到檔名時才被發現。
         string extension = "pdf";
         long written = 0;
-        ConversionResult done = WriteWithCollisionRetry(paths[0], paths[0], journal,
-            stream =>
-            {
-                PdfFromImage.WriteMany(frames, stream, pageSize);
-                written = stream.Length;
-            },
-            tried => NamingPolicy.ResolveOutputPath(paths[0], extension, targetDirectory, tried.ToList()),
-            out string targetPath);
+        int pages = 0;
+        string targetPath;
+        ConversionResult done;
+        try
+        {
+            done = WriteWithCollisionRetry(paths[0], paths[0], journal,
+                stream =>
+                {
+                    pages = PdfFromImage.WriteMany(Frames(), stream, pageSize);
+                    written = stream.Length;
+                },
+                tried => NamingPolicy.ResolveOutputPath(paths[0], extension, targetDirectory, tried.ToList()),
+                out string targetPath2);
+            targetPath = targetPath2;
+        }
+        catch (MergeFrameDecodeException ex)
+        {
+            // 真正的原因（解碼失敗的那個例外）。型別上它一定有，但編譯器不知道，所以這裡收斂成
+            // 一個非 null 的區域變數——不然就是一個 CS8604 警告，而本專案的建置門檻是 0 警告。
+            Exception cause = ex.InnerException ?? ex;
+            string format = _codecs.FormatOfPath(ex.Path) ?? "?";
+            _log($"merge-pdf: refusing {Path.GetFileName(ex.Path)}: it cannot be decoded " +
+                 $"({cause.GetType().Name}); fail-fast -> NO file is written");
+            return MergeFail(ex.Path, ex.Ordinal,
+                MapDecodeStatus(CodecRegistry.ClassifyDecodeException(cause, format, ex.Path)),
+                $"{cause.GetType().Name}: {cause.Message}");
+        }
         if (!done.Ok) return done;
 
         timer.Stop();
         _log($"merge-pdf: merged {paths.Length} image(s) -> {Path.GetFileName(targetPath)} " +
-             $"({frames.Count} page(s), {written}B, pageSize={pageSize}, " +
+             $"({pages} page(s), {written}B, pageSize={pageSize}, " +
              $"{timer.Elapsed.TotalMilliseconds:F0} ms; sources untouched)");
         return new ConversionResult(paths[0], targetPath, ConversionError.None,
-            $"{paths.Length} image(s), {frames.Count} page(s), {written}B in " +
+            $"{paths.Length} image(s), {pages} page(s), {written}B in " +
             $"{timer.Elapsed.TotalMilliseconds:F0} ms -> {targetPath}", null, 1);
+    }
+
+    /// <summary>
+    /// 「這一批裡的某一個檔解不開」——帶著**是哪一個、第幾個**從延遲序列裡丟出來。
+    /// 存在的理由：改成逐頁串流之後，解碼發生在寫入途中的深處，沒有辦法再像以前那樣當場
+    /// <c>return MergeFail(...)</c>；但「失敗要具名 + 分類」這條契約不能因此鬆掉。
+    /// </summary>
+    private sealed class MergeFrameDecodeException : Exception
+    {
+        public MergeFrameDecodeException(string path, int ordinal, Exception inner)
+            : base($"cannot decode {path}", inner) { Path = path; Ordinal = ordinal; }
+
+        /// <summary>解不開的那個檔。</summary>
+        public string Path { get; }
+
+        /// <summary>它在這一整批裡是第幾個（1 起算）。</summary>
+        public int Ordinal { get; }
     }
 
     /// 工具：**圖片 → 一頁 PDF**（切片「圖片 → 單頁 PDF」，2026-10-14）。

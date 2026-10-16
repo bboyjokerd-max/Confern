@@ -2541,3 +2541,30 @@ worker result: ok=True output=…\part2\scan1.pdf
 第二次展開必須是**冪等**的（檔案原樣保留、不再排序），日誌裡 `in=3 folders=0` 那行就是證據。
 
 **還在做**：T3（把 `MergeImagesToPdf` 改成逐頁串流，量峰值工作集）、T4（`verify-folder-drop.ps1`）。
+### 2026-10-15（續）　T3 完成：合併改成逐頁串流（記憶體不再隨張數成長）
+
+`MergeImagesToPdf` 原本**先把每一張都解成 `BitmapSource` 收進 List**，200 張 7.2 MP 的掃描
+約 5.8 GB。改成**延遲序列**：`PdfFromImage.WriteMany` 的參數由 `IReadOnlyList<BitmapSource>`
+收窄成 `IEnumerable<BitmapSource>` ⇒ 「先全部解好再寫」在**型別上就寫不出來**了。
+
+**實測（同樣的 3000×2400 圖，峰值工作集）**：
+
+| 張數 | 峰值工作集 | 時間 |
+|---|---|---|
+| 20 張 | **285 MB** | 3 s |
+| 200 張 | **343 MB** | 23.9 s |
+
+⇒ **10 倍張數只多 20% 記憶體**（285 MB 是程式自己的底盤：WPF ＋ PDFsharp）⇒ 已是 **O(1)**。
+
+**契約怎麼保住的**（這是這一刀真正難的地方）：「解不開的那張圖」以前是在寫檔**之前**就分類好的，
+改成串流之後它會在**寫入途中**才爆 ⇒ 不能再用 `return MergeFail(...)`。
+用一個**具名例外** `<c>MergeFrameDecodeException</c>`（帶著哪個檔、第幾個）把失敗帶出來，
+在 `WriteWithCollisionRetry`（底下是 `AtomicWriter`）外面分類 ⇒ ①失敗仍然具名 + 分類，
+②**不會留下半成品**（AtomicWriter 沒 commit）。
+
+**當場踩到的三個坑（都寫進註解了）**：
+① `Exception.Inner` 正確的名字是 **`InnerException`**；
+② 我對著 `ex.Inner,` 猜了兩次形狀（猜 `ex.Inner?.`、猜 `ex.Inner)`），兩次都是**靜默的空操作**
+   ——最後是**先讀那一行再改**才對；而空操作那一次我還印了「已修好」，正是我自己記過的那條教訓；
+③ 峰值量到 `0 MB` ——因為 `Start-Process` 回的是**常駐行程**，真正做事的在**另一個 worker 行程**。
+   改成監看**所有** Confern 行程的 `PeakWorkingSet64` 才量到真數字。

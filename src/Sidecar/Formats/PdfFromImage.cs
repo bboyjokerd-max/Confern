@@ -84,18 +84,25 @@ internal static class PdfFromImage
     /// **進來之前**說出來（見 <c>ConversionEngine.MergeImagesToPdf</c>），否則使用者會拿到
     /// 一句「PDF 寫入失敗」，而真正的原因是他那張圖壞了。
     /// </summary>
-    internal static void WriteMany(IReadOnlyList<BitmapSource> frames, Stream output, PdfPageSize size)
+    internal static int WriteMany(IEnumerable<BitmapSource> frames, Stream output, PdfPageSize size)
     {
-        if (frames.Count == 0)
-            throw new ArgumentException("WriteMany needs at least one frame", nameof(frames));
-
-        // 基準尺寸（First 模式用）：第一張自己的實際尺寸。
-        double baseWidth = PointsFromPixels(frames[0].PixelWidth, frames[0].DpiX);
-        double baseHeight = PointsFromPixels(frames[0].PixelHeight, frames[0].DpiY);
-
+        // ⚠ 參數是 IEnumerable 而不是 IReadOnlyList：呼叫端（合併多張圖那條路）要用**延遲**序列
+        //    餵進來，這樣任何一刻都只有**一張**畫格在記憶體裡。第一版收成 List<BitmapSource>，
+        //    一個 200 張 12MP 的掃描資料夾會吃到約 10 GB——而「拖一個資料夾」的主要情境正是它。
+        //    介面收窄成 IEnumerable 之後，「先全部解好再寫」在型別上就寫不出來了。
         using var document = new PdfDocument();
+        int pages = 0;
+        double baseWidth = 0, baseHeight = 0;
+
         foreach (BitmapSource frame in frames)
         {
+            if (pages == 0)
+            {
+                // 基準尺寸（First 模式用）：第一張自己的實際尺寸。
+                baseWidth = PointsFromPixels(frame.PixelWidth, frame.DpiX);
+                baseHeight = PointsFromPixels(frame.PixelHeight, frame.DpiY);
+            }
+
             double width = PointsFromPixels(frame.PixelWidth, frame.DpiX);
             double height = PointsFromPixels(frame.PixelHeight, frame.DpiY);
 
@@ -127,11 +134,16 @@ internal static class PdfFromImage
             using XGraphics graphics = XGraphics.FromPdfPage(page);
             using XImage image = XImage.FromBitmapSource(frame);
             graphics.DrawImage(image, x, y, drawWidth, drawHeight);
+            pages++;
         }
+
+        if (pages == 0)
+            throw new ArgumentException("WriteMany needs at least one frame", nameof(frames));
 
         // closeStream: false —— 這個 stream 是 AtomicWriter 的，關掉它等於替別人做決定
         // （它還要 flush、還要 rename，那整段是規格 §5 的原子寫入）。
         document.Save(output, false);
+        return pages;
     }
 
     /// <summary>等比縮到框內（**只縮不放**：放大會讓小圖變模糊，而那不是使用者的要求）。</summary>
