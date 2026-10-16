@@ -88,3 +88,37 @@ help 說它會 render，實測不產檔。**一個會說謊的診斷比沒有診
 
 ① → ②（先查管道再決定大小）→ ③ → 4a/4b。
 ①②看得見，③④不會有可見變化（照規矩先講明）。
+
+---
+
+# 收尾：使用者要**再審視一次 UI 設計**（2026-10-15 明確要求）
+
+四項做完之後，**最後一步**是把輪盤的 UI 端出來給使用者看，不是我自己說「沒改所以沒問題」。
+
+**鐵律**：UI 設計已凍結（方向 D、`GlowEnabled=false`、`SectorCornerPx=7`，使用者原話「不要改它」）
+⇒ ①～④ 過程中**不得**動到輪盤的方向／光暈／扇形圓角；收尾的「審視」是**給他看**，不是要我改。
+
+**怎麼給他看（隱私鐵律）**：一律走產品自己的**離屏 dump**，**絕不**用 `get_desktop_state`
+（半透明覆蓋層會把桌面從底下透上來，曾實際漏出他的私人視窗內容）：
+`--wheel-dump <png>`／`--wheel-dump-raw`／`--crop-ui-dump <png>`／`--settings-ui-dump`。
+（已知缺口：`--merge-ui-dump` 兩種叫法都不產檔——那正是 ④b 要修的。）
+另外要問他：**合併視窗的頁面大小那三個選項**（本次新增的唯一 UI 變動）算不算他要審的範圍。
+
+---
+
+# 接手指令（壓縮上下文／開新 session 之後照這個做）
+
+1. 讀 `docs/aegis/plans/2026-10-15-four-optimisations.md`（本檔）＋
+   `docs/aegis/plans/2026-10-02-progress-log.md` 最後幾節。
+2. 起點：**①已完成**（commit `672e109`，實測 `notice=混合選取，請選同類別：PDF ×2、PNG ×2（例如 a.png）`）。
+3. 待做順序：**①'**（把①的斷言補進 `tools/verify-folder-drop.ps1`，現有只驗 `status=Mixed` 不看 notice 內容）
+   → **②**（先查 `src/Sidecar/Visual/PillWindow.cs` 有沒有設定進度的 API、merge-pdf 有沒有餵它；
+   **不先查就動工＝在猜**）→ **③**（1001 檔／12 層巢狀 ＋ 假故障演練）→ **④**（4a 真實拖曳、4b `--merge-ui-dump`）
+   → **收尾 UI 審視**（見上一節）。
+4. **可用的人力**：本工作區有 **41 個 `[ready]` 子代理**（屬於先前的 session，`list_agents` 看得到，
+   全部沒在跑）。其中與④直接相關：`Make the default suite never grab the mouse`、
+   `Stop the suites from grabbing the mouse`、`Fix the false-green drag assertion`、
+   `Prove a private desktop can isolate test input`；與那 115 條弱斷言相關：`Audit m1a and m1b`／
+   `m1c and m1d`／`m1f m1g m1h` **assertions**。
+   `send_message` 就能喚醒，**它在自己的上下文裡跑**——在上下文緊張時這是最省的做法。
+5. 建置門檻 0 警告 0 錯誤；先殺 Confern、確認 exe 時間戳；每次字串替換都要驗「內容真的變了」。
