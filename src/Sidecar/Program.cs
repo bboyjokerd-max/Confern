@@ -3372,7 +3372,7 @@ internal static class App
         //   ③Mixed／連目錄都不認識的 Unsupported -> 既有拒絕訊息，工具清單為空（規格 §4.3）。
         string? notice = verdict.Status switch
         {
-            PayloadStatus.Mixed => "混合選取，請選同類別",       // 規格 §4.3 的原文
+            PayloadStatus.Mixed => catalog.DescribeMix(paths) ?? "混合選取，請選同類別",       // 規格 §4.3 的原文
             PayloadStatus.Unsupported => "不支援的格式",
             _ => null
         };
@@ -4329,6 +4329,9 @@ internal static class App
     {
         PayloadVerdict verdict;
         string how;
+        // 混合選取時「是哪個檔在亂」。算在 ①（真實酬載）那一支裡面，因為 `paths` 在該區塊才存在；
+        // ②（只有 --wheel-source 的目錄查詢）永遠是 Ready，所以這裡留 null 是正確的、不是偷懶。
+        string? mixNotice = null;
         var catalog = new FormatCatalog(new CodecRegistry());
         if (!string.IsNullOrEmpty(opt.WheelPayload))
         {
@@ -4337,6 +4340,7 @@ internal static class App
             // 併進 how 那一行——診斷講的話必須跟真實路徑一致。
             paths = PayloadPaths.Expand(paths, catalog, null, out string expandNotice);
             verdict = catalog.Classify(paths);
+            mixNotice = catalog.DescribeMix(paths);
             how = $"runtime classification of {paths.Length} payload file(s) (FormatCatalog.Classify)" +
                   (expandNotice.Length > 0 ? $"; {expandNotice}" : "");
         }
@@ -4351,7 +4355,7 @@ internal static class App
         // status= 與 notice= 一起印：只印清單的話，看不出「這一批到底是被拒絕還是被接受」。
         string? notice = verdict.Status switch
         {
-            PayloadStatus.Mixed => "混合選取，請選同類別",
+            PayloadStatus.Mixed => mixNotice ?? "混合選取，請選同類別",
             PayloadStatus.Unsupported => "不支援的格式",
             _ => null
         };

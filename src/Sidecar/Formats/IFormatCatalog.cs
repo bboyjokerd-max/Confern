@@ -18,6 +18,13 @@ internal interface IFormatCatalog
     /// </summary>
     PayloadVerdict Classify(IReadOnlyList<string> paths);
 
+    /// <summary>
+    /// 「混合選取」時說出**是哪個檔在亂**（`PNG ×3、PDF ×1（例如 scan1.pdf）`）；
+    /// 不是混合選取時回 <c>null</c>。**只解釋，不判定**——呼叫端不得拿它改變判定。
+    /// 與 <see cref="Classify"/> 共用同一份類別規則，所以兩者不可能互相矛盾。
+    /// </summary>
+    string? DescribeMix(IReadOnlyList<string> paths);
+
     /// <summary>可輸出的目標格式（**已排除原格式**，規格 §4.3：原格式不出現）。</summary>
     IReadOnlyList<string> TargetsFor(string? sourceFormat);
 

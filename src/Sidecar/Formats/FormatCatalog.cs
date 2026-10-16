@@ -75,24 +75,7 @@ internal sealed class FormatCatalog : IFormatCatalog
         foreach (string path in paths)
         {
             string? format = _codecs.FormatOfPath(path);
-            string cat;
-            if (format == null)
-            {
-                // 不認得的副檔名：**每一個各自成為一個類別**。
-                // 若把它們全摺成同一個「未知」類別，[jpg, pdf] 會被判成同類別而不是混合選取
-                // ——那是兩種不同的使用者訊息（「請選同類別」vs「不支援的格式」），
-                // 而且 M1b 已經修過同一個缺陷，不可以再犯一次。
-                cat = "EXT:" + UnknownKey(path);
-            }
-            else if (_codecs.Capability(format) is { Decode: DecodeSupport.No })
-            {
-                // 表中已知、但實測證明**無法解碼**的格式：同格式仍算同類別，但永遠不會是 IMAGE
-                cat = "UNDECODABLE:" + format;
-            }
-            else
-            {
-                cat = _codecs.CategoryOf(format) ?? "EXT:" + format;
-            }
+            string cat = CategoryKeyOf(path);
 
             if (category == null) { category = cat; firstFormat = format; }
             else if (!string.Equals(category, cat, StringComparison.Ordinal))
@@ -114,6 +97,88 @@ internal sealed class FormatCatalog : IFormatCatalog
             return new PayloadVerdict(PayloadStatus.Ready, firstFormat, paths.Count, CanConvert: false);
 
         return new PayloadVerdict(PayloadStatus.Unsupported, null, paths.Count, false);
+    }
+
+    /// <summary>
+    /// 一個檔案的**類別鍵**（規格 §4.3）：同一個鍵 = 同一類別 = 可以放在同一批。
+    ///
+    /// ⚠ **只有這一份**：<see cref="Classify"/> 用它判定，<see cref="DescribeMix"/> 用它解釋
+    /// 「是哪個檔在亂」。兩者若各有一份，就會出現「判定說混合、說明卻指著同類別的檔」這種
+    /// 自相矛盾的訊息——而使用者只會看到後面那一句。
+    /// </summary>
+    private string CategoryKeyOf(string path)
+    {
+        string? format = _codecs.FormatOfPath(path);
+        if (format == null)
+        {
+            // 不認得的副檔名：**每一個各自成為一個類別**。
+            // 若把它們全摺成同一個「未知」類別，[jpg, pdf] 會被判成同類別而不是混合選取
+            // ——那是兩種不同的使用者訊息（「請選同類別」vs「不支援的格式」），
+            // 而且 M1b 已經修過同一個缺陷，不可以再犯一次。
+            return "EXT:" + UnknownKey(path);
+        }
+        if (_codecs.Capability(format) is { Decode: DecodeSupport.No })
+        {
+            // 表中已知、但實測證明**無法解碼**的格式：同格式仍算同類別，但永遠不會是 IMAGE
+            return "UNDECODABLE:" + format;
+        }
+        return _codecs.CategoryOf(format) ?? "EXT:" + format;
+    }
+
+    /// <summary>
+    /// 「混合選取」時，說出**是哪個檔在亂**：`PNG ×3、PDF ×1（例如 scan1.pdf）`。
+    ///
+    /// 為什麼需要它：使用者 2026-10-15 拖一個裝著掃描圖的資料夾做合併，隔天同一個資料夾再拖一次，
+    /// 看到的是「混合選取，請選同類別」——**而那個資料夾裡多出來的 PDF 是我們自己上一次的產物**。
+    /// 判定本身沒有錯（一個資料夾同時有圖片與 PDF 本來就該拒絕），錯的是**它沒說是誰**。
+    ///
+    /// ⚠ 這裡**只解釋，不判定**：回傳 <c>null</c> 代表「沒有什麼好說的」（不是混合選取）。
+    /// **不得**拿這個結果去改變呼叫端的判定。
+    /// </summary>
+    public string? DescribeMix(IReadOnlyList<string> paths)
+    {
+        if (paths.Count < 2) return null;
+
+        var order = new List<string>();                                  // 類別，依**首次出現**的順序
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);   // 類別鍵 -> 顯示名
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var sample = new Dictionary<string, string>(StringComparer.Ordinal);  // 類別鍵 -> 該類別的第一個檔
+
+        foreach (string path in paths)
+        {
+            string cat = CategoryKeyOf(path);
+            if (!counts.ContainsKey(cat))
+            {
+                order.Add(cat);
+                names[cat] = DisplayFormatOf(path);
+                sample[cat] = path;
+                counts[cat] = 0;
+            }
+            counts[cat]++;
+        }
+        if (order.Count < 2) return null;                                // 同類別：沒有混合
+
+        var parts = new List<string>();
+        foreach (string cat in order.Take(3))
+            parts.Add($"{names[cat]} ×{counts[cat]}");
+        if (order.Count > 3) parts.Add($"等 {order.Count} 種");
+
+        // 「是哪個檔在亂」＝**最少數**那一類（同數時取最後出現的，也就是新來的那個）。
+        string rarest = order[0];
+        foreach (string cat in order)
+            if (counts[cat] <= counts[rarest]) rarest = cat;
+
+        // 回傳**整句話**：這樣「混合選取要怎麼講」只有這一個地方決定。原本輪盤與 --tools-list
+        // 各抄了一份「混合選取，請選同類別」，兩份就會各自演化（而使用者只會看到其中一句）。
+        return "混合選取，請選同類別：" + string.Join("、", parts)
+             + $"（例如 {Path.GetFileName(sample[rarest])}）";
+    }
+
+    /// <summary>類別要顯示給人看的名字：認得的格式用格式名（`PNG`），不認得的用副檔名。</summary>
+    private string DisplayFormatOf(string path)
+    {
+        string? format = _codecs.FormatOfPath(path);
+        return format ?? Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
     }
 
     /// <summary>
