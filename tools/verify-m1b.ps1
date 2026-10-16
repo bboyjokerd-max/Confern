@@ -1,4 +1,4 @@
-﻿# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
+# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
 #
 # Sections:
 #   S6  two-layer stack: the visual layer must be click-through (automatic, NON-INVASIVE)
@@ -15,6 +15,19 @@
 param(
   [Parameter(Mandatory=$true)][string]$Exe,
   [string]$Section = 'S6',
+  # 4a (2026-10-16) -- ANSWERED, and this parameter is NOT the answer: it is declared and never
+  # used anywhere in this file. It is the vestigial hook where "drive S8 by machine" was going to
+  # go. What does exist for that is tools\dragsim: a separate process that starts a REAL OLE drag
+  # (DoDragDrop called INSIDE WM_LBUTTONDOWN, then SendInput MOVE/LEFTDOWN/LEFTUP). It works - its
+  # 2026-10-01 run is what proved that a registered IDropTarget means WM_DROPFILES never arrives
+  # (see src\Sidecar\Interaction\DropTarget.cs near line 124) - and it is NOT wired into this
+  # suite, on purpose:
+  #   * it drives the USER's pointer, and a private desktop does NOT isolate that: SendInput acts
+  #     on the INPUT desktop (tools\probe-private-desktop.ps1 Q2 exists to measure exactly this);
+  #   * its own usage note says the start point must be a blank part of the desktop, because the
+  #     synthesized press can hit a desktop icon - and this suite cannot see the desktop to pick one.
+  # So S8 stays human-guided. If it is ever automated it must be opt-in, with the start point given
+  # by the caller, and the pointer parked afterwards.
   [string]$DragSim = '',
   [int]$DemoX = 900,
   [int]$DemoY = 400,
@@ -497,6 +510,14 @@ function Invoke-S7 {
 function Invoke-S8([int]$Window) {
   Write-Host ""
   Write-Host "=== S8 HUMAN: a real trigger-held drag -> DragEnter -> wheel in <=100 ms ==="
+  # 4a (2026-10-16): the payload half of this section is NOT unverifiable - --wheel-payload injects
+  # the same payload the OLE drag would carry, and the wheel's geometry/selection/hide logic are
+  # covered by S6/S7 here and by verify-m1a/m1c. What genuinely needs a human is the POINTER half:
+  # a real drag loop calling IDropTarget::DragEnter/DragOver/Drop. Coordinates can only arrive that
+  # way (WM_MOUSEMOVE is swallowed by the shell's drag loop), and no synthetic message can fake it:
+  # a registered IDropTarget means WM_DROPFILES never arrives at all. Without the gesture these 13
+  # checks are ENVIRONMENT RED BY DESIGN - that is the intended loud failure, not a broken suite.
+  Write-Host "      (no human within $Window s => these checks fail on purpose; see the DragSim note above)"
   Stop-AllSidecar
 
   $root = (Get-Item -LiteralPath $Exe).Directory
