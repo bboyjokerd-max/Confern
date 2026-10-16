@@ -122,3 +122,41 @@ help 說它會 render，實測不產檔。**一個會說謊的診斷比沒有診
    `m1c and m1d`／`m1f m1g m1h` **assertions**。
    `send_message` 就能喚醒，**它在自己的上下文裡跑**——在上下文緊張時這是最省的做法。
 5. 建置門檻 0 警告 0 錯誤；先殺 Confern、確認 exe 時間戳；每次字串替換都要驗「內容真的變了」。
+
+---
+
+# 完成實測（2026-10-16）——四項都做完了
+
+`master`、`HEAD=5ebc42a`、工作樹乾淨。每次建置都是 0 警告 0 錯誤（先殺 Confern、確認 exe 時間戳有變）。
+
+| 項 | commit | 實測（全部是產品自己的輸出） |
+|---|---|---|
+| ① | `672e109`＋`2134c2e` | `notice=混合選取，請選同類別：PDF ×2、PNG ×2（例如 a.png）`；`verify-folder-drop.ps1` S7 九項（含假故障演練） |
+| ② | `48148b5` | 200 張圖**單趟** 11.5 秒、`p0001.pdf (200 page(s), 18983297B)`、`progress reporting: 200 message(s) on the pipe, 10 in the log, 0 restart(s)`；碰撞時 `p0001 (1).pdf` 11.1 秒；峰值 344 MB（原 343 MB） |
+| ③ | `377c3d6` | 1001 檔 ⇒ `out=1000 truncated=True`；12 層 ⇒ `out=9 truncated=True tooDeep=1`；兩個 notice 各自說出數字；`--payload-expand` 約 1 秒（輪盤那條約 16 秒，且會把轉檔寫進來源資料夾，所以驗收改用前者） |
+| ④b | `43cfbb5` | 兩個一起給 ⇒ exit 0、720x760、37794 bytes、590 distinct colours；**只給 dump ⇒ 1.07 秒以名字失敗**（原本 9.1 秒）且不產檔。`verify-merge-images.ps1` 新增 S7 ⇒ **25/25 綠（21 秒）** |
+| ④a | `5ebc42a` | 見下 |
+
+**②的意外收穫**：圖片合併**本來每次都跑兩趟**——`WriteWithCollisionRetry(paths[0], paths[0], …)` 把來源檔當成第一版輸出名，於是第一次必定 `ERROR_ALREADY_EXISTS`，而 `writeContent` 是延遲的，所以整批被重解碼、重排版一次。修掉之後 23.6 秒 → 11.5 秒，**輸出位元組完全不變**。
+
+**④a 的答案**（計畫要求「兩種答案都要」）
+
+1. **合成路徑存在**：`tools\dragsim`（2026-09-30，獨立行程約 150 行）用 `DoDragDrop` 在 `WM_LBUTTONDOWN` 裡同步啟動（M0.5 spike v3 找出來的關鍵），再用 `SendInput` MOVE/LEFTDOWN/LEFTUP 完成整個 OLE 拖放。它 2026-10-01 那次跑，就是「註冊 `IDropTarget` 之後 `WM_DROPFILES` 再也不會來」那條量測的來源。
+2. **但它不該默默接進套件**：它驅動的是**使用者的**指標——私有桌面擋不住，`SendInput` 作用在 input desktop（`tools\probe-private-desktop.ps1` 的 Q2 就是為了量這件事而寫的）；而它自己的用法註解說起點要挑桌面空白處，因為合成的按下可能誤觸桌面圖示——驗收套件看不到桌面，挑不出那個安全點。
+3. **結構上也沒有「送訊息」的替代路**：座標只可能從 `IDropTarget::DragOver` 來（shell 的拖放迴圈會吃掉 `WM_MOUSEMOVE`），而註冊了 `IDropTarget` 之後 `WM_DROPFILES` 不會來。
+4. 實測（8 秒視窗、沒有真人）：`checks=13 pass=3 fail=10`——10 條紅全是 `count=0` 的手勢相依項，3 條綠是「什麼都沒發生也該成立」的不變式（來源位元組不變、沒有殘留視窗、沒有注入標記）。⇒ 那是**設計上的環境紅**；S8 的開場白現在會把這件事印出來，那個從未被使用的 `-DragSim` 參數也標成了「沒接上的預留鉤子」。
+
+**還沒做的（都不在這四項裡）**：稽核出來的 **115 條弱斷言＋12 條死斷言**（獨立的大切片）；`--wheel-payload` 這條診斷會自己驅動輪盤並把轉檔寫進來源資料夾（不是產品流程的缺陷，但驗收要用 `--payload-expand` 才不污染來源）。
+
+---
+
+# 收尾：UI 審視的成品
+
+`C:\Users\User\Desktop\Confern測試\UI-審視-輪盤-2026-10-16.png`（2340x1501，七格，**全部 1:1、全部來自產品自己的離屏 dump**）。
+七格＝格式層出廠／格式層 20 張／格式層 alpha／工具層／合併排序視窗／裁切視窗／設定頁。
+每一格都自我檢查過（**合成後的中心像素＝來源的中心像素，七格全 MATCH**），所以「畫出一張什麼都沒有的圖」不可能過關——上一版把 dump 縮進固定格子，其中一格糊成一層薄霧，就是這樣被抓出來的。
+單張原件在 `%TEMP%\ui-review\`（`A-format-default.png` … `G-merge-window.png`）。
+
+**設計凍結用變更清單證明**：`672e109..5ebc42a` 動到的檔案只有 `ConversionEngine.cs`／`WorkerServer.cs`／`PayloadPaths.cs`／`Program.cs`／三支 verify 腳本＋兩份文件——`src\Sidecar\Visual\` **一個都沒碰**。
+
+**要問使用者的**：合併視窗新增的「頁面大小」三選一（本次唯一的 UI 變動）算不算他要審的範圍。
