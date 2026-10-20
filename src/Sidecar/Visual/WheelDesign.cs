@@ -18,7 +18,7 @@ internal static class WheelDesign
     // ================= 玻璃 =================
 
     /// <summary>玻璃暗罩 <c>rgba(8,11,15,.80)</c>。**不可調低**：淺色桌布實測需 ≥ 60 % 白字才可讀。</summary>
-    public static readonly Color Veil = Color.FromArgb(204, 8, 11, 15);
+    public static Color Veil => Palettes.Current.Veil;
 
     /// <summary>模糊半徑（px）。3 次可分離 box blur ⇒ σ ≈ 17.5，對應設計的 blur(18px)。</summary>
     public const int BlurRadiusPx = 17;
@@ -26,18 +26,18 @@ internal static class WheelDesign
     // ================= 扇區 =================
 
     /// <summary>扇區填色（交替）：<c>rgba(150,180,205,.20)</c>。</summary>
-    public static readonly Color FillA = Color.FromArgb(51, 150, 180, 205);
+    public static Color FillA => Palettes.Current.FillA;
 
     /// <summary>扇區填色（交替）：<c>rgba(70,95,118,.13)</c>。</summary>
-    public static readonly Color FillB = Color.FromArgb(33, 70, 95, 118);
+    public static Color FillB => Palettes.Current.FillB;
 
     /// <summary>選中扇區填色 <c>#3F6B7A</c>（**不透明**——這是選中唯一的亮度手段，暗罩下沒有下探空間）。</summary>
-    public static readonly Color SelFill = Color.FromArgb(255, 63, 107, 122);
+    public static Color SelFill => Palettes.Current.SelFill;
 
     /// <summary>選中扇區描邊 **琥珀 `#FFC24D`**（使用者 2026-10-01 拍板）。
     /// 舊值 `#5AF2D6` 與外緣薄荷線色相只差約 27°，會被誤認成外緣線加粗；
     /// 琥珀與薄荷近乎互補（約 129°）。與選中填色的 WCAG 對比 3.64:1（非文字門檻 3:1 通過）。</summary>
-    public static readonly Color SelStroke = Color.FromArgb(255, 255, 194, 77);
+    public static Color SelStroke => Palettes.Current.SelStroke;
 
     public const float SelStrokePx = 2f;
 
@@ -45,18 +45,18 @@ internal static class WheelDesign
     public const int SelExpandPx = 4;
 
     /// <summary>外緣髮絲線 <c>rgba(173,249,235,.55)</c>（薄荷往白混 50 %）。</summary>
-    public static readonly Color Rim = Color.FromArgb(140, 173, 249, 235);
+    public static Color Rim => Palettes.Current.Rim;
 
     public const float RimPx = 1f;
 
     /// <summary>內圈髮絲線（外緣往內 3.4px 的第二條細線）。</summary>
-    public static readonly Color InnerHair = Color.FromArgb(22, 255, 255, 255);
+    public static Color InnerHair => Palettes.Current.InnerHair;
 
     public const float InnerHairPx = 0.8f;
 
     // ================= 標籤 =================
 
-    public static readonly Color Label = Color.FromArgb(255, 255, 255);
+    public static Color Label => Palettes.Current.Label;
 
     /// <summary>未選中扇區的文字不透明度（原案 .55 → 對比加強版 .42）。</summary>
     public const float LabelDimOpacity = 0.42f;
@@ -108,10 +108,10 @@ internal static class WheelDesign
     public const double LightBackdropLuma = 140.0;
 
     /// <summary>深色桌布用的薄荷亮暈（原型值）。</summary>
-    public static readonly Color GlowOnDark = Color.FromArgb(255, 163, 241, 228);
+    public static Color GlowOnDark => Palettes.Current.GlowOnDark;
 
     /// <summary>淺色桌布用的深青暈。亮暈在淺底上等於隱形，要的是「浮起來」的暗暈。</summary>
-    public static readonly Color GlowOnLight = Color.FromArgb(255, 46, 120, 110);
+    public static Color GlowOnLight => Palettes.Current.GlowOnLight;
 
     public static bool IsLightBackdrop(double meanLuma) => meanLuma > LightBackdropLuma;
 
@@ -176,9 +176,9 @@ internal static class WheelDesign
     public const float CenterRatio = 47f / 110f;
 
     /// <summary>膠囊底色＝白 `#FFFFFF` @ alpha .85（使用者要求「加一些透明度」）。</summary>
-    public static readonly Color CapBg = Color.FromArgb(217, 255, 255, 255);
+    public static Color CapBg => Palettes.Current.CapBg;
 
-    public static readonly Color CapFg = Color.FromArgb(255, 10, 15, 20);
+    public static Color CapFg => Palettes.Current.CapFg;
 
     public const float CapFontPx = 17f;      // 原 22px → 縮小
     public const float CapPadXPx = 16f;      // 原 8·24 → 5·16
@@ -186,22 +186,22 @@ internal static class WheelDesign
     public const float CapMinWidthPx = 100f;
 
     /// <summary>縮圖取不到時的佔位漸層（上→下）。</summary>
-    public static readonly Color ThumbTop = Color.FromArgb(255, 51, 84, 124);
-    public static readonly Color ThumbBottom = Color.FromArgb(255, 21, 34, 56);
+    public static Color ThumbTop => Palettes.Current.ThumbTop;
+    public static Color ThumbBottom => Palettes.Current.ThumbBottom;
 
     /// <summary>佔位山的顏色（後山較亮、前山較暗）。</summary>
-    public static readonly Color ThumbRidgeBack = Color.FromArgb(255, 53, 96, 75);
-    public static readonly Color ThumbRidgeFront = Color.FromArgb(255, 30, 58, 46);
+    public static Color ThumbRidgeBack => Palettes.Current.ThumbRidgeBack;
+    public static Color ThumbRidgeFront => Palettes.Current.ThumbRidgeFront;
 
     /// <summary>縮圖內圈的細白環 <c>rgba(255,255,255,.16)</c>。</summary>
-    public static readonly Color ThumbRing = Color.FromArgb(41, 255, 255, 255);
+    public static Color ThumbRing => Palettes.Current.ThumbRing;
 
     // ================= 鍵帽提示 =================
 
     /// <summary>鍵帽藥丸：白底深字（實體鍵帽的視覺）。</summary>
-    public static readonly Color KeyPill = Color.FromArgb(242, 255, 255, 255);
+    public static Color KeyPill => Palettes.Current.KeyPill;
 
-    public static readonly Color KeyPillFg = Color.FromArgb(255, 10, 15, 20);
+    public static Color KeyPillFg => Palettes.Current.KeyPillFg;
 
     public const float KeyFontPx = 16f;
     public const float KeyCapFontPx = 12f;
@@ -212,8 +212,8 @@ internal static class WheelDesign
     ///
     /// 原型是純白 <c>rgba(255,255,255,.72)</c>，在淺色桌布上會整個消失（實測 714 個取樣點裡只有 53 個是暗的）。
     /// 這是**刻意偏離原型**的一處，理由與量測見 91 號文件 §8.2。</summary>
-    public static readonly Color KeyCaptionFill = Color.FromArgb(235, 255, 255, 255);
-    public static readonly Color KeyCaptionOutline = Color.FromArgb(165, 8, 11, 15);
+    public static Color KeyCaptionFill => Palettes.Current.KeyCaptionFill;
+    public static Color KeyCaptionOutline => Palettes.Current.KeyCaptionOutline;
     public const float KeyCaptionOutlinePx = 3f;
 
     /// <summary>說明文字的固定字串（觸發鍵在輪盤可見期間恆為按住狀態，見 <see cref="DragDetector"/>）。</summary>
@@ -226,5 +226,5 @@ internal static class WheelDesign
     /// 同一個產品裡「這是錯誤」不可以有兩種紅（先前兩處各寫了一份字面值）。
     /// 透明度由各自的場合決定（輪盤 230、進度列 236）。
     /// </summary>
-    public static readonly Color NoticeFill = Color.FromArgb(255, 150, 40, 40);
+    public static Color NoticeFill => Palettes.Current.NoticeFill;
 }

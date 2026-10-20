@@ -19,6 +19,16 @@ internal sealed record Settings
     public bool Diagnostics { get; init; } = false;
 
     /// <summary>
+    /// 配色 id（2026-10-16 使用者：「可以提供基本五種配色」）。合法值＝
+    /// <see cref="Palettes.SelectableIds"/>；數值在 <see cref="Palette"/>。
+    ///
+    /// **向後相容的關鍵**：預設值是 <see cref="Palettes.DefaultId"/>＝2026-10-01 拍板的那一套，
+    /// 所以一份沒有這個欄位的舊設定檔載入後畫面**逐像素不變**。認不得的 id 不會靜默退回預設——
+    /// <see cref="Load"/> 會寫一行「不認得，維持現在這套」。
+    /// </summary>
+    public string Palette { get; init; } = Palettes.DefaultId;
+
+    /// <summary>
     /// 輸出資料夾（規格 §9.5，2026-10-05 使用者裁定）。三種寫法：
     /// 空字串或 <c>source</c>＝**來源檔旁邊**（預設）；<c>desktop</c>＝桌面；其他＝資料夾路徑。
     ///
@@ -185,7 +195,8 @@ internal static class SettingsStore
         nameof(Settings.CaptureTimeoutSeconds), nameof(Settings.EmergencyHotkey), nameof(Settings.Diagnostics),
         nameof(Settings.OutputFolder),
         nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb),
-        nameof(Settings.RemoveBgRefine)
+        nameof(Settings.RemoveBgRefine),
+        nameof(Settings.Palette)
     };
 
     public static string DefaultPath() => Path.Combine(
@@ -206,7 +217,9 @@ internal static class SettingsStore
         $"outputFolder={DescribeOutputFolder(s)} " +
         $"compress={CompressionPolicy.CanonicalMode(s.CompressionMode)}" +
         $"{(s.CompressionTargetKb > 0 ? $"/{s.CompressionTargetKb}KB" : "")}" +
-        $" refine={EdgeRefine.CanonicalMode(s.RemoveBgRefine)}";
+        $" refine={EdgeRefine.CanonicalMode(s.RemoveBgRefine)}" +
+        // 2026-10-16 的 `palette=` 沿用同一條規矩：**只追加在行尾**（既有腳本比對前綴與各欄位）。
+        $" palette={s.Palette}";
 
     /// <summary>
     /// <see cref="Settings.OutputFolder"/> 的顯示寫法（日誌與探針共用）。空字串＝**來源檔旁邊**，
@@ -219,6 +232,24 @@ internal static class SettingsStore
     }
 
     public static Settings Load(string? path, Action<string> log)
+    {
+        Settings settings = LoadCore(path, log);
+        // 2026-10-16：配色跟著設定檔走。**放在這裡**是刻意的——七條載入路徑（正式啟動、設定頁、
+        // 每一個自測）全部經過 Load，所以不可能出現「某條路徑還拿著舊色票」這種半套狀態。
+        // 認不得的 id 不靜默退回預設：維持現在這套，並把「認不得」與「合法清單」寫出來。
+        if (!Palettes.TrySet(settings.Palette, out Palette applied))
+        {
+            log($"settings: palette='{settings.Palette}' is not one of {Palettes.Ids()} -> keeping " +
+                $"'{Palettes.CurrentId}' (the wheel is unchanged; fix the file or --settings-set palette=...)");
+        }
+        else if (!string.Equals(applied.Id, Palettes.DefaultId, StringComparison.Ordinal))
+        {
+            log($"settings: palette='{applied.Id}' ({applied.NameZh} / {applied.NameEn}) applied");
+        }
+        return settings;
+    }
+
+    private static Settings LoadCore(string? path, Action<string> log)
     {
         path ??= DefaultPath();
         if (!File.Exists(path))
@@ -437,6 +468,16 @@ internal static class SettingsStore
                     return false;
                 }
                 next = current with { RemoveBgRefine = refineMode };
+                return true;
+            case "palette":
+                // 2026-10-16：換色票**當場生效**（不必重開）——`Palettes.Current` 是唯一狀態，
+                // 而 WheelDesign 的每個顏色都是它的轉發屬性，所以下一個影格就是新的一套。
+                if (!Palettes.TrySet(v, out Palette chosen))
+                {
+                    log($"settings: reject palette='{value}' (one of: {Palettes.SelectableIds()})");
+                    return false;
+                }
+                next = current with { Palette = chosen.Id };
                 return true;
             case "language":
                 string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"

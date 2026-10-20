@@ -2768,3 +2768,56 @@ S12.10f 先刪日誌、m1d/m1g 有 `ExpectedChecks`＋`Expect()`）。但我今�
 - merge-images：`checks=25 pass=25 fail=0 expected=26` ⇒ FATAL ⇒ **exit=1**
 
 **乾淨重跑**：folder-drop **42/42**、merge-images **26/26**，兩支 `expected` 都相符、exit=0。
+---
+
+## 2026-10-16（第四輪）· 五套配色（可見變化）
+
+使用者：「可以提供不同配色選擇嗎？我希望這是個有設計質感的產品，可以提供基本五種配色」。
+
+### 做法：顏色只有一個讀取點
+
+新增 `src\Sidecar\Visual\Palette.cs`：一個 `Palette` record（22 個顏色）＋`Palettes`
+（`Selectable` 五套、`All` 含實驗性、`Current` 唯一狀態）。`WheelDesign` 的 22 個
+`static readonly Color` 全部改成 **轉發屬性**（`public static Color Veil => Palettes.Current.Veil;`），
+所以 100 個呼叫點（`WheelPresenter` 53、`SettingsUi` 29、`TrayIcon` 7、`ToolCatalog` 4、
+`WheelGeometry` 4、`GlassSurface` 3、`ProgressPresenter` 3…）**一行都不用改**，
+也不會出現「某支程式還拿著舊色票」的半套狀態。
+
+設定鍵 `palette`（`Settings.Palette`，預設 `midnight`）：
+`Palettes.TrySet` 不認得就**回 false 並說出合法清單**（不靜默退回）；套用點放在
+`SettingsStore.Load` 的新外殼（七條載入路徑全部經過它）；`TryApply` 換色**當場生效**；
+`Describe()` 照既有規矩**只追加在行尾**（`palette=…`）。
+
+### 五套（每一套只換材質與色相，幾何不動）
+
+| id | 名稱 | 遮罩 | 選中填色 | 選中描邊（唯一亮點） |
+|---|---|---|---|---|
+| midnight | 暮藍（預設＝原色） | #080B0F | #3F6B7A | #FFC24D 琥珀 |
+| graphite | 石墨（無色相） | #0B0B0C | #3A3F46 | #F2F4F7 近白 |
+| citrus | 柑橘（品牌色） | #0D0906 | #7A4A22 | #FF9A3C 橙 |
+| celadon | 青瓷 | #070D0B | #2F5346 | #8EE6B8 薄荷 |
+| plum | 絳紫 | #0E0A12 | #4E3559 | #FFB8E1 洋紅 |
+
+第六套 `porcelain`（冷瓷，**淺色**）已經在資料表裡但**沒放進選單**：淺遮罩蓋在不同桌面上
+辨識度還沒實測。要開只要在 `Palettes.Selectable` 加一筆。
+
+### 證明（每一條都是量出來的）
+
+- **預設外觀零變化**：把 `git show HEAD:…WheelDesign.cs` 的 22 個常數與新 `Midnight` 逐項比對
+  ⇒ **22/22 完全相同**。（逐位元比對舊 dump 不可行：玻璃底圖是 `source=screen` 的當下螢幕截取，
+  本來就不可重現——這一點記在這裡，免得以後有人拿兩張 dump 的 sha 當回歸依據。）
+- **五套真的換到了**：`--settings-set palette=<id>`（exit 0、日誌 `palette=<id>`）→
+  `--wheel-demo 900 400 --wheel-source png --wheel-dump`（exit 0）⇒ 五張 PNG 每張都量到**該套
+  描邊色的精確 RGB**、distinct colours 209–230、五張 sha256 兩兩不同。
+- **成品**：`C:\Users\User\Desktop\Confern測試\五套配色-2026-10-16.png`（1696×…，五格 1:1、
+  中心像素 5/5 MATCH）＋`.sources\`（五張 dump、五份設定、五份日誌、compose 腳本）。
+- **回歸**：`verify-merge-images` 26/26、`verify-folder-drop` 42/42（兩支都有 ExpectedChecks 守衛）；
+  設定頁在柑橘配色下 `--settings-ui-dump` 正常產圖（51331 B）。建置 0 警告 0 錯誤，
+  exe 15:50:28 → **16:06:00**。
+
+### 還沒做（下一批）
+
+- **英文介面**：字串表 `SettingsStrings` 已是 zh-Hant／en 各 58 鍵且設定頁已本地化；
+  缺的是產品其他地方（輪盤標籤、藥丸與失敗原因、合併／裁切視窗、托盤、工具名稱）。
+- **設定頁的配色列**：目前只能用設定檔／`--settings-set` 切換；頁面本身那一列（以及語言列
+  是否真的生效）要一起做，因為兩者都在同一份 XAML。
