@@ -26,6 +26,12 @@ $ErrorActionPreference = 'Continue'
 $script:checks = 0
 $script:pass = 0
 $script:fail = 0
+# P1-2 (2026-10-16): a check that fails to REGISTER is invisible -- the regex around it stops
+# matching, that block never runs, and the total just gets smaller while the suite still exits 0.
+# That is the same shape that let S8 go green on another run's log today. Pinning the count turns
+# "one check quietly disappeared" into a loud FATAL. Adding or removing a check means updating this
+# number ON PURPOSE; that edit is the point.
+$script:ExpectedChecks = 42
 
 function Check([string]$name, [bool]$ok, [string]$detail) {
     $script:checks++
@@ -482,5 +488,11 @@ Check 'S9.10 a refused (Mixed) batch still converts nothing, so the notice costs
       "before=$mix2Before after=$((Get-ChildItem $mix2 -Recurse -File).Count)"
 
 ""
-"checks=$script:checks pass=$script:pass fail=$script:fail"
+"checks=$script:checks pass=$script:pass fail=$script:fail expected=$script:ExpectedChecks"
+# P1-2: the count must be exact, not "at least something". A silently unregistered check is a check
+# that no longer exists, and the suite would otherwise report a clean, smaller run.
+if ($script:checks -ne $script:ExpectedChecks) {
+    "FATAL: registered $($script:checks) checks but this suite must register exactly $($script:ExpectedChecks)."
+    exit 1
+}
 if ($script:fail -gt 0) { exit 1 } else { exit 0 }

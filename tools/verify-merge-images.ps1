@@ -23,6 +23,10 @@ $ErrorActionPreference = 'Continue'
 $script:checks = 0
 $script:pass = 0
 $script:fail = 0
+# P1-2 (2026-10-16): a check that fails to REGISTER is invisible -- the block around it never runs
+# and the total just gets smaller, while the suite still exits 0. Pinning the count turns that into
+# a loud FATAL. Adding or removing a check means updating this number ON PURPOSE.
+$script:ExpectedChecks = 26
 
 function Check([string]$name, [bool]$ok, [string]$detail) {
     $script:checks++
@@ -236,5 +240,10 @@ Check 'S7.3 a dump with no rows FAILS BY NAME instead of writing an empty image'
       "exit=$($bareRun.Exit) exists=$(Test-Path $bare)"
 
 ""
-"checks=$script:checks pass=$script:pass fail=$script:fail"
+"checks=$script:checks pass=$script:pass fail=$script:fail expected=$script:ExpectedChecks"
+# P1-2: exact count, not "at least something" -- a silently unregistered check no longer exists.
+if ($script:checks -ne $script:ExpectedChecks) {
+    "FATAL: registered $($script:checks) checks but this suite must register exactly $($script:ExpectedChecks)."
+    exit 1
+}
 if ($script:fail -gt 0) { exit 1 } else { exit 0 }

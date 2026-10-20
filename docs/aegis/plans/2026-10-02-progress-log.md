@@ -2747,3 +2747,24 @@ labels.txt、compose-review.ps1）。理由：獨立驗收說「1:1／中心像�
 沒有隨檔保存——那個反駁是對的，所以夾具現在跟著成品走。順帶更正措辭：**「1:1」指的是沒有縮放，
 不是「正方形格子」**（實測格子長寬比 0.63–1.16）。
 
+
+---
+
+## 2026-10-16（第三輪）· P1-2：斷言「靜默沒註冊」現在會大聲紅
+
+稽核修復清單（`docs/aegis/work/2026-10-02-falsifiability/fix-plan.md`）的 **P0 全部**與
+**P1-1／P1-2** 早在 2026-10-02 就修好了（`VisualLayer.IsVisible` 已改問 OS、S12.15c 已比 SHA256、
+S12.10f 先刪日誌、m1d/m1g 有 `ExpectedChecks`＋`Expect()`）。但我今天動的兩支新套件沒有那個守衛：
+`verify-folder-drop.ps1`／`verify-merge-images.ps1` 只印 `checks=N pass=N fail=0`，於是
+「某條斷言因為正則不再匹配而根本沒註冊」時，總數只是變小、套件照樣 exit 0——**正是今天 S8
+假通過的同一類**。
+
+**修**：兩支都加 `$script:ExpectedChecks`（42／26）＋尾端 FATAL（count ≠ expected ⇒ exit 1），
+沿用 m1d／m1g 的既有寫法。
+
+**假故障證明**（暫存副本、repo 未動，把一條斷言註解掉再跑）：
+- folder-drop：`checks=41 pass=41 fail=0 expected=42` ⇒ FATAL ⇒ **exit=1**
+  （沒有守衛時這就是「41 條全綠、exit 0」——最典型的假綠）
+- merge-images：`checks=25 pass=25 fail=0 expected=26` ⇒ FATAL ⇒ **exit=1**
+
+**乾淨重跑**：folder-drop **42/42**、merge-images **26/26**，兩支 `expected` 都相符、exit=0。
