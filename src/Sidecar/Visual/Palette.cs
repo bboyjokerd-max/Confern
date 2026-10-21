@@ -24,6 +24,13 @@ internal sealed record Palette
     public required string NameZh { get; init; }
     public required string NameEn { get; init; }
 
+    /// <summary>
+    /// 給介面用的顯示名（2026-10-21：語言從 2 種變 5 種之後，不能再靠「是不是英文」二選一）。
+    /// 走 <see cref="UiStrings"/> 的 <c>palette.&lt;id&gt;</c>；<see cref="NameZh"/>／
+    /// <see cref="NameEn"/> 留給日誌那種「兩個名字都印出來」的場合。
+    /// </summary>
+    public string Name => UiStrings.Get("palette." + Id);
+
     // ===== 玻璃 =====
     public required Color Veil { get; init; }
     // ===== 扇區 =====

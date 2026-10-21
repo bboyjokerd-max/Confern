@@ -1022,8 +1022,28 @@ internal static class SettingsUi
             255, WheelDesign.Label.R, WheelDesign.Label.G, WheelDesign.Label.B));
 
         /// <summary>字體。無襯線；中文用 <c>Microsoft JhengHei UI</c>，缺字時 WPF 自己往後退。</summary>
-        public static readonly FontFamily Font =
-            new("Segoe UI, Microsoft JhengHei UI, Microsoft YaHei UI, Tahoma");
+        /// <summary>
+        /// 目前語言的字型堆疊（2026-10-21：語言從 2 種變 5 種）。
+        /// **每次取用都問 <see cref="Typeface"/>**，因為語言是執行期可切換的，
+        /// 而 <c>static readonly</c> 只算一次——那樣切到日文之後視窗還是舊字型。
+        /// 這裡只快取「堆疊字串沒變就不重建 FontFamily」，切換語言時自然會換掉。
+        /// </summary>
+        public static FontFamily Font
+        {
+            get
+            {
+                string stack = Typeface.Stack;
+                if (!string.Equals(stack, _fontStack, StringComparison.Ordinal) || _font is null)
+                {
+                    _font = new FontFamily(stack);
+                    _fontStack = stack;
+                }
+                return _font;
+            }
+        }
+
+        private static string _fontStack = "";
+        private static FontFamily? _font;
 
         /// <summary>
         /// 把「帶透明度的權杖」疊在不透明底色上，算成不透明色（WPF 的 <c>Background</c> 用透明色

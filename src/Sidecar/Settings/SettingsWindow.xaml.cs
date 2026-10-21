@@ -460,7 +460,7 @@ internal partial class SettingsWindow : Window
         try
         {
             LanguageBox.Items.Clear();
-            foreach (string value in new[] { UiStrings.System, UiStrings.ZhHant, UiStrings.En })
+            foreach (string value in new[] { UiStrings.System, UiStrings.ZhHant, UiStrings.ZhHans, UiStrings.Ja, UiStrings.Ko, UiStrings.En })
                 LanguageBox.Items.Add(MakeItem(UiStrings.Get($"lang.{value}", _language), value));
 
             LanguageBox.SelectedItem = LanguageBox.Items
@@ -508,9 +508,8 @@ internal partial class SettingsWindow : Window
         try
         {
             PaletteBox.Items.Clear();
-            bool en = string.Equals(UiStrings.Current, UiStrings.En, StringComparison.Ordinal);
             foreach (Palette palette in Palettes.Selectable)
-                PaletteBox.Items.Add(MakeItem(en ? palette.NameEn : palette.NameZh, palette.Id));
+                PaletteBox.Items.Add(MakeItem(palette.Name, palette.Id));
 
             PaletteBox.SelectedItem = PaletteBox.Items
                 .OfType<ComboBoxItem>()
@@ -544,6 +543,9 @@ internal partial class SettingsWindow : Window
     {
         if (string.Equals(tag, "system", StringComparison.OrdinalIgnoreCase)) return UiStrings.System;
         if (string.Equals(tag, "zh-Hant", StringComparison.OrdinalIgnoreCase)) return UiStrings.ZhHant;
+        if (string.Equals(tag, "zh-Hans", StringComparison.OrdinalIgnoreCase)) return UiStrings.ZhHans;
+        if (string.Equals(tag, "ja", StringComparison.OrdinalIgnoreCase)) return UiStrings.Ja;
+        if (string.Equals(tag, "ko", StringComparison.OrdinalIgnoreCase)) return UiStrings.Ko;
         if (string.Equals(tag, "en", StringComparison.OrdinalIgnoreCase)) return UiStrings.En;
         return tag;
     }

@@ -1091,7 +1091,7 @@ internal sealed class WheelPresenter
     /// </summary>
     private static Font MakeFontPx(float px)
     {
-        try { return new Font("Segoe UI", px, FontStyle.Bold, GraphicsUnit.Pixel); }
+        try { return new Font(Typeface.Primary, px, FontStyle.Bold, GraphicsUnit.Pixel); }
         catch (ArgumentException) { return new Font(FontFamily.GenericSansSerif, px, FontStyle.Bold, GraphicsUnit.Pixel); }
     }
 }

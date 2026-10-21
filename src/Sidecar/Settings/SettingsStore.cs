@@ -489,10 +489,23 @@ internal static class SettingsStore
                 next = current with { Palette = chosen.Id };
                 return true;
             case "language":
+                // 2026-10-21：從 2 種變成 5 種（規格 §8 的「語言」是可切換的設定，
+                // 而原版 macOS 只在 App Store 上標示英文——我們這裡是超前的）。
+                // 一律回正規值：zh-TW／zh-HK 這種地區碼要收斂成 zh-Hant，否則同一個語言
+                // 會在設定檔裡長出兩種寫法，之後的比對全部失效。
                 string lang = v.Equals("system", StringComparison.OrdinalIgnoreCase) ? "system"
-                            : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ? "zh-Hant"
-                            : v.Equals("en", StringComparison.OrdinalIgnoreCase) ? "en" : "";
-                if (lang == "") { log($"settings: reject language='{value}' (spec 8: system, zh-Hant, en)"); return false; }
+                            : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase)
+                              || v.Equals("zh-HK", StringComparison.OrdinalIgnoreCase) ? UiStrings.ZhHant
+                            : v.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-CN", StringComparison.OrdinalIgnoreCase)
+                              || v.Equals("zh-SG", StringComparison.OrdinalIgnoreCase) ? UiStrings.ZhHans
+                            : v.Equals("ja", StringComparison.OrdinalIgnoreCase) || v.Equals("ja-JP", StringComparison.OrdinalIgnoreCase) ? UiStrings.Ja
+                            : v.Equals("ko", StringComparison.OrdinalIgnoreCase) || v.Equals("ko-KR", StringComparison.OrdinalIgnoreCase) ? UiStrings.Ko
+                            : v.Equals("en", StringComparison.OrdinalIgnoreCase) ? UiStrings.En : "";
+                if (lang == "")
+                {
+                    log($"settings: reject language='{value}' (spec 8: system, zh-Hant, zh-Hans, ja, ko, en)");
+                    return false;
+                }
                 // 與 palette 同一條規矩：切換**當場生效**（下一個畫面就是新語言）。
                 UiStrings.SetLanguage(lang);
                 next = current with { Language = lang };
