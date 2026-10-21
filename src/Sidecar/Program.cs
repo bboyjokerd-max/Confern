@@ -2154,7 +2154,9 @@ internal static class App
         bool toolsMode = opt.WheelTools && tools.Count > 0;
         if (opt.WheelTools && !toolsMode)
             evidence.Line("--wheel-tools: catalog returned no tool for a Ready payload -> formats only");
-        if (toolsMode) targets = tools.Select(t => t.Label).ToArray();
+        // 扇區上畫的是 SectorLabel（跟介面語言）；證據行印的 tools= 仍然用 id，
+        // 所以這裡換掉的只有畫面上那幾個字，日誌與驗收斷言不受語言影響。
+        if (toolsMode) targets = tools.Select(t => t.SectorLabel).ToArray();
 
         var sw = Stopwatch.StartNew();
         presenter.Show(x, y, opt.WheelSource, targets, opt.WheelSelected,
@@ -3512,7 +3514,7 @@ internal static class App
         if (tools)
         {
             IReadOnlyList<ToolDescriptor> list = PendingTools;
-            presenter.Show(x, y, _wheelSourceFormat, list.Select(t => t.Label).ToArray(), 0,
+            presenter.Show(x, y, _wheelSourceFormat, list.Select(t => t.SectorLabel).ToArray(), 0,
                            preview: null, notice: null,
                            mode: WheelPresenter.WheelMode.Tool,
                            caption: i => i < list.Count ? list[i].Description : null,

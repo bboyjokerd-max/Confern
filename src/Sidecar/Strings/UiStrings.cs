@@ -13,8 +13,11 @@ namespace Sidecar;
 ///   ③同一句話要有五套（zh-Hant／zh-Hans／ja／ko／en），散在五處遲早會漂移。
 ///
 /// 2026-10-21：從「設定頁專用」升級成**全產品**唯一字串權威（原本叫 SettingsStrings）。
-/// 扇區標籤（<see cref="ToolDescriptor.Label"/>）仍然不進這張表——那是大寫英文短詞，
-/// 與格式名同一個視覺階層，80×24 px 的扇區上放中文會糊。
+/// 扇區標籤也在這裡了（`tool.label.&lt;tool id&gt;`，見 <see cref="ToolDescriptor.SectorLabel"/>）：
+/// 同一天實測發現「80×24 放中文會糊」只對一半——寬度不是限制，真正的限制是 11px 的
+/// 筆畫密度，所以改成在地化 ＋ 字級 12.7px ＋ 挑筆畫少的措辭。
+/// ⚠ <see cref="ToolDescriptor.Label"/>（大寫英文名）**刻意不進**這張表：它會進證據行，
+/// 驗收腳本拿它當斷言，跟著介面語言走就會因為跑測試那台機器的系統語言而紅。
 ///
 /// 這個類別**沒有**狀態、沒有 I/O、沒有 WPF 相依：只有表與純函式。
 /// 注意：<see cref="SettingsStore.Describe"/> 的輸出與 <see cref="TriggerKeyInfo.Warning"/>
@@ -296,6 +299,18 @@ internal static class UiStrings
             ["palette.plum"] = "絳紫",
             ["palette.porcelain"] = "冷瓷",
 
+            // ---- 輪盤扇區標籤（工具）----
+            // 扇區只有 80x24px、字級 12.7px：筆畫密的字會糊（2026-10-21 實測，
+            // 連通墨塊數壓縮 0.47／旋轉 0.5）。所以這裡挑筆畫少的措辭，
+            // 日文用 切抜 而不用 切り抜き。字表外的診斷字串走 ToolDescriptor.Label。
+            ["tool.label.rotate90"] = "旋轉",
+            ["tool.label.strip-metadata"] = "清除",
+            ["tool.label.compress"] = "壓縮",
+            ["tool.label.crop"] = "裁切",
+            ["tool.label.read-qr"] = "讀 QR",
+            ["tool.label.merge-pdf"] = "合併 PDF",
+            ["tool.label.remove-bg"] = "去背",
+
             // ---- 底部 ----
             ["btn.save"] = "儲存",
             ["btn.cancel"] = "取消",
@@ -504,6 +519,18 @@ internal static class UiStrings
             ["palette.celadon"] = "青瓷",
             ["palette.plum"] = "绛紫",
             ["palette.porcelain"] = "冷瓷",
+
+            // ---- 輪盤扇區標籤（工具）----
+            // 扇區只有 80x24px、字級 12.7px：筆畫密的字會糊（2026-10-21 實測，
+            // 連通墨塊數壓縮 0.47／旋轉 0.5）。所以這裡挑筆畫少的措辭，
+            // 日文用 切抜 而不用 切り抜き。字表外的診斷字串走 ToolDescriptor.Label。
+            ["tool.label.rotate90"] = "旋转",
+            ["tool.label.strip-metadata"] = "清理",
+            ["tool.label.compress"] = "压缩",
+            ["tool.label.crop"] = "裁剪",
+            ["tool.label.read-qr"] = "读 QR",
+            ["tool.label.merge-pdf"] = "合并 PDF",
+            ["tool.label.remove-bg"] = "抠图",
             ["btn.save"] = "保存",
             ["btn.cancel"] = "取消",
             ["path.prefix"] = "配置文件：",
@@ -736,6 +763,18 @@ internal static class UiStrings
             ["palette.plum"] = "プラム",
             ["palette.porcelain"] = "ポーセリン",
 
+            // ---- 輪盤扇區標籤（工具）----
+            // 扇區只有 80x24px、字級 12.7px：筆畫密的字會糊（2026-10-21 實測，
+            // 連通墨塊數壓縮 0.47／旋轉 0.5）。所以這裡挑筆畫少的措辭，
+            // 日文用 切抜 而不用 切り抜き。字表外的診斷字串走 ToolDescriptor.Label。
+            ["tool.label.rotate90"] = "回転",
+            ["tool.label.strip-metadata"] = "メタ削除",
+            ["tool.label.compress"] = "圧縮",
+            ["tool.label.crop"] = "切抜",
+            ["tool.label.read-qr"] = "QR 読取",
+            ["tool.label.merge-pdf"] = "PDF 結合",
+            ["tool.label.remove-bg"] = "背景除去",
+
             // ---- 底部 ----
             ["btn.save"] = "保存",
             ["btn.cancel"] = "キャンセル",
@@ -958,6 +997,18 @@ internal static class UiStrings
             ["palette.plum"] = "자두색",
             ["palette.porcelain"] = "포슬린",
 
+            // ---- 輪盤扇區標籤（工具）----
+            // 扇區只有 80x24px、字級 12.7px：筆畫密的字會糊（2026-10-21 實測，
+            // 連通墨塊數壓縮 0.47／旋轉 0.5）。所以這裡挑筆畫少的措辭，
+            // 日文用 切抜 而不用 切り抜き。字表外的診斷字串走 ToolDescriptor.Label。
+            ["tool.label.rotate90"] = "회전",
+            ["tool.label.strip-metadata"] = "메타 제거",
+            ["tool.label.compress"] = "압축",
+            ["tool.label.crop"] = "자르기",
+            ["tool.label.read-qr"] = "QR 스캔",
+            ["tool.label.merge-pdf"] = "PDF 병합",
+            ["tool.label.remove-bg"] = "배경 제거",
+
             ["btn.save"] = "저장",
             ["btn.cancel"] = "취소",
             ["path.prefix"] = "설정 파일: ",
@@ -1179,6 +1230,18 @@ internal static class UiStrings
             ["palette.celadon"] = "Celadon",
             ["palette.plum"] = "Plum",
             ["palette.porcelain"] = "Porcelain",
+
+            // ---- 輪盤扇區標籤（工具）----
+            // 扇區只有 80x24px、字級 12.7px：筆畫密的字會糊（2026-10-21 實測，
+            // 連通墨塊數壓縮 0.47／旋轉 0.5）。所以這裡挑筆畫少的措辭，
+            // 日文用 切抜 而不用 切り抜き。字表外的診斷字串走 ToolDescriptor.Label。
+            ["tool.label.rotate90"] = "ROTATE",
+            ["tool.label.strip-metadata"] = "CLEAN",
+            ["tool.label.compress"] = "COMPRESS",
+            ["tool.label.crop"] = "CROP",
+            ["tool.label.read-qr"] = "READ QR",
+            ["tool.label.merge-pdf"] = "MERGE PDF",
+            ["tool.label.remove-bg"] = "CUTOUT",
 
             ["btn.save"] = "Save",
             ["btn.cancel"] = "Cancel",

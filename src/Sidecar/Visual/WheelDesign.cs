@@ -73,13 +73,21 @@ internal static class WheelDesign
     /// <summary>扇區掃描角＝360/count − 間隙。</summary>
     public static double SweepDeg(int count) => count > 0 ? 360.0 / count - GapDeg(count) : 0.0;
 
-    /// <summary>標籤字級（px，1× 的真實像素）。</summary>
+    /// <summary>
+    /// 標籤字級（px，1× 的真實像素）。
+    ///
+    /// ⚠ 2026-10-21 把 <c>_ =></c> 從 11f 提到 12.7f：扇區標籤開始跟介面語言走之後，
+    /// 11px 下筆畫密的漢字會黏在一起（實測連通墨塊數：壓縮 7/15 = 0.47、旋轉 6/8 = 0.50）。
+    /// 12.7 不是新發明的數字，就是三扇區那一格原本就在用的值。
+    /// 提到 12.7 之後最寬的標籤是韓文「배경 제거」61px、英文「REMOVE BG」75px，
+    /// 都還在 80px 的標籤矩形內（那是輪盤上真正的硬限制）。
+    /// </summary>
     public static float LabelFontPx(int count) => count switch
     {
         2 => 15f,
         3 => 12.7f,
         4 => 11.3f,
-        _ => 11f
+        _ => 12.7f
     };
 
     /// <summary>標籤半徑（佔輪盤半徑的比例）。扇區越多、字越外面。</summary>

@@ -97,17 +97,33 @@ internal enum ToolIcon
 }
 
 /// <summary>
-/// 一個工具。**注意 <see cref="Label"/> 與第一層的格式名是同一個視覺階層**——
-/// 兩者都畫在扇區上，因此都刻意用大寫英文短詞（不進 i18n：扇區只有 80×24 px 的空間，
-/// 而中文在該尺寸下的字重與英文不一致，參考圖的扇區也全是英文）。
-/// 圓心膠囊與說明文字才是中文。
+/// 一個工具。扇區上畫的字是 <see cref="SectorLabel"/>（**跟著介面語言**，
+/// 2026-10-21 起），而 <see cref="Label"/> 是**診斷用的穩定英文名**。
 /// </summary>
+/// <remarks>
+/// 為什麼要有兩個名字、而不是把 <see cref="Label"/> 直接翻掉：<see cref="Label"/> 會進
+/// `--tools-list` 的證據行，而驗收腳本拿它當斷言（`label='READ QR'`）。讓它跟著介面語言
+/// 走，同一條斷言就會因為跑測試那台機器的系統語言而紅——診斷字串必須與語言無關，
+/// 就像 <see cref="Id"/> 一樣。畫面上要什麼語言，是 <see cref="SectorLabel"/> 的事。
+///
+/// 歷史：原本的設計是「扇區一律大寫英文、不進 i18n」，理由是「80×24px 放中文會糊」。
+/// 2026-10-21 實測後半句成立一半：寬度根本不是限制（最寬的英文 65px、韓文 53px，
+/// 都遠小於 80px），真正的限制是 11px 下筆畫會黏在一起。所以現在改成本地化 +
+/// **字級提到 12.7px** + 挑筆畫少的措辭（見 WheelDesign.LabelFontPx 的註解）。
+/// </remarks>
 /// <param name="Id">穩定識別碼。會進日誌與 worker 協議，**不得就地改字**（改了等於換一個工具）。</param>
-/// <param name="Label">扇區標籤（大寫英文）。</param>
+/// <param name="Label">診斷用的穩定英文名（大寫）。**不跟介面語言走**，驗收腳本以它為斷言。</param>
 /// <param name="DescriptionKey">圓心膠囊那句話的 <see cref="UiStrings"/> key（參考設計的「中心顯示 hover 動作」）。</param>
 /// <param name="Icon">線稿圖示。</param>
 internal sealed record ToolDescriptor(string Id, string Label, string DescriptionKey, ToolIcon Icon)
 {
+    /// <summary>
+    /// 扇區上真的畫出來的那個字（**跟著介面語言**）。key 由 <see cref="Id"/> 推出來，
+    /// 所以新增一顆工具時只要 id 定了，五張字表各補一個 <c>tool.label.&lt;id&gt;</c> 就好，
+    /// 不必在兩個地方各寫一次字面值。
+    /// </summary>
+    public string SectorLabel => UiStrings.Get("tool.label." + Id);
+
     /// <summary>
     /// 圓心膠囊的一句話（**跟著介面語言**）。資料裡存的是 key，不是字面值：
     /// 這樣同一個工具在 zh-Hant 與 en 之間切換時不必重建目錄，也不會出現「兩份描述漂移」。
