@@ -2963,3 +2963,55 @@ VLM 說這張表「最底部那行文字被裁切」。實際量測：footer 起
 - VLM 對放大對照的判讀：「下排外圈與分隔線更清楚、顏色沒有被洗白、三套仍可分辨、
   沒有刺眼或過曝」——與量測一致。
 - 建置 0 警告 0 錯誤，exe 10:18:18 → **10:27:56**。
+---
+
+## 2026-10-21 · 英文介面（第一段：轉檔時真正會看到的字）
+
+使用者：「可以開始英文介面」。設定頁本來就有 zh/en 兩套，缺的是**其餘全部畫面**。
+
+### 做法：把字串表從「設定頁專用」升成「全產品唯一權威」
+
+`Settings\SettingsStrings.cs` → `Strings\UiStrings.cs`（`git mv`，內容不動；類別改名，
+28 個呼叫點機械替換）。新增三個成員：
+
+- `UiStrings.Current`：目前的語言（已解析成 `zh-Hant` / `en`）。
+- `UiStrings.SetLanguage(...)`：**唯一的寫入點**，由 `SettingsStore` 在 `Load` 與
+  `TryApply` 的 `case "language"` 呼叫——與配色完全同一個模式（七條載入路徑共用，
+  不可能出現「一半畫面還是舊語言」）。
+- `UiStrings.Get(key)` / `UiStrings.Format(key, …)`：不帶語言參數的多載，產品畫面用它。
+
+新增 **37 個 key**（zh + en 各一份）：工具膠囊 7、輪盤提示 1、托盤 4、進度 1、格式提示 2、
+失敗原因 22。扇區標籤（`ROTATE`／`CLEAN`…）**刻意不進表**——那是大寫英文短詞，與格式名同一
+視覺階層，80×24px 上中文會糊（原設計已寫明，這次照辦）。
+
+接上的畫面：輪盤中央膠囊（工具的 `Description` 改成「存 key、顯示時解析」）、膠囊下方提示
+（`WheelDesign.KeyCaptionText` 由 `const` 改轉發屬性）、托盤四個選單、進度面板的「還有 N 筆」、
+格式提示的「等 N 種／例如 X」、以及 `ConversionTypes.Describe` 的 19 條失敗原因 ＋ 2 條組合句。
+
+### 證明（每一條都量過）
+
+- **托盤**：`language=en` 起動 ⇒ 日誌 `tray: menu items=3 item0='Open settings' item1='Pause conversion'
+  item2='Quit' labels_ok=True`。
+- **失敗原因**：同一個非圖片檔去旋轉 ⇒ zh `--rotate90 FAILED: 不支援的格式`、
+  en `--rotate90 FAILED: Unsupported format`（exit 3 兩邊相同）。
+- **輪盤**：`--settings-set language=en` → `--wheel-demo … --wheel-dump`，VLM 逐字讀出
+  `Hold the trigger key` / `Rotate 90°`／`Clean tags`，且**英文格內零中文**、中文格內仍是中文。
+- **預設沒變**：兩支套件 `merge-images 26/26`、`folder-drop 42/42`；建置 0 警告 0 錯誤。
+
+### 方法論收穫：dump 是可重現的，只要你把底圖釘死
+
+`--wheel-backdrop dark` 之後，**同一組參數兩次 dump 逐位元相同**（sha256 相符，實測）。
+這讓「兩種語言差在哪」變成可量的問題：格式層的差異只落在 `x[92..212] y[302..317]`
+＝就是那行提示文字；工具層是膠囊＋陰影＋提示行。**之前用 `source=screen` 的 dump 比對
+（例如配色改前改後）其實不可重現**，這一點補記在這裡。
+
+### 順手發現的既有缺陷（不是這輪造成的，先記錄、未動設計）
+
+中央膠囊的寬度是「文字實測 ＋ 32px」、**沒有上限**。用產品自己的字型（Segoe UI Bold 17px）
+量：中文最寬 `去中繼資料` = 97.3px ⇒ 膠囊 129px（實測 126px），而中央鏤空半徑只有 47px
+⇒ 膠囊本來就會蓋到內圈標籤的起筆。英文如果不節制會更糟（`Strip metadata` 128px、
+`Compress by settings` 181px）。
+
+處理方式：**英文不要超過中文已經在用的最大值**。實測 en 最寬 `Clean tags` 膠囊 118px、
+`Rotate 90°` 121px，都小於中文 `去中繼資料` 的 126px ⇒ 英文沒有引入新的遮擋。
+（若要根治，得動膠囊或標籤半徑＝改凍結的設計，等使用者裁定。）

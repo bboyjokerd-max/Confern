@@ -161,7 +161,7 @@ internal sealed class FormatCatalog : IFormatCatalog
         var parts = new List<string>();
         foreach (string cat in order.Take(3))
             parts.Add($"{names[cat]} ×{counts[cat]}");
-        if (order.Count > 3) parts.Add($"等 {order.Count} 種");
+        if (order.Count > 3) parts.Add(UiStrings.Format("format.moreKinds", order.Count));
 
         // 「是哪個檔在亂」＝**最少數**那一類（同數時取最後出現的，也就是新來的那個）。
         string rarest = order[0];
@@ -171,7 +171,7 @@ internal sealed class FormatCatalog : IFormatCatalog
         // 回傳**整句話**：這樣「混合選取要怎麼講」只有這一個地方決定。原本輪盤與 --tools-list
         // 各抄了一份「混合選取，請選同類別」，兩份就會各自演化（而使用者只會看到其中一句）。
         return "混合選取，請選同類別：" + string.Join("、", parts)
-             + $"（例如 {Path.GetFileName(sample[rarest])}）";
+             + UiStrings.Format("format.example", Path.GetFileName(sample[rarest]));
     }
 
     /// <summary>類別要顯示給人看的名字：認得的格式用格式名（`PNG`），不認得的用副檔名。</summary>

@@ -217,7 +217,7 @@ internal static class WheelDesign
     public const float KeyCaptionOutlinePx = 3f;
 
     /// <summary>說明文字的固定字串（觸發鍵在輪盤可見期間恆為按住狀態，見 <see cref="DragDetector"/>）。</summary>
-    public const string KeyCaptionText = "按住觸發鍵";
+    public static string KeyCaptionText => UiStrings.Get("wheel.holdToConvert");
 
     // ================= 共用：通知／失敗的底色 =================
 

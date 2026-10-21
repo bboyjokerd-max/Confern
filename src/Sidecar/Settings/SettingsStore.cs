@@ -246,6 +246,15 @@ internal static class SettingsStore
         {
             log($"settings: palette='{applied.Id}' ({applied.NameZh} / {applied.NameEn}) applied");
         }
+
+        // 2026-10-21：介面語言同樣跟著設定檔走，而且**同一個地方**套用（同一個理由：
+        // 七條載入路徑全部經過 Load，不可能出現「一半的畫面還是舊語言」）。
+        // 解析後的語言（system → zh-Hant/en）由 UiStrings 自己記住，呼叫端不必各自解讀。
+        UiStrings.SetLanguage(settings.Language);
+        if (!string.Equals(UiStrings.Current, UiStrings.ZhHant, StringComparison.Ordinal))
+        {
+            log($"settings: language={settings.Language} -> {UiStrings.Current}");
+        }
         return settings;
     }
 
@@ -484,6 +493,8 @@ internal static class SettingsStore
                             : v.Equals("zh-Hant", StringComparison.OrdinalIgnoreCase) || v.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ? "zh-Hant"
                             : v.Equals("en", StringComparison.OrdinalIgnoreCase) ? "en" : "";
                 if (lang == "") { log($"settings: reject language='{value}' (spec 8: system, zh-Hant, en)"); return false; }
+                // 與 palette 同一條規矩：切換**當場生效**（下一個畫面就是新語言）。
+                UiStrings.SetLanguage(lang);
                 next = current with { Language = lang };
                 return true;
             case "emergencyhotkey":

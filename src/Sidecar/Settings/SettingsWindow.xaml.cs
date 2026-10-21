@@ -22,7 +22,7 @@ namespace Sidecar;
 /// 設定頁（規格 §8）的視窗本體。
 ///
 /// 分工（刻意切乾淨，避免第二個權威）：
-///   - **文字**：全部來自 <see cref="SettingsStrings"/>，於 <see cref="ApplyLanguage"/> 指派。
+///   - **文字**：全部來自 <see cref="UiStrings"/>，於 <see cref="ApplyLanguage"/> 指派。
 ///     XAML 裡沒有任何人看得懂的字，也沒有綁定——畫面上的每個值都是這裡推上去的。
 ///   - **顏色**：全部來自 <see cref="SettingsUi.StyleKit"/>，於建構時套用一次。
 ///   - **存檔**：唯一走 <see cref="SettingsStore.Save"/>（原子寫入、可覆寫）。
@@ -217,7 +217,7 @@ internal partial class SettingsWindow : Window
     /// </summary>
     private void ApplyLanguage()
     {
-        string L(string key) => SettingsStrings.Get(key, _language);
+        string L(string key) => UiStrings.Get(key, _language);
 
         Title = L("window.title");
         TitleText.Text = L("window.title");
@@ -277,13 +277,13 @@ internal partial class SettingsWindow : Window
 
     /// <summary>下拉與開關的字，跟著語言換。</summary>
     private void ApplyToggleLanguage(ToggleButton toggle, bool on) =>
-        toggle.Content = SettingsStrings.Get(on ? "toggle.on" : "toggle.off", _language);
+        toggle.Content = UiStrings.Get(on ? "toggle.on" : "toggle.off", _language);
 
     private void UpdateQualityLabels()
     {
         JpgValueText.Text = ((int)Math.Round(JpgSlider.Value)).ToString();
         WebpValueText.Text = ((int)Math.Round(WebpSlider.Value)).ToString();
-        TimeoutValueText.Text = ((int)Math.Round(TimeoutSlider.Value)) + SettingsStrings.Get("unit.seconds", _language);
+        TimeoutValueText.Text = ((int)Math.Round(TimeoutSlider.Value)) + UiStrings.Get("unit.seconds", _language);
     }
 
     // =====================================================================================
@@ -302,11 +302,11 @@ internal partial class SettingsWindow : Window
         {
             TriggerPresetBox.Items.Clear();
             foreach (string name in PresetTriggerKeys)
-                TriggerPresetBox.Items.Add(MakeItem(SettingsStrings.Get($"vk.{name}", _language), name));
+                TriggerPresetBox.Items.Add(MakeItem(UiStrings.Get($"vk.{name}", _language), name));
 
             if (Array.IndexOf(PresetTriggerKeys, _triggerKey) < 0)
                 TriggerPresetBox.Items.Add(MakeItem(
-                    string.Format(SettingsStrings.Get("key.customLabel", _language), _triggerKey), _triggerKey));
+                    string.Format(UiStrings.Get("key.customLabel", _language), _triggerKey), _triggerKey));
 
             TriggerPresetBox.SelectedItem = TriggerPresetBox.Items
                 .OfType<ComboBoxItem>()
@@ -339,7 +339,7 @@ internal partial class SettingsWindow : Window
         }
 
         // 解析不了（例如檔案裡是組合鍵）：說出來，不要顯示一個看起來很正常的名字
-        TriggerValueText.Text = SettingsStrings.Get("key.unknown", _language);
+        TriggerValueText.Text = UiStrings.Get("key.unknown", _language);
         TriggerWarningText.Text = string.IsNullOrEmpty(reason) ? "" : reason;
     }
 
@@ -350,8 +350,8 @@ internal partial class SettingsWindow : Window
     private void OnCaptureButtonClick(object sender, RoutedEventArgs e)
     {
         _capturing = true;
-        CaptureButton.Content = SettingsStrings.Get("btn.capturing", _language);
-        TriggerValueText.Text = SettingsStrings.Get("key.captureHint", _language);
+        CaptureButton.Content = UiStrings.Get("btn.capturing", _language);
+        TriggerValueText.Text = UiStrings.Get("key.captureHint", _language);
         Keyboard.Focus(this);
     }
 
@@ -365,7 +365,7 @@ internal partial class SettingsWindow : Window
         if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
                  or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin or Key.None)
         {
-            TriggerValueText.Text = SettingsStrings.Get("key.captureHintModifier", _language);
+            TriggerValueText.Text = UiStrings.Get("key.captureHintModifier", _language);
             return;
         }
 
@@ -384,7 +384,7 @@ internal partial class SettingsWindow : Window
         catch (Exception ex)
         {
             Report($"[settings] key capture failed: {ex.GetType().Name}: {ex.Message}");
-            TriggerValueText.Text = SettingsStrings.Get("key.captureHintUnsupported", _language);
+            TriggerValueText.Text = UiStrings.Get("key.captureHintUnsupported", _language);
             return;
         }
 
@@ -397,7 +397,7 @@ internal partial class SettingsWindow : Window
             !SettingsStore.TryResolveTriggerKey($"0x{vk:X2}", out _, out _))
         {
             Report($"[settings] captured VK 0x{vk:X2} ({canonical}) rejected: {reason}");
-            TriggerValueText.Text = SettingsStrings.Get("key.captureHintUnsupported", _language);
+            TriggerValueText.Text = UiStrings.Get("key.captureHintUnsupported", _language);
             return;
         }
 
@@ -417,7 +417,7 @@ internal partial class SettingsWindow : Window
     private void StopCapturing()
     {
         _capturing = false;
-        CaptureButton.Content = SettingsStrings.Get("btn.capture", _language);
+        CaptureButton.Content = UiStrings.Get("btn.capture", _language);
     }
 
     /// <summary>焦點跑掉就取消捕獲，不讓 UI 卡在「請按鍵…」。</summary>
@@ -457,8 +457,8 @@ internal partial class SettingsWindow : Window
         try
         {
             LanguageBox.Items.Clear();
-            foreach (string value in new[] { SettingsStrings.System, SettingsStrings.ZhHant, SettingsStrings.En })
-                LanguageBox.Items.Add(MakeItem(SettingsStrings.Get($"lang.{value}", _language), value));
+            foreach (string value in new[] { UiStrings.System, UiStrings.ZhHant, UiStrings.En })
+                LanguageBox.Items.Add(MakeItem(UiStrings.Get($"lang.{value}", _language), value));
 
             LanguageBox.SelectedItem = LanguageBox.Items
                 .OfType<ComboBoxItem>()
@@ -496,9 +496,9 @@ internal partial class SettingsWindow : Window
     /// </summary>
     private string CanonicalLanguage(string tag)
     {
-        if (string.Equals(tag, "system", StringComparison.OrdinalIgnoreCase)) return SettingsStrings.System;
-        if (string.Equals(tag, "zh-Hant", StringComparison.OrdinalIgnoreCase)) return SettingsStrings.ZhHant;
-        if (string.Equals(tag, "en", StringComparison.OrdinalIgnoreCase)) return SettingsStrings.En;
+        if (string.Equals(tag, "system", StringComparison.OrdinalIgnoreCase)) return UiStrings.System;
+        if (string.Equals(tag, "zh-Hant", StringComparison.OrdinalIgnoreCase)) return UiStrings.ZhHant;
+        if (string.Equals(tag, "en", StringComparison.OrdinalIgnoreCase)) return UiStrings.En;
         return tag;
     }
 
@@ -520,7 +520,7 @@ internal partial class SettingsWindow : Window
         {
             OutputPresetBox.Items.Clear();
             foreach ((string tag, string key) in OutputPresets)
-                OutputPresetBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+                OutputPresetBox.Items.Add(MakeItem(UiStrings.Get(key, _language), tag));
 
             OutputPresetBox.SelectedItem = OutputPresetBox.Items
                 .OfType<ComboBoxItem>()
@@ -588,7 +588,7 @@ internal partial class SettingsWindow : Window
 
         bool usable = SettingsStore.TryApply(_saved, "outputFolder", OutputPathBox.Text ?? "",
                                              _ => { }, out Settings _);
-        OutputNoticeText.Text = custom && !usable ? SettingsStrings.Get("out.needPath", _language) : "";
+        OutputNoticeText.Text = custom && !usable ? UiStrings.Get("out.needPath", _language) : "";
     }
 
     /// <summary>
@@ -621,14 +621,14 @@ internal partial class SettingsWindow : Window
         {
             CompressModeBox.Items.Clear();
             foreach ((string tag, string key) in CompressionPresets)
-                CompressModeBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+                CompressModeBox.Items.Add(MakeItem(UiStrings.Get(key, _language), tag));
             CompressModeBox.SelectedItem = CompressModeBox.Items
                 .OfType<ComboBoxItem>()
                 .FirstOrDefault(i => string.Equals(i.Tag as string, _compressionPreset, StringComparison.Ordinal));
 
             CompressUnitBox.Items.Clear();
             foreach ((string tag, string key) in CompressionUnits)
-                CompressUnitBox.Items.Add(MakeItem(SettingsStrings.Get(key, _language), tag));
+                CompressUnitBox.Items.Add(MakeItem(UiStrings.Get(key, _language), tag));
             CompressUnitBox.SelectedItem = CompressUnitBox.Items
                 .OfType<ComboBoxItem>()
                 .FirstOrDefault(i => string.Equals(i.Tag as string, _compressionUnit, StringComparison.Ordinal));
@@ -708,7 +708,7 @@ internal partial class SettingsWindow : Window
         bool usable = SettingsStore.TryApply(_saved, "compressionTargetKb", CompressionTargetValueFromUi(),
                                              _ => { }, out Settings _);
         CompressNoticeText.Text = targetSize && !usable
-            ? SettingsStrings.Get("compress.needSize", _language)
+            ? UiStrings.Get("compress.needSize", _language)
             : "";
     }
 
@@ -800,7 +800,7 @@ internal partial class SettingsWindow : Window
         if (!BuildFromUi(out Settings next, out string? badKey, out string? badReason))
         {
             SetStatus("status.badField", isError: true,
-                      SettingsStrings.Get($"field.{badKey}", _language), badReason ?? "");
+                      UiStrings.Get($"field.{badKey}", _language), badReason ?? "");
             Report($"[settings] save blocked: {badKey} rejected ({badReason})");
             return;
         }
@@ -933,8 +933,8 @@ internal partial class SettingsWindow : Window
     private void RenderStatus()
     {
         StatusText.Text = _statusArgs.Length == 0
-            ? SettingsStrings.Get(_statusKey, _language)
-            : string.Format(SettingsStrings.Get(_statusKey, _language), _statusArgs);
+            ? UiStrings.Get(_statusKey, _language)
+            : string.Format(UiStrings.Get(_statusKey, _language), _statusArgs);
         StatusText.Foreground = _statusIsError ? SettingsUi.StyleKit.FailFg : SettingsUi.StyleKit.TextDim;
     }
 

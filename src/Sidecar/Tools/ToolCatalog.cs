@@ -37,7 +37,7 @@ internal sealed class ToolCatalog : IToolCatalog
         //   "順時針轉 90 度" ≈ 119px → 膠囊約 145px，壓出去 25px／邊（第一版就是這樣，dump 圖上看得出來）
         //   "轉 90°"        ≈ 47px  → 膠囊約 73px，**完全落在鏤空內**
         // 語意沒有損失：圖示本身就是順時針的 90° 弧箭頭（見 WheelDesign 的 ToolIconPx 註解）。
-        Description: "轉 90°",
+        DescriptionKey: "tool.rotate90",
         Icon: ToolIcon.Rotate90);
 
     /// <summary>
@@ -59,7 +59,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor StripMetadata = new(
         Id: "strip-metadata",
         Label: "CLEAN",
-        Description: "去中繼資料",
+        DescriptionKey: "tool.stripMetadata",
         Icon: ToolIcon.StripMetadata);
 
     /// <summary>
@@ -83,7 +83,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor Compress = new(
         Id: "compress",
         Label: "COMPRESS",
-        Description: "依設定壓縮",
+        DescriptionKey: "tool.compress",
         Icon: ToolIcon.Compress);
 
     /// <summary>
@@ -106,7 +106,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor Crop = new(
         Id: "crop",
         Label: "CROP",
-        Description: "裁切",
+        DescriptionKey: "tool.crop",
         Icon: ToolIcon.Crop);
 
     /// <summary>
@@ -131,7 +131,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor ReadQr = new(
         Id: "read-qr",
         Label: "READ QR",
-        Description: "讀 QR",
+        DescriptionKey: "tool.readQr",
         Icon: ToolIcon.ReadQr);
 
     /// <summary>
@@ -160,7 +160,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor MergePdf = new(
         Id: "merge-pdf",
         Label: "MERGE PDF",
-        Description: "合併 PDF",
+        DescriptionKey: "tool.mergePdf",
         Icon: ToolIcon.MergePdf);
 
     /// <summary>
@@ -189,7 +189,7 @@ internal sealed class ToolCatalog : IToolCatalog
     private static readonly ToolDescriptor RemoveBg = new(
         Id: "remove-bg",
         Label: "CUTOUT",
-        Description: "去背",
+        DescriptionKey: "tool.removeBg",
         Icon: ToolIcon.RemoveBg);
 
     /// <summary>

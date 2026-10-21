@@ -3,24 +3,49 @@ using System.Runtime.InteropServices;
 namespace Sidecar;
 
 /// <summary>
-/// 設定頁（規格 §8）的**全部**使用者可見文字。唯一的字串權威。
+/// **全產品**的使用者可見文字：設定頁（規格 §8）＋ 轉檔時真正會看到的畫面（輪盤、托盤、失敗原因）。
+/// 唯一的字串權威。
 ///
 /// 為什麼集中在這裡（三個理由，缺一不可）：
 ///   ①XAML 裡不可以出現任何非 ASCII 字面值——檔案的編碼是踩過的坑，UI 文字一律由
 ///     code-behind 指派，XAML 只留結構；
 ///   ②規格 §8 的「語言」是**執行期可切換**的設定，字串必須能在視窗開著的時候重刷；
-///   ③同一個視窗要有 zh-Hant 與 en 兩套，散在兩處遲早會漂移。
+///   ③同一句話要有 zh-Hant 與 en 兩套，散在兩處遲早會漂移。
+///
+/// 2026-10-21：從「設定頁專用」升級成**全產品**唯一字串權威（原本叫 SettingsStrings）。
+/// 扇區標籤（<see cref="ToolDescriptor.Label"/>）仍然不進這張表——那是大寫英文短詞，
+/// 與格式名同一個視覺階層，80×24 px 的扇區上放中文會糊。
 ///
 /// 這個類別**沒有**狀態、沒有 I/O、沒有 WPF 相依：只有表與純函式。
 /// 注意：<see cref="SettingsStore.Describe"/> 的輸出與 <see cref="TriggerKeyInfo.Warning"/>
 /// 是**規格文字**（後者由 <c>TryResolveTriggerKey</c> 產生），不經過這裡翻譯，原樣顯示。
 /// </summary>
-internal static class SettingsStrings
+internal static class UiStrings
 {
     /// <summary>支援的語言代碼（與 <see cref="Settings.Language"/> 的合法值一致）。</summary>
     public const string System = "system";
     public const string ZhHant = "zh-Hant";
     public const string En = "en";
+    /// <summary>
+    /// 目前的語言（已解析成 <see cref="ZhHant"/> 或 <see cref="En"/>）。
+    /// 由 <see cref="SettingsStore"/> 在載入與套用設定的**同一處**設定——與配色同一個模式：
+    /// 只有一個寫入點，呼叫端不會各自解讀 <c>system</c>。
+    /// </summary>
+    public static string Current { get; private set; } = Resolve(System);
+
+    /// <summary>
+    /// 設定目前語言。傳入不認得的值**不會靜默退回**：<see cref="Resolve"/> 會解析成系統語言，
+    /// 而設定頁那一端（<c>TryApply</c> 的 <c>case "language"</c>）才是驗證與拒絕的地方——
+    /// 這裡只負責「記住已解析的結果」。
+    /// </summary>
+    public static void SetLanguage(string? language) => Current = Resolve(language);
+
+    /// <summary>取目前語言的字串（產品畫面走這一個多載，不必把語言一路傳下去）。</summary>
+    public static string Get(string key) => Get(key, Current);
+
+    /// <summary>取字串並填參數。<see cref="Get(string)"/> 的格式化版本。</summary>
+    public static string Format(string key, params object?[] args) =>
+        string.Format(Get(key), args);
 
     /// <summary>
     /// 「跟隨系統」的解析。回傳 <c>zh-Hant</c> 或 <c>en</c>，永不回傳 <c>system</c>。
@@ -186,7 +211,50 @@ internal static class SettingsStrings
             ["vk.ArrowUp"] = "↑",
             ["vk.ArrowDown"] = "↓",
             ["vk.ArrowLeft"] = "←",
-            ["vk.ArrowRight"] = "→"
+            ["vk.ArrowRight"] = "→",
+            // ── 2026-10-21：轉檔時真正會看到的畫面（工具輪盤／托盤／失敗原因）──
+            ["tool.rotate90"] = "轉 90°",
+            ["tool.stripMetadata"] = "去中繼資料",
+            ["tool.compress"] = "依設定壓縮",
+            ["tool.crop"] = "裁切",
+            ["tool.readQr"] = "讀 QR",
+            ["tool.mergePdf"] = "合併 PDF",
+            ["tool.removeBg"] = "去背",
+
+            ["wheel.holdToConvert"] = "按住觸發鍵",
+
+            ["tray.openSettings"] = "開啟設定",
+            ["tray.pause"] = "暫停轉換",
+            ["tray.resume"] = "繼續轉換",
+            ["tray.exit"] = "結束",
+
+            ["progress.moreHidden"] = "…還有 {0} 筆",
+
+            ["format.moreKinds"] = "等 {0} 種",
+            ["format.example"] = "（例如 {0}）",
+
+            ["err.unsupported"] = "不支援的格式",
+            ["err.decodeFailed"] = "無法解碼",
+            ["err.targetUnavailable"] = "此格式目前無法輸出",
+            ["err.sourceMissing"] = "來源檔案已不存在",
+            ["err.unreadable"] = "無法讀取來源檔案",
+            ["err.writeDenied"] = "無法寫入此資料夾",
+            ["err.noSpace"] = "空間不足",
+            ["err.locked"] = "檔案被鎖定",
+            ["err.timeout"] = "雲端檔案下載逾時",
+            ["err.targetTooSmall"] = "已達最低品質仍超過指定大小",
+            ["err.cropRectEmpty"] = "選取範圍是空的",
+            ["err.cropNothingToDo"] = "選取範圍等於整張圖",
+            ["err.writeConflict"] = "輸出檔名被其他行程占用",
+            ["err.qrNotFound"] = "圖片中找不到 QR 碼",
+            ["err.mergeFailed"] = "無法合併這個 PDF",
+            ["err.mergeNeedsPassword"] = "這個 PDF 需要密碼才能開啟，請先解除密碼再合併",
+            ["err.noSubjectFound"] = "這張圖找不到人像主體，無法去背",
+            ["err.modelUnavailable"] = "去背模型尚未取得，請執行 tools\\get-rembg-model.ps1",
+            ["err.modelCorrupt"] = "去背模型檔損壞或下載不完整，請重新取得",
+            ["err.generic"] = "轉檔失敗",
+            ["err.withPosition"] = "{0}（第 {1} 個檔） {2}",
+            ["err.summaryMore"] = "{0}（共 {1} 個）"
         },
         [En] = new(StringComparer.Ordinal)
         {
@@ -278,7 +346,50 @@ internal static class SettingsStrings
             ["vk.ArrowUp"] = "Up",
             ["vk.ArrowDown"] = "Down",
             ["vk.ArrowLeft"] = "Left",
-            ["vk.ArrowRight"] = "Right"
+            ["vk.ArrowRight"] = "Right",
+            // 2026-10-21: the surface you actually see while converting (wheel / tray / failure reasons)
+            ["tool.rotate90"] = "Rotate 90°",
+            ["tool.stripMetadata"] = "Clean tags",
+            ["tool.compress"] = "Compress",
+            ["tool.crop"] = "Crop",
+            ["tool.readQr"] = "Read QR",
+            ["tool.mergePdf"] = "Merge PDF",
+            ["tool.removeBg"] = "Cut out",
+
+            ["wheel.holdToConvert"] = "Hold the trigger key",
+
+            ["tray.openSettings"] = "Open settings",
+            ["tray.pause"] = "Pause conversion",
+            ["tray.resume"] = "Resume conversion",
+            ["tray.exit"] = "Quit",
+
+            ["progress.moreHidden"] = "…{0} more",
+
+            ["format.moreKinds"] = "and {0} more",
+            ["format.example"] = " (e.g. {0})",
+
+            ["err.unsupported"] = "Unsupported format",
+            ["err.decodeFailed"] = "Could not decode",
+            ["err.targetUnavailable"] = "This format cannot be written right now",
+            ["err.sourceMissing"] = "The source file no longer exists",
+            ["err.unreadable"] = "Could not read the source file",
+            ["err.writeDenied"] = "Cannot write to this folder",
+            ["err.noSpace"] = "Not enough disk space",
+            ["err.locked"] = "The file is locked",
+            ["err.timeout"] = "Timed out downloading the cloud file",
+            ["err.targetTooSmall"] = "Even the lowest quality is over the target size",
+            ["err.cropRectEmpty"] = "The selection is empty",
+            ["err.cropNothingToDo"] = "The selection is the whole image",
+            ["err.writeConflict"] = "Another process is holding the output name",
+            ["err.qrNotFound"] = "No QR code found in the image",
+            ["err.mergeFailed"] = "Could not merge this PDF",
+            ["err.mergeNeedsPassword"] = "This PDF needs a password; remove it before merging",
+            ["err.noSubjectFound"] = "No subject found, so there is nothing to cut out",
+            ["err.modelUnavailable"] = "The background-removal model is missing; run tools\\get-rembg-model.ps1",
+            ["err.modelCorrupt"] = "The background-removal model is damaged or incomplete; download it again",
+            ["err.generic"] = "Conversion failed",
+            ["err.withPosition"] = "{0} (file {1}) {2}",
+            ["err.summaryMore"] = "{0} ({1} files)"
         }
     };
 }

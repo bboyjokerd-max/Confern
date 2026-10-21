@@ -217,46 +217,46 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
     public string Reason => Error switch
     {
         ConversionError.None => "",
-        ConversionError.Unsupported => "不支援的格式",
-        ConversionError.DecodeFailed => "無法解碼",
-        ConversionError.TargetUnavailable => "此格式目前無法輸出",
-        ConversionError.SourceMissing => "來源檔案已不存在",
-        ConversionError.Unreadable => "無法讀取來源檔案",
-        ConversionError.WriteDenied => "無法寫入此資料夾",
-        ConversionError.NoSpace => "空間不足",
-        ConversionError.Locked => "檔案被鎖定",
-        ConversionError.Timeout => "雲端檔案下載逾時",
+        ConversionError.Unsupported => UiStrings.Get("err.unsupported"),
+        ConversionError.DecodeFailed => UiStrings.Get("err.decodeFailed"),
+        ConversionError.TargetUnavailable => UiStrings.Get("err.targetUnavailable"),
+        ConversionError.SourceMissing => UiStrings.Get("err.sourceMissing"),
+        ConversionError.Unreadable => UiStrings.Get("err.unreadable"),
+        ConversionError.WriteDenied => UiStrings.Get("err.writeDenied"),
+        ConversionError.NoSpace => UiStrings.Get("err.noSpace"),
+        ConversionError.Locked => UiStrings.Get("err.locked"),
+        ConversionError.Timeout => UiStrings.Get("err.timeout"),
         // 工具 compress 專用（規格 §9.4）。說的是「你的上限太低」，不是「轉檔壞了」。
-        ConversionError.TargetTooSmall => "已達最低品質仍超過指定大小",
+        ConversionError.TargetTooSmall => UiStrings.Get("err.targetTooSmall"),
         // 工具 crop 專用（規格 §9.4）。同樣是「你的要求本身沒有東西可以做」，不是「轉檔壞了」。
-        ConversionError.CropRectEmpty => "選取範圍是空的",
-        ConversionError.CropNothingToDo => "選取範圍等於整張圖",
+        ConversionError.CropRectEmpty => UiStrings.Get("err.cropRectEmpty"),
+        ConversionError.CropNothingToDo => UiStrings.Get("err.cropNothingToDo"),
         // 另一個行程搶走了每一個候選檔名（含 `name (1)`…`name (7)`）。罕見到幾乎不會出現，
         // 但出現時必須說得出真正的原因，不能叫使用者去檢查一個完好的來源檔。
-        ConversionError.WriteConflict => "輸出檔名被其他行程占用",
+        ConversionError.WriteConflict => UiStrings.Get("err.writeConflict"),
         // 工具 read-qr 專用（規格 §9.4）。說的是「這張圖裡沒有 QR」，不是「這張圖壞了」
         // （見 QrNotFound 的逐條比較）。
-        ConversionError.QrNotFound => "圖片中找不到 QR 碼",
+        ConversionError.QrNotFound => UiStrings.Get("err.qrNotFound"),
         // 工具 merge-pdf 專用（規格 §9.4）。說的是「這一批合併不起來」，而且必定指明是哪一個檔
         // （由 DescribeMessage 把「第 N 個檔 ＋ 檔名」接在前面）。不是「轉檔壞了」，
         // 也不是「這個檔壞了」——含 /XRefStm 的 PDF 是完全合法的檔（見 MergeFailed 的逐條比較）。
-        ConversionError.MergeFailed => "無法合併這個 PDF",
+        ConversionError.MergeFailed => UiStrings.Get("err.mergeFailed"),
         // 工具 merge-pdf 專用，而且是**一句有下一步的話**（2026-10-07，見 MergeNeedsPassword
         // 的逐條說明）：加密檔的失敗原因決定了使用者要做什麼（先解除密碼再來），
         // 所以它不能與 MergeFailed 共用同一句——那句話讀完只會讓人重試同一個檔。
         // 訊息刻意**不含密碼輸入的暗示**：本工具沒有取得密碼的介面，說「請輸入密碼」
         // 會把使用者指向一個不存在的功能。
-        ConversionError.MergeNeedsPassword => "這個 PDF 需要密碼才能開啟，請先解除密碼再合併",
+        ConversionError.MergeNeedsPassword => UiStrings.Get("err.mergeNeedsPassword"),
         // 工具 remove-bg 專用（規格 §9.4）。這是**人像**模型的正常否定答案，不是壞掉
         // （見 NoSubjectFound 的逐條比較）。訊息刻意說出「人像」：使用者拿風景或截圖來按
         // 這一顆扇形時，那兩個字就是他需要知道的全部。
-        ConversionError.NoSubjectFound => "這張圖找不到人像主體，無法去背",
+        ConversionError.NoSubjectFound => UiStrings.Get("err.noSubjectFound"),
         // 工具 remove-bg 專用：模型檔還沒取得。訊息必須**指向取得腳本**，否則使用者只知道
         // 「失敗了」而不知道要放什麼檔案、放在哪裡。
-        ConversionError.ModelUnavailable => "去背模型尚未取得，請執行 tools\\get-rembg-model.ps1",
+        ConversionError.ModelUnavailable => UiStrings.Get("err.modelUnavailable"),
         // 工具 remove-bg 專用：模型檔在但是壞的（與上一句刻意不同，見 ModelCorrupt 的說明）。
-        ConversionError.ModelCorrupt => "去背模型檔損壞或下載不完整，請重新取得",
-        _ => "轉檔失敗"
+        ConversionError.ModelCorrupt => UiStrings.Get("err.modelCorrupt"),
+        _ => UiStrings.Get("err.generic")
     };
 
     /// <summary>規格 §7.1 的使用者訊息（繁體中文），＝檔名 ＋ <see cref="Reason"/>。</summary>
@@ -288,7 +288,7 @@ internal sealed record ConversionResult(string SourcePath, string? OutputPath, C
         // 工具的訊息逐字元不變（`m1d`／`m1f` 斷言的就是那些字）。已確認全 repo 只有 `MergeFail`
         // 會填入正數的 Position（`ConversionEngine.cs`），單檔工具一律留 0。
         if (position > 0)
-            return $"{FileNameOf(sourcePath)}（第 {position} 個檔） {reason}";
+            return UiStrings.Format("err.withPosition", FileNameOf(sourcePath), position, reason);
         // 只有 DecodeFailed 的規格訊息帶檔名（先有「哪個檔案」才讀得懂「無法解碼」）；
         // 其餘是純原因，使用者在清單那一列本來就看得到檔名。
         return error == ConversionError.DecodeFailed
@@ -333,7 +333,7 @@ internal sealed record ConversionSummary(IReadOnlyList<ConversionResult> Results
     {
         if (failed == 0) return $"✓ {ok}";
         if (ok == 0 && failures.Count > 0)
-            return failures.Count == 1 ? failures[0] : $"{failures[0]}（共 {failed} 個）";
+            return failures.Count == 1 ? failures[0] : UiStrings.Format("err.summaryMore", failures[0], failed);
         return $"✓ {ok} / ✗ {failed}";
     }
 

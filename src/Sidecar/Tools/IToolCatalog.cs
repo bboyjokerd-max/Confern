@@ -104,10 +104,15 @@ internal enum ToolIcon
 /// </summary>
 /// <param name="Id">穩定識別碼。會進日誌與 worker 協議，**不得就地改字**（改了等於換一個工具）。</param>
 /// <param name="Label">扇區標籤（大寫英文）。</param>
-/// <param name="Description">圓心膠囊的一句話（zh-Hant）——參考設計的「中心顯示 hover 動作」。</param>
+/// <param name="DescriptionKey">圓心膠囊那句話的 <see cref="UiStrings"/> key（參考設計的「中心顯示 hover 動作」）。</param>
 /// <param name="Icon">線稿圖示。</param>
-internal sealed record ToolDescriptor(string Id, string Label, string Description, ToolIcon Icon)
+internal sealed record ToolDescriptor(string Id, string Label, string DescriptionKey, ToolIcon Icon)
 {
+    /// <summary>
+    /// 圓心膠囊的一句話（**跟著介面語言**）。資料裡存的是 key，不是字面值：
+    /// 這樣同一個工具在 zh-Hant 與 en 之間切換時不必重建目錄，也不會出現「兩份描述漂移」。
+    /// </summary>
+    public string Description => UiStrings.Get(DescriptionKey);
     /// <summary>
     /// 這個工具適不適用於某一個**來源格式**（`CodecRegistry.FormatOfPath` 回的那個名字）。
     ///

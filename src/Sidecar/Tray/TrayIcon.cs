@@ -44,10 +44,10 @@ internal sealed class TrayIcon : IDisposable
     // 為什麼放在這裡而不是散在 AppendMenuW 的呼叫處：自測要斷言的是**這三行字**，
     // 若斷言自己另寫一份字面值，改了一邊而另一邊沒改就會「通過」——那正是驗收最不該有的性質。
 
-    public const string MenuOpenSettings = "開啟設定";
-    public const string MenuPause = "暫停轉換";
-    public const string MenuResume = "繼續轉換";
-    public const string MenuExit = "結束";
+    public static string MenuOpenSettings => UiStrings.Get("tray.openSettings");
+    public static string MenuPause => UiStrings.Get("tray.pause");
+    public static string MenuResume => UiStrings.Get("tray.resume");
+    public static string MenuExit => UiStrings.Get("tray.exit");
 
     /// <summary>選單有幾項。自測與驗收腳本都斷言這個數字（少一項是很容易發生、又不容易看見的退化）。</summary>
     public const int MenuItemCount = 3;

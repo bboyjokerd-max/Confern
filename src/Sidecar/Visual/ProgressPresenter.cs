@@ -593,7 +593,7 @@ internal sealed class ProgressPresenter : IDisposable
         var texts = new string[lines];
         for (int i = 0; i < shown; i++)
             texts[i] = LayoutRow(rows[i], cap ? available : 0, font, measure, format);
-        if (hidden > 0) texts[lines - 1] = $"…還有 {hidden} 筆";
+        if (hidden > 0) texts[lines - 1] = UiStrings.Format("progress.moreHidden", hidden);
         return texts;
     }
 
@@ -675,7 +675,7 @@ internal sealed class ProgressPresenter : IDisposable
             width = Math.Max(width, (int)Math.Ceiling(MeasureText(measure, rows[i].Text, font, format))
                                     + DetailPadX * 2 + HorizontalPadding);
         if (hidden > 0)
-            width = Math.Max(width, (int)Math.Ceiling(MeasureText(measure, $"…還有 {hidden} 筆", font, format))
+            width = Math.Max(width, (int)Math.Ceiling(MeasureText(measure, UiStrings.Format("progress.moreHidden", hidden), font, format))
                                     + DetailPadX * 2 + HorizontalPadding);
         if (maxWidthPx > 0) width = Math.Min(width, Math.Max(BitmapWidth, maxWidthPx));
         return width;
