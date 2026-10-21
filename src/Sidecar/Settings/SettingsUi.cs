@@ -806,6 +806,10 @@ internal static class SettingsUi
             if (pw <= 0 || ph <= 0)
                 return $"(window has no size: {w.ActualWidth}x{w.ActualHeight})";
 
+            // 版面自檢（2026-10-21）：文字變長在 WPF 裡不會報錯，只會被靜靜裁掉。
+            // 每一次 dump 都印一行，任何語言的截字／溢出都留下證據。
+            log($"settings ui layout: {LayoutReport(w)}");
+
             DpiScale dpi = VisualTreeHelper.GetDpi(w);
             var rtb = new RenderTargetBitmap((int)Math.Ceiling(pw * dpi.DpiScaleX),
                                              (int)Math.Ceiling(ph * dpi.DpiScaleY),
@@ -858,6 +862,151 @@ internal static class SettingsUi
         detail = $"dump: {path} ({report})";
         Log(log, detail);
         return true;
+    }
+
+    /// <summary>
+    /// 版面自檢（2026-10-21，為了新增語言而做）。
+    ///
+    /// 為什麼需要它：設定頁是 <c>ScrollViewer</c> 加固定 28px 的列，所以字變長**不會**把視窗
+    /// 撐大、也不會產生任何錯誤——它只是靜靜被裁掉。既有的「有沒有捲軸」那條守衛有兩個盲點：
+    /// （a）它只看縱向，而橫向在堆疊面板裡是裁切、永遠不會長出捲軸；
+    /// （b）它找的是「夠長的亮色直條」，淺色配色整頁都亮，會把頁面本身誤判成捲軸。
+    ///
+    /// 這裡量的是真正的不變式，而且與配色、語言都無關：
+    /// 每一列的內容右緣不超出列寬（沒有東西被推出列外），
+    /// 每一個不換行的 TextBlock 的實際寬度不小於它要求的寬度（沒有被截字）。
+    /// </summary>
+    internal static string LayoutReport(SettingsWindow w)
+    {
+        ScrollViewer? sv = FindFirst<ScrollViewer>(w);
+        if (sv == null) return "no ScrollViewer";
+
+        double viewportW = sv.ViewportWidth;
+        double viewportH = sv.ViewportHeight;
+        double extentH = sv.ExtentHeight;
+        bool scrollbar = extentH > viewportH + 0.5;
+
+        int gridOverflow = 0;
+        double worstOver = 0.0;
+        int overlaps = 0;
+        double widestLabel = 0.0;
+        string worstName = "-";
+        string widestLabelText = "-";
+        var overlapList = new System.Collections.Generic.List<string>();
+
+        foreach (FrameworkElement fe in AllDescendants(w))
+        {
+            if (fe is Grid g && g.ColumnDefinitions.Count >= 2 && g.ActualWidth > 0)
+            {
+                foreach (UIElement child in g.Children)
+                {
+                    if (child is not FrameworkElement c || !c.IsVisible || c.ActualWidth <= 0) continue;
+                    double right;
+                    try { right = c.TranslatePoint(new System.Windows.Point(0, 0), g).X + c.ActualWidth; }
+                    catch (InvalidOperationException) { continue; }   // 尚未接上視覺樹
+                    double over = right - g.ActualWidth;
+                    if (over > 0.5)
+                    {
+                        gridOverflow++;
+                        if (over > worstOver)
+                        {
+                            worstOver = over;
+                            worstName = string.IsNullOrEmpty(c.Name) ? (c.GetType().Name + "?") : c.Name;
+                        }
+                    }
+                }
+
+                // 標籤欄（SharedSizeGroup="SettingsLabel"）需要多寬：語言的字寬預算就是它。
+                // 量的是**要求**寬度而不是排完的寬度——排完的寬度是結果，不是需求。
+                foreach (UIElement child in g.Children)
+                {
+                    if (child is not TextBlock ltb || !ltb.IsVisible) continue;
+                    if (Grid.GetColumn(ltb) != 0) continue;
+                    double need = ltb.DesiredSize.Width;
+                    if (need > widestLabel)
+                    {
+                        widestLabel = need;
+                        widestLabelText = Shorten(ltb.Text, 22);
+                    }
+                }
+            }
+
+            // 真的要出事的重疊：文字要求的右緣超出它所在那一列的右緣。
+            // ⚠ TextBlock 預設 ClipToBounds=false，框比字窄**不會**截字（字會溢出框繼續畫），
+            //   所以「ActualWidth < DesiredSize」不是缺陷；超出整列才是。
+            if (fe is TextBlock tb && tb.IsVisible && tb.Parent is FrameworkElement parent
+                && parent is not Grid && parent.ActualWidth > 0
+                && tb.DesiredSize.Width > parent.ActualWidth + 0.5)
+            {
+                overlaps++;
+                if (overlapList.Count < 3)
+                    overlapList.Add($"{Shorten(tb.Text, 16)} {parent.ActualWidth:0}->{tb.DesiredSize.Width:0}");
+            }
+        }
+
+        return string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "viewport={0:0}x{1:0} extent={2:0}x{3:0} scrollbar={4} rowOverflow={5} worst=+{6:0.#}px@{7} labelColumn={8:0}[{9}] overlaps={10}{11}",
+            viewportW, viewportH, viewportW, extentH,
+            scrollbar ? "True" : "False", gridOverflow, worstOver, worstName, widestLabel, widestLabelText,
+            overlaps,
+            overlapList.Count == 0 ? "" : " over=" + string.Join("; ", overlapList.ToArray()));
+    }
+
+    private static string Shorten(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "(empty)";
+        s = s.Replace("\r", " ").Replace("\n", " ");
+        return s.Length <= max ? s : s.Substring(0, max) + "…";
+    }
+
+    private static T? FindFirst<T>(DependencyObject root) where T : DependencyObject
+    {
+        foreach (object? child in LogicalAndVisualChildren(root))
+        {
+            if (child is T hit) return hit;
+            if (child is DependencyObject d)
+            {
+                T? deeper = FindFirst<T>(d);
+                if (deeper != null) return deeper;
+            }
+        }
+        return null;
+    }
+
+    private static IEnumerable<FrameworkElement> AllDescendants(DependencyObject root)
+    {
+        foreach (object? child in LogicalAndVisualChildren(root))
+        {
+            if (child is FrameworkElement fe) yield return fe;
+            if (child is DependencyObject d)
+                foreach (FrameworkElement deeper in AllDescendants(d))
+                    yield return deeper;
+        }
+    }
+
+    /// <summary>
+    /// 視覺子節點（未接上的元素只有邏輯子節點，兩邊都走才不會漏）。同一個物件常常同時是兩邊的
+    /// 子節點，所以這裡去重——否則溢出會被數兩次，數字就不能用了。
+    /// </summary>
+    private static IEnumerable<object?> LogicalAndVisualChildren(DependencyObject root)
+    {
+        // ⚠ Grid 的邏輯子節點包含 ColumnDefinition／RowDefinition，它們不是 Visual，
+        // 對它們呼叫 VisualTreeHelper 會丟 "'ColumnDefinition' 不是 Visual 或 Visual3D"。
+        bool isVisual = root is Visual || root is System.Windows.Media.Media3D.Visual3D;
+        if (!isVisual) yield break;
+
+        var seen = new System.Collections.Generic.HashSet<object>();
+        int n = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+        {
+            object child = VisualTreeHelper.GetChild(root, i);
+            if (seen.Add(child)) yield return child;
+        }
+        foreach (object? child in LogicalTreeHelper.GetChildren(root))
+        {
+            if (child != null && seen.Add(child)) yield return child;
+        }
     }
 
     /// <summary>

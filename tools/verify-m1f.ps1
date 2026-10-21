@@ -529,6 +529,64 @@ Check 'S14.35 diagnostics ON brings the detail lines back' (
   $runOn.Text -match 'diagnostics: off -> on \(detail events included\)' -and
   $ticksOn -ge 1) "detail_ticks=$ticksOn"
 
+# =============================================================================================
+"=== S14.37 eight languages: the tables align, and no page overflows (wave 2, 2026-10-21) ==="
+# The second wave added fr / de / es. Two failure modes here are SILENT, which is exactly why they
+# are measured instead of assumed:
+#   (1) a table missing a key compiles fine and throws nothing -- the screen simply shows "!key!"
+#       in whatever cell nobody looked at;
+#   (2) a longer word does not resize the window and raises no error -- the fixed 28px rows just
+#       push the control out of the row or let the text run over its neighbour.
+# Neither was covered by any earlier check: S17.19 looked only at a scrollbar, and it only ever ran
+# in one language.
+$selfLog = Join-Path $uiWork 'strings-selftest.log'
+$ss = Start-Process -FilePath $Exe -ArgumentList @('--strings-selftest','--quiet','--log',$selfLog) -PassThru -WindowStyle Hidden
+$ssDone = $ss.WaitForExit(20000)
+if (-not $ssDone) { $ss.Kill(); $ss.WaitForExit(5000) | Out-Null }
+$ssText = if (Test-Path -LiteralPath $selfLog) { Get-Content -LiteralPath $selfLog -Raw } else { '' }
+$ssLine = (($ssText -split "`r?`n") | Where-Object { $_ -match 'strings selftest:' } | Select-Object -First 1)
+Check 'S14.37a all eight language tables hold the same keys and no impossible placeholder' `
+  ($ssDone -and $ss.ExitCode -eq 0 -and $ssLine -match 'aligned=True' -and $ssLine -match 'missing=0' `
+   -and $ssLine -match 'extra=0' -and $ssLine -match 'badPlaceholders=0') "$ssLine"
+
+# (b)(c) every language lays out inside its rows, needs no scrollbar, and renders a frame of its own.
+$langs = @('zh-Hant','zh-Hans','ja','ko','fr','de','es','en')
+$langBad = @(); $langDetail = @(); $langHashes = @{}
+foreach ($lang in $langs) {
+  $lj = Join-Path $uiWork ("lang-$lang.json")
+  Set-Content -LiteralPath $lj -Value "{ `"Language`": `"$lang`", `"Palette`": `"graphite`" }" -Encoding UTF8
+  $lp = Join-Path $uiWork ("lang-$lang.png")
+  $llog = Join-Path $uiWork ("lang-$lang.log")
+  $pr = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump',$lp,'--settings-file',$lj,'--quiet','--log',$llog) -PassThru -WindowStyle Hidden
+  $lDone = $pr.WaitForExit(25000)
+  if (-not $lDone) { $pr.Kill(); $pr.WaitForExit(5000) | Out-Null }
+  $lt = if (Test-Path -LiteralPath $llog) { Get-Content -LiteralPath $llog -Raw } else { '' }
+  $lay = (($lt -split "`r?`n") | Where-Object { $_ -match 'settings ui layout:' } | Select-Object -First 1)
+  if (-not ($lDone -and $pr.ExitCode -eq 0 -and $lay -match 'scrollbar=False' -and $lay -match 'rowOverflow=0' -and $lay -match 'overlaps=0')) { $langBad += $lang }
+  $langDetail += ("{0}:{1}" -f $lang, ($lay -replace '.*settings ui layout: ',''))
+  if (Test-Path -LiteralPath $lp) { $langHashes[$lang] = (Get-FileHash -LiteralPath $lp -Algorithm SHA256).Hash }
+}
+Check 'S14.37b no language pushes a control out of its row, overlaps a neighbour, or needs a scrollbar' `
+  ($langBad.Count -eq 0 -and $langHashes.Count -eq $langs.Count) `
+  ($(if ($langBad.Count -gt 0) { 'BAD=' + ($langBad -join ',') + ' ' } else { '' }) + ($langDetail -join ' | '))
+$distinctLangs = @($langHashes.Values | Select-Object -Unique).Count
+Check 'S14.37c the eight languages render eight different pages (each one really used its own table)' `
+  ($distinctLangs -eq 8) "distinct=$distinctLangs/8"
+
+# (d) the dropdown must list all eight plus "follow the system" -- a language you cannot select is
+# not a language you shipped.
+$langPopupPng = Join-Path $uiWork 'lang-dropdown.png'
+$langPopupLog = Join-Path $uiWork 'lang-dropdown.log'
+$ljFr = Join-Path $uiWork 'lang-fr.json'
+$pp = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump-popup',$langPopupPng,'--settings-ui-popup-box','LanguageBox','--settings-file',$ljFr,'--quiet','--log',$langPopupLog) -PassThru -WindowStyle Hidden
+$ppDone = $pp.WaitForExit(25000)
+if (-not $ppDone) { $pp.Kill(); $pp.WaitForExit(5000) | Out-Null }
+$ppText = if (Test-Path -LiteralPath $langPopupLog) { Get-Content -LiteralPath $langPopupLog -Raw } else { '' }
+$langItemCount = @(($ppText -split "`r?`n") | Where-Object { $_ -match 'popup item \d+:' }).Count
+Check 'S14.37d the language dropdown offers all eight languages plus "follow the system"' `
+  ($ppDone -and $pp.ExitCode -eq 0 -and $langItemCount -eq 9) "items=$langItemCount (expected 9)"
+Expect 4
+
 "=== S14.36 this suite did not touch the real configuration ==="
 $realAfter = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
 Check 'S14.36 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"

@@ -603,6 +603,8 @@ internal sealed class Options
     public bool ShowUsage;
     public bool ShowVersion;
     public bool DumpMonitors;
+    /// <summary>`--strings-selftest`：印出八張字串表的逐鍵對齊結果就結束（見 <see cref="UiStrings.SelfTest"/>）。</summary>
+    public bool StringsSelfTest;
     public bool ForceRaiseHitLayer;
 
     /// <summary>
@@ -1164,6 +1166,7 @@ internal sealed class Options
                 case "--help" or "-h" or "/?": o.ShowUsage = true; break;
                 case "--version" or "-v": o.ShowVersion = true; break;
                 case "--dump-monitors": o.DumpMonitors = true; break;
+                case "--strings-selftest": o.StringsSelfTest = true; break;
                 case "--raise": o.ForceRaiseHitLayer = true; break;
                 case "--raise-with-hooks": o.RaiseWithHooks = true; break;
                 case "--wheel-layer-probe": if (i + 1 < args.Length) o.WheelLayerProbe = args[++i]; break;
@@ -1411,6 +1414,17 @@ internal static class App
     {
         MonitorEntry[] monitors = MonitorLayout.Enumerate();
         evidence.Line($"monitors: {monitors.Length}");
+
+        // --strings-selftest：不啟動任何 UI，印一行就結束。缺鍵只會在畫面上露出 !key!，
+        // 不會編譯失敗也不會當掉，所以需要這個出口（2026-10-21 第二批歐洲語言）。
+        if (opt.StringsSelfTest)
+        {
+            Native.AttachParentConsole();
+            (string stringsLine, bool stringsOk) = UiStrings.SelfTest();
+            evidence.Line(stringsLine);
+            Console.WriteLine(stringsLine);
+            return stringsOk ? 0 : 1;
+        }
 
         if (opt.DumpMonitors)
         {

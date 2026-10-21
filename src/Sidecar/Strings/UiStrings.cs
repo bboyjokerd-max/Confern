@@ -32,6 +32,12 @@ internal static class UiStrings
     public const string Ja = "ja";
     public const string Ko = "ko";
     public const string En = "en";
+    /// <summary>法文（2026-10-21 第二批：歐洲語言）。</summary>
+    public const string Fr = "fr";
+    /// <summary>德文。</summary>
+    public const string De = "de";
+    /// <summary>西班牙文。</summary>
+    public const string Es = "es";
     /// <summary>
     /// 目前的語言（已解析成 <see cref="ZhHant"/>／<see cref="ZhHans"/>／<see cref="Ja"/>／<see cref="Ko"/>／<see cref="En"/> 之一）。
     /// 由 <see cref="SettingsStore"/> 在載入與套用設定的**同一處**設定——與配色同一個模式：
@@ -67,6 +73,9 @@ internal static class UiStrings
         if (string.Equals(language, ZhHans, StringComparison.OrdinalIgnoreCase)) return ZhHans;
         if (string.Equals(language, Ja, StringComparison.OrdinalIgnoreCase)) return Ja;
         if (string.Equals(language, Ko, StringComparison.OrdinalIgnoreCase)) return Ko;
+        if (string.Equals(language, Fr, StringComparison.OrdinalIgnoreCase)) return Fr;
+        if (string.Equals(language, De, StringComparison.OrdinalIgnoreCase)) return De;
+        if (string.Equals(language, Es, StringComparison.OrdinalIgnoreCase)) return Es;
         if (string.Equals(language, En, StringComparison.OrdinalIgnoreCase)) return En;
         return SystemLanguage();
     }
@@ -95,6 +104,12 @@ internal static class UiStrings
                     return sub is 0x01 or 0x03 ? ZhHant : ZhHans;
                 case 0x11: return Ja;    // 日文
                 case 0x12: return Ko;    // 韓文
+                // 第二批（2026-10-21）：主語言代碼 0x07 德文、0x09 英文、0x0A 西班牙文、0x0C 法文。
+                // 沒有對應表的語言（義、葡、荷…）一律回英文——總比給一個看不懂的語言好。
+                case 0x07: return De;
+                case 0x0C: return Fr;
+                case 0x0A: return Es;
+                case 0x09: return En;
                 default: return En;
             }
         }
@@ -120,13 +135,93 @@ internal static class UiStrings
             Table[ZhHant].TryGetValue(key, out string? fallback))
             return fallback;
 
+
         return $"!{key}!";
     }
 
+    /// <summary>
+    /// `--strings-selftest`：八張表逐鍵對齊的自檢（2026-10-21 第二批歐洲語言時新增）。
+    ///
+    /// 為什麼要一支自檢、而不是在驗收腳本裡解析 C#：缺一個鍵**不會編譯失敗、不會當掉**，
+    /// 只會在畫面上露出 <c>!key!</c>——而那一格不一定被任何斷言看過。這裡直接把「哪個語言
+    /// 少了哪個鍵」印出來，驗收端只要看一行。
+    ///
+    /// 同時檢查佔位符：譯文**不可以**出現基準表沒有的 <c>{n}</c>。多引數被忽略是安全的，
+    /// 但引用一個呼叫端沒傳的編號會丟 <c>FormatException</c>——這種錯在執行期才炸。
+    /// </summary>
+    public static (string Line, bool Ok) SelfTest()
+    {
+        string[] order = { ZhHant, ZhHans, Ja, Ko, Fr, De, Es, En };
+        var baseKeys = new HashSet<string>(Table[ZhHant].Keys, StringComparer.Ordinal);
+
+        var perLang = new List<string>();
+        var missing = new List<string>();
+        var extra = new List<string>();
+        var badPlaceholders = new List<string>();
+
+        foreach (string lang in order)
+        {
+            if (!Table.TryGetValue(lang, out Dictionary<string, string>? table))
+            {
+                missing.Add($"table:{lang}");
+                continue;
+            }
+            perLang.Add($"{lang}={table.Count}");
+            foreach (string key in baseKeys)
+                if (!table.ContainsKey(key)) missing.Add($"{lang}:{key}");
+            foreach (string key in table.Keys)
+                if (!baseKeys.Contains(key)) extra.Add($"{lang}:{key}");
+        }
+
+        // 佔位符：譯文用到的編號必須是基準表用到的編號的子集。
+        foreach (string lang in order)
+        {
+            if (!Table.TryGetValue(lang, out Dictionary<string, string>? table) || lang == ZhHant) continue;
+            foreach (string key in table.Keys)
+            {
+                if (!Table[ZhHant].TryGetValue(key, out string? baseText)) continue;
+                foreach (int n in PlaceholderIndexes(table[key]))
+                    if (!PlaceholderIndexes(baseText).Contains(n))
+                        badPlaceholders.Add($"{lang}:{key}:{{{n}}}");
+            }
+        }
+
+        bool ok = missing.Count == 0 && extra.Count == 0 && badPlaceholders.Count == 0;
+        string line = string.Format(
+            global::System.Globalization.CultureInfo.InvariantCulture,
+            "strings selftest: tables={0} base={1} baseKeys={2} aligned={3} missing={4} extra={5} badPlaceholders={6} per=[{7}]{8}{9}{10}",
+            perLang.Count, ZhHant, baseKeys.Count, ok ? "True" : "False",
+            missing.Count, extra.Count, badPlaceholders.Count,
+            string.Join(" ", perLang.ToArray()),
+            missing.Count == 0 ? "" : " missingList=" + string.Join(",", missing.ToArray()),
+            extra.Count == 0 ? "" : " extraList=" + string.Join(",", extra.ToArray()),
+            badPlaceholders.Count == 0 ? "" : " badList=" + string.Join(",", badPlaceholders.ToArray()));
+        return (line, ok);
+    }
+
+    /// <summary>字串裡出現的 <c>{n}</c> 編號集合（<c>{{</c> 轉義不算）。</summary>
+    private static HashSet<int> PlaceholderIndexes(string text)
+    {
+        var found = new HashSet<int>();
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '{') continue;
+            if (i + 1 < text.Length && text[i + 1] == '{') { i++; continue; }   // {{ 轉義
+            int j = i + 1, value = 0, digits = 0;
+            while (j < text.Length && char.IsDigit(text[j]) && digits < 3)
+            {
+                value = (value * 10) + (text[j] - '0');
+                j++; digits++;
+            }
+            if (digits > 0 && j < text.Length && text[j] == '}') found.Add(value);
+        }
+        return found;
+    }
+
         /// <summary>
-    /// zh-Hant 是**基準表**：每個 key 都必須在這裡有值，其餘四張可以缺（缺了會退回 zh-Hant）。
-    /// ⚠ 2026-10-21 起五張表都是 196 鍵、逐鍵對齊——退回只是保險，不是常態。
-    /// 加鍵時**先加 zh-Hant 再加其餘四張**，順序也照基準表，否則人工比對會失效。
+    /// zh-Hant 是**基準表**：每個 key 都必須在這裡有值，其餘七張可以缺（缺了會退回 zh-Hant）。
+    /// ⚠ 2026-10-21 起八張表逐鍵對齊（用 `--strings-selftest` 驗，一行看完）——退回只是保險，
+    /// 不是常態。加鍵時**先加 zh-Hant 再加其餘七張**，順序也照基準表，否則人工比對會失效。
     /// </summary>
     private static readonly Dictionary<string, Dictionary<string, string>> Table = new(StringComparer.Ordinal)
     {
@@ -292,6 +387,9 @@ internal static class UiStrings
             ["lang.zh-Hans"] = "简体中文",
             ["lang.ja"] = "日本語",
             ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
             ["palette.midnight"] = "暮藍",
             ["palette.graphite"] = "石墨",
             ["palette.citrus"] = "柑橘",
@@ -513,6 +611,9 @@ internal static class UiStrings
             ["lang.zh-Hans"] = "简体中文",
             ["lang.ja"] = "日本語",
             ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
             ["palette.midnight"] = "暮蓝",
             ["palette.graphite"] = "石墨",
             ["palette.citrus"] = "柑橘",
@@ -756,6 +857,9 @@ internal static class UiStrings
             ["lang.zh-Hans"] = "简体中文",
             ["lang.ja"] = "日本語",
             ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
             ["palette.midnight"] = "ミッドナイト",
             ["palette.graphite"] = "グラファイト",
             ["palette.citrus"] = "シトラス",
@@ -990,6 +1094,9 @@ internal static class UiStrings
             ["lang.zh-Hans"] = "简体中文",
             ["lang.ja"] = "日本語",
             ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
             ["palette.midnight"] = "미드나이트",
             ["palette.graphite"] = "그래파이트",
             ["palette.citrus"] = "시트러스",
@@ -1224,6 +1331,9 @@ internal static class UiStrings
             ["lang.zh-Hans"] = "简体中文",
             ["lang.ja"] = "日本語",
             ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
             ["palette.midnight"] = "Midnight",
             ["palette.graphite"] = "Graphite",
             ["palette.citrus"] = "Citrus",
@@ -1311,6 +1421,700 @@ internal static class UiStrings
             ["err.generic"] = "Conversion failed",
             ["err.withPosition"] = "{0} (file {1}) {2}",
             ["err.summaryMore"] = "{0} ({1} files)"
+        },
+        [Fr] = new(StringComparer.Ordinal)
+        {
+            ["window.title"] = "Réglages de Confern",
+            ["window.subtitle"] = "Les neuf réglages de la section 8, plus le dossier de sortie de la section 9.5. Rien n'est écrit avant Enregistrer.",
+
+            ["page.behaviour"] = "Comportement",
+            ["page.quality"] = "Qualité d'image et délais",
+            ["page.safety"] = "Sécurité et diagnostics",
+            ["page.behaviourDesc"] = "La couche de capture n'accepte un dépôt que pendant l'appui sur la touche de déclenchement.",
+            ["page.qualityDesc"] = "Qualité de conversion et durée d'affichage de la couche de capture.",
+            ["page.safetyDesc"] = "Tout ce qui est marqué INACTIF ne mémorise la valeur que pour l'instant.",
+
+            ["field.triggerKey"] = "Touche de déclenchement",
+            ["btn.capture"] = "Appuyez sur une touche",
+            ["btn.capturing"] = "Appuyez sur une touche…",
+            ["key.captureHint"] = "appuyez sur une touche",
+            ["key.captureHintModifier"] = "une touche de modification ne peut pas servir seule",
+            ["key.captureHintUnsupported"] = "cette touche n'est pas encore prise en charge",
+            ["key.unknown"] = "non prise en charge",
+            ["key.customLabel"] = "Touche personnalisée ({0})",
+
+            ["field.startWithWindows"] = "Lancer avec Windows",
+            ["field.language"] = "Langue",
+            ["field.palette"] = "Palette",
+            ["crop.directionPrefix"] = "Sens : ",
+            ["ratio.free"] = "Libre",
+            ["ratio.square"] = "1:1",
+            ["ratio.wide"] = "16:9",
+            ["ratio.tall"] = "9:16",
+            ["ratio.classic"] = "4:3",
+            ["ratio.classicTall"] = "3:4",
+            ["ratio.original"] = "Original",
+            ["ratio.originalFlipped"] = "Original 90°",
+            ["merge.ok"] = "OK (Entrée)",
+            ["merge.cancel"] = "Annuler (Échap)",
+            ["merge.title"] = "Fusionner des PDF : définir l'ordre",
+            ["merge.hint"] = "L'ordre ci-dessus est l'ordre de fusion (la page 1 du premier fichier passe en premier). Faites glisser la poignée à droite pour déplacer une ligne, ou la corbeille pour la retirer. Rien n'est fusionné avant confirmation, et annuler ne produit aucun fichier.",
+            ["merge.up"] = "Monter",
+            ["merge.down"] = "Descendre",
+            ["merge.pageSize"] = "Taille de page",
+            ["merge.sizeOriginal"] = "Taille propre à chaque fichier",
+            ["merge.sizeFirst"] = "Comme le premier fichier",
+            ["merge.sizeA4"] = "A4, centré",
+            ["merge.range"] = "Lignes {0}-{1} sur {2}",
+            ["merge.pagesTotal"] = "{0} pages au total",
+            ["merge.pagesTotalOne"] = "{0} page au total",
+            ["merge.pagesUnknown"] = "Total inconnu ({0} fichiers sans nombre de pages lisible)",
+            ["merge.pagesOf"] = "{0} pages",
+            ["merge.pagesOfOne"] = "{0} page",
+            ["merge.pagesUnreadable"] = "nombre de pages illisible",
+            ["merge.gripTip"] = "Faites glisser ici pour réordonner",
+            ["merge.remove"] = "Retirer",
+            ["merge.removeTip"] = "Retirer ce fichier de la liste de fusion",
+            ["merge.rowDragTip"] = "Faites glisser cette ligne pour la réordonner",
+            ["merge.errMove"] = "Erreur inattendue pendant le déplacement ({0}) — l'ordre est inchangé",
+            ["merge.errLastRemove"] = "Une fusion demande au moins un fichier — le dernier ne peut pas être retiré (Échap pour abandonner)",
+            ["merge.errRemove"] = "Erreur inattendue pendant la suppression ({0}) — la liste est inchangée",
+            ["merge.errEmpty"] = "Il n'y a rien à fusionner — gardez au moins un fichier, ou appuyez sur Échap",
+            ["merge.errConfirm"] = "Erreur inattendue pendant la confirmation ({0}) — rien n'a été envoyé",
+            ["qr.hint"] = "Voici ce que l'image a décodé (aucun fichier n'est produit). Sélectionnez et appuyez sur Ctrl+C, ou utilisez le bouton ci-dessous.",
+            ["qr.copy"] = "Copier",
+            ["qr.title"] = "Lire un QR",
+            ["qr.notUrl"] = "{0}　(pas une URL, donc seulement affiché ici)",
+            ["note.capped"] = "Dossier développé : limite atteinte, seuls les {0} premiers fichiers ont été pris",
+            ["note.folderFiles"] = "Dossier développé : {0} fichiers lus ({1} ignorés)",
+            ["note.tooDeep"] = "{0} autres dossiers sont plus profonds que {1} niveaux et n'ont pas été collectés",
+            ["fmt.mixedKinds"] = "Sélection mixte — choisissez un seul type : ",
+            ["fmt.listSeparator"] = ", ",
+            ["svc.interrupted"] = "Service de conversion interrompu",
+            ["svc.versionMismatchRestarted"] = "Version du service de conversion incompatible — redémarré",
+            ["svc.versionMismatch"] = "Version du service de conversion incompatible",
+            ["svc.error"] = "Erreur du service de conversion",
+            ["svc.timeout"] = "Délai de conversion dépassé",
+            ["svc.cannotStart"] = "Le service de conversion n'a pas pu démarrer",
+            ["progress.files"] = "{0} fichiers",
+            ["fmt.mixedShort"] = "Sélection mixte — choisissez un seul type",
+            ["fmt.noTarget"] = "Aucun format de sortie convertible",
+            ["crop.directionNone"] = "Sens",
+            ["crop.wide"] = "Paysage",
+            ["crop.tall"] = "Portrait",
+            ["crop.ok"] = "OK (Entrée)",
+            ["crop.cancel"] = "Annuler (Échap)",
+            ["crop.title"] = "Recadrer",
+            ["crop.hint"] = "Tracez un rectangle sur l'image (déplacez-le, ou tirez ses bords et ses coins) · Entrée pour valider · Échap pour annuler",
+            ["crop.ratio"] = "Ratio",
+            ["crop.batchNote"] = "(le même ratio s'applique à chaque image de ce lot, calculé sur sa propre taille)",
+            ["crop.infoBatch"] = "　({0} images dans ce lot, chacune d'après sa propre taille)",
+            ["crop.selection"] = "Sélection {0}×{1} px　normalisée {2},{3},{4},{5}",
+            ["crop.tipDirection"] = "Le cadrage est {0} en ce moment. Appuyez pour passer à l'autre sens ({1} ↔ {2}).",
+            ["crop.tipNoDirection"] = "{0} n'a pas d'autre sens — seuls les ratios comme 16:9 / 4:3 / original en ont deux.",
+            ["crop.noteRestored"] = "Ratio = {0} : rectangle restauré à {1}×{2} px (retour à la taille d'avant le retournement)",
+            ["crop.noteFlipped"] = "Ratio = {0} : rectangle retourné de {1}×{2} à {3}×{4} px (grand côté et centre conservés)",
+            ["crop.noteUnchanged"] = "Ratio = {0} : rectangle inchangé",
+            ["crop.noteAdjusted"] = "Ratio = {0} : rectangle ajusté de {1}×{2} à {3}×{4} px",
+            ["crop.errDirection"] = "Erreur inattendue pendant le changement de sens ({0}) — ignorée",
+            ["crop.errRatio"] = "Erreur inattendue pendant le changement de ratio ({0}) — ignorée",
+            ["crop.errDragStart"] = "Erreur inattendue au début du glissement ({0}) — ignorée, la fenêtre fonctionne",
+            ["crop.errDragMove"] = "Erreur inattendue pendant le glissement ({0}) — ce glissement s'est arrêté, la fenêtre fonctionne",
+            ["crop.errEmpty"] = "La sélection couvre toute l'image, il n'y a donc rien à recadrer — tracez un rectangle plus petit (ou Échap)",
+            ["crop.errConfirm"] = "Erreur inattendue pendant la confirmation ({0}) — rien n'a été envoyé",
+            ["crop.selftestEmpty"] = "autotest : le rectangle {0},{1},{2},{3} est vide à cette taille",
+
+            ["field.outputFolder"] = "Dossier de sortie",
+            ["out.source"] = "À côté de la source",
+            ["out.desktop"] = "Bureau",
+            ["out.custom"] = "Dossier personnalisé",
+            ["out.needPath"] = "Saisissez un chemin complet pour le dossier personnalisé (par exemple C:\\Sortie).",
+
+            ["field.jpgQuality"] = "Qualité JPG",
+            ["field.webpQuality"] = "Qualité WebP",
+
+            ["field.compressionMode"] = "Compression",
+            ["field.compressionTargetKb"] = "Limite de taille",
+            ["compress.small"] = "Fichier léger",
+            ["compress.standard"] = "Standard",
+            ["compress.high"] = "Haute qualité",
+            ["compress.targetSize"] = "Compresser à",
+            ["compress.needSize"] = "Pour Compresser à, saisissez une limite entre 1 et 1048576 et choisissez Ko ou Mo.",
+            ["unit.kb"] = "Ko",
+            ["unit.mb"] = "Mo",
+
+            ["field.namingCollision"] = "Conflit de nom",
+            ["naming.value"] = "Numérotation auto (1), (2), …",
+            ["naming.reason"] = "Fixe dans le MVP : jamais d'écrasement, jamais de question.",
+
+            ["field.timeout"] = "Délai de capture",
+            ["unit.seconds"] = " s",
+
+            ["field.emergencyHotkey"] = "Raccourci d'urgence",
+            ["field.diagnostics"] = "Journal de diagnostic",
+
+            ["stub.badge"] = "INACTIF",
+            ["stub.emergencyHotkey"] = "Pas encore actif : seulement mémorisé ; le raccourci global n'est pas branché.",
+
+            ["toggle.on"] = "Oui",
+            ["toggle.off"] = "Non",
+
+            ["lang.system"] = "Suivre le système",
+            ["lang.zh-Hant"] = "繁體中文",
+            ["lang.en"] = "English",
+            ["lang.zh-Hans"] = "简体中文",
+            ["lang.ja"] = "日本語",
+            ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
+            ["palette.midnight"] = "Minuit",
+            ["palette.graphite"] = "Graphite",
+            ["palette.citrus"] = "Agrumes",
+            ["palette.celadon"] = "Céladon",
+            ["palette.plum"] = "Prune",
+            ["palette.porcelain"] = "Porcelaine",
+
+            // 扇區只有 80x24px、12.7px：挑短的（最長 9 個字，實測 78px 以內）。
+            ["tool.label.rotate90"] = "ROTATION",
+            ["tool.label.strip-metadata"] = "NETTOYER",
+            ["tool.label.compress"] = "COMPRIMER",
+            ["tool.label.crop"] = "RECADRER",
+            ["tool.label.read-qr"] = "LIRE QR",
+            ["tool.label.merge-pdf"] = "FUSION",
+            ["tool.label.remove-bg"] = "DÉTOURER",
+
+            ["btn.save"] = "Enregistrer",
+            ["btn.cancel"] = "Annuler",
+            ["path.prefix"] = "Fichier de réglages : ",
+            ["path.missing"] = "(pas encore créé ; écrit quand vous enregistrez)",
+            ["status.idle"] = "Aucune modification.",
+            ["status.dirty"] = "Modifications non enregistrées.",
+            ["status.saved"] = "Enregistré : {0}",
+            ["status.saveFailed"] = "Échec de l'enregistrement (réglages inchangés) : {0}",
+            ["status.badField"] = "Enregistrement impossible : {0} n'accepte pas la valeur actuelle ({1}). Corrigez et enregistrez à nouveau.",
+            ["status.openRejected"] = "La fenêtre de réglages est déjà ouverte ; cette demande a été ignorée.",
+            ["status.alreadyOpen"] = "La fenêtre de réglages est déjà ouverte.",
+            ["status.openFailed"] = "Impossible d'ouvrir la fenêtre de réglages : {0}",
+            ["status.saveFailedOnOpen"] = "Impossible de charger les réglages : {0}",
+
+            ["vk.Space"] = "Espace",
+            ["vk.Tab"] = "Tab",
+            ["vk.CapsLock"] = "Verr. maj.",
+            ["vk.Escape"] = "Échap",
+            ["vk.Shift"] = "Maj",
+            ["vk.Enter"] = "Entrée",
+            ["vk.Backspace"] = "Retour arr.",
+            ["vk.ArrowUp"] = "Haut",
+            ["vk.ArrowDown"] = "Bas",
+            ["vk.ArrowLeft"] = "Gauche",
+            ["vk.ArrowRight"] = "Droite",
+
+            ["tool.rotate90"] = "Pivoter",
+            ["tool.stripMetadata"] = "Nettoyer",
+            ["tool.compress"] = "Compresser",
+            ["tool.crop"] = "Recadrer",
+            ["tool.readQr"] = "Lire",
+            ["tool.mergePdf"] = "Fusionner",
+            ["tool.removeBg"] = "Détourer",
+
+            ["wheel.holdToConvert"] = "Maintenez la touche de déclenchement",
+
+            ["tray.openSettings"] = "Ouvrir les réglages",
+            ["tray.pause"] = "Suspendre la conversion",
+            ["tray.resume"] = "Reprendre la conversion",
+            ["tray.exit"] = "Quitter",
+
+            ["progress.moreHidden"] = "…{0} de plus",
+
+            ["format.moreKinds"] = "et {0} de plus",
+            ["format.example"] = " (p. ex. {0})",
+
+            ["err.unsupported"] = "Format non pris en charge",
+            ["err.decodeFailed"] = "Décodage impossible",
+            ["err.targetUnavailable"] = "Ce format ne peut pas être écrit pour l'instant",
+            ["err.sourceMissing"] = "Le fichier source n'existe plus",
+            ["err.unreadable"] = "Lecture du fichier source impossible",
+            ["err.writeDenied"] = "Écriture impossible dans ce dossier",
+            ["err.noSpace"] = "Espace disque insuffisant",
+            ["err.locked"] = "Le fichier est verrouillé",
+            ["err.timeout"] = "Délai dépassé pour le fichier cloud",
+            ["err.targetTooSmall"] = "Même la qualité la plus basse dépasse la taille visée",
+            ["err.cropRectEmpty"] = "La sélection est vide",
+            ["err.cropNothingToDo"] = "La sélection couvre toute l'image",
+            ["err.writeConflict"] = "Un autre processus occupe ce nom de sortie",
+            ["err.qrNotFound"] = "Aucun QR code dans l'image",
+            ["err.mergeFailed"] = "Fusion de ce PDF impossible",
+            ["err.mergeNeedsPassword"] = "Ce PDF demande un mot de passe ; retirez-le avant de fusionner",
+            ["err.noSubjectFound"] = "Aucun sujet détecté : rien à détourer",
+            ["err.modelUnavailable"] = "Le modèle de détourage manque ; lancez tools\\get-rembg-model.ps1",
+            ["err.modelCorrupt"] = "Le modèle de détourage est endommagé ou incomplet ; retéléchargez-le",
+            ["err.generic"] = "La conversion a échoué",
+            ["err.withPosition"] = "{0} (fichier {1}) {2}",
+            ["err.summaryMore"] = "{0} ({1} fichiers)"
+        },
+
+        [De] = new(StringComparer.Ordinal)
+        {
+            ["window.title"] = "Confern-Einstellungen",
+            ["window.subtitle"] = "Die neun Einstellungen aus Abschnitt 8, dazu der Ausgabeordner aus Abschnitt 9.5. Gespeichert wird erst mit Sichern.",
+
+            ["page.behaviour"] = "Verhalten",
+            ["page.quality"] = "Bildqualität und Zeitlimits",
+            ["page.safety"] = "Sicherheit und Diagnose",
+            ["page.behaviourDesc"] = "Die Aufnahmeebene nimmt ein Ablegen nur an, solange die Auslösetaste gehalten wird.",
+            ["page.qualityDesc"] = "Qualität der Umwandlung und wie lange die Aufnahmeebene sichtbar bleibt.",
+            ["page.safetyDesc"] = "Alles mit NICHT AKTIV merkt sich den Wert vorerst nur.",
+
+            ["field.triggerKey"] = "Auslösetaste",
+            ["btn.capture"] = "Neue Taste drücken",
+            ["btn.capturing"] = "Taste drücken…",
+            ["key.captureHint"] = "eine Taste drücken",
+            ["key.captureHintModifier"] = "eine Modifikatortaste kann nicht allein auslösen",
+            ["key.captureHintUnsupported"] = "diese Taste wird noch nicht unterstützt",
+            ["key.unknown"] = "nicht unterstützt",
+            ["key.customLabel"] = "Eigene Taste ({0})",
+
+            ["field.startWithWindows"] = "Mit Windows starten",
+            ["field.language"] = "Sprache",
+            ["field.palette"] = "Farbschema",
+            ["crop.directionPrefix"] = "Richtung: ",
+            ["ratio.free"] = "Frei",
+            ["ratio.square"] = "1:1",
+            ["ratio.wide"] = "16:9",
+            ["ratio.tall"] = "9:16",
+            ["ratio.classic"] = "4:3",
+            ["ratio.classicTall"] = "3:4",
+            ["ratio.original"] = "Original",
+            ["ratio.originalFlipped"] = "Original 90°",
+            ["merge.ok"] = "OK (Enter)",
+            ["merge.cancel"] = "Abbrechen (Esc)",
+            ["merge.title"] = "PDFs zusammenführen: Reihenfolge festlegen",
+            ["merge.hint"] = "Die Reihenfolge oben ist die Reihenfolge beim Zusammenführen (Seite 1 der ersten Datei kommt zuerst). Ziehen Sie den Griff rechts, um eine Zeile zu verschieben, oder den Papierkorb, um sie zu entfernen. Erst mit dem Bestätigen wird zusammengeführt; Abbrechen erzeugt keine Datei.",
+            ["merge.up"] = "Hoch",
+            ["merge.down"] = "Runter",
+            ["merge.pageSize"] = "Seitengröße",
+            ["merge.sizeOriginal"] = "Größe je Datei",
+            ["merge.sizeFirst"] = "Wie erste Datei",
+            ["merge.sizeA4"] = "A4, zentriert",
+            ["merge.range"] = "Zeilen {0}-{1} von {2}",
+            ["merge.pagesTotal"] = "Insgesamt {0} Seiten",
+            ["merge.pagesTotalOne"] = "Insgesamt {0} Seite",
+            ["merge.pagesUnknown"] = "Summe unbekannt ({0} Dateien ohne lesbare Seitenzahl)",
+            ["merge.pagesOf"] = "{0} Seiten",
+            ["merge.pagesOfOne"] = "{0} Seite",
+            ["merge.pagesUnreadable"] = "Seitenzahl nicht lesbar",
+            ["merge.gripTip"] = "Hier ziehen, um die Reihenfolge zu ändern",
+            ["merge.remove"] = "Entfernen",
+            ["merge.removeTip"] = "Diese Datei aus der Liste entfernen",
+            ["merge.rowDragTip"] = "Zeile ziehen, um sie zu verschieben",
+            ["merge.errMove"] = "Unerwarteter Fehler beim Verschieben ({0}) — die Reihenfolge bleibt",
+            ["merge.errLastRemove"] = "Zum Zusammenführen braucht es mindestens eine Datei — die letzte lässt sich nicht entfernen (Esc zum Abbrechen)",
+            ["merge.errRemove"] = "Unerwarteter Fehler beim Entfernen ({0}) — die Liste bleibt",
+            ["merge.errEmpty"] = "Es gibt nichts zusammenzuführen — behalten Sie mindestens eine Datei oder drücken Sie Esc",
+            ["merge.errConfirm"] = "Unerwarteter Fehler beim Bestätigen ({0}) — es wurde nichts gesendet",
+            ["qr.hint"] = "Das hat das Bild dekodiert (es entsteht keine Datei). Markieren und Strg+C drücken oder den Knopf unten nehmen.",
+            ["qr.copy"] = "Kopieren",
+            ["qr.title"] = "QR lesen",
+            ["qr.notUrl"] = "{0}　(keine URL, daher nur hier angezeigt)",
+            ["note.capped"] = "Ordner aufgelöst: Grenze erreicht, nur die ersten {0} Dateien übernommen",
+            ["note.folderFiles"] = "Ordner aufgelöst: {0} Dateien gelesen ({1} übersprungen)",
+            ["note.tooDeep"] = "{0} weitere Ordner liegen tiefer als {1} Ebenen und wurden nicht gesammelt",
+            ["fmt.mixedKinds"] = "Gemischt ausgewählt — bitte eine Art wählen: ",
+            ["fmt.listSeparator"] = ", ",
+            ["svc.interrupted"] = "Umwandlungsdienst unterbrochen",
+            ["svc.versionMismatchRestarted"] = "Version des Umwandlungsdienstes passt nicht — neu gestartet",
+            ["svc.versionMismatch"] = "Version des Umwandlungsdienstes passt nicht",
+            ["svc.error"] = "Fehler im Umwandlungsdienst",
+            ["svc.timeout"] = "Zeitlimit der Umwandlung überschritten",
+            ["svc.cannotStart"] = "Der Umwandlungsdienst konnte nicht starten",
+            ["progress.files"] = "{0} Dateien",
+            ["fmt.mixedShort"] = "Gemischt ausgewählt — bitte eine Art wählen",
+            ["fmt.noTarget"] = "Kein umwandelbares Zielformat",
+            ["crop.directionNone"] = "Richtung",
+            ["crop.wide"] = "Querformat",
+            ["crop.tall"] = "Hochformat",
+            ["crop.ok"] = "OK (Enter)",
+            ["crop.cancel"] = "Abbrechen (Esc)",
+            ["crop.title"] = "Zuschneiden",
+            ["crop.hint"] = "Ziehen Sie ein Rechteck im Bild (verschieben oder an Kanten und Ecken ziehen) · Enter bestätigt · Esc bricht ab",
+            ["crop.ratio"] = "Verhältnis",
+            ["crop.batchNote"] = "(dasselbe Verhältnis gilt für jedes Bild in diesem Stapel, je aus seiner eigenen Größe)",
+            ["crop.infoBatch"] = "　({0} Bilder in diesem Stapel, jedes aus eigener Größe)",
+            ["crop.selection"] = "Ausgewählt {0}×{1} px　normalisiert {2},{3},{4},{5}",
+            ["crop.tipDirection"] = "Der Ausschnitt ist gerade {0}. Drücken wechselt in die andere Richtung ({1} ↔ {2}).",
+            ["crop.tipNoDirection"] = "{0} hat keine andere Richtung — nur Verhältnisse wie 16:9 / 4:3 / original haben zwei.",
+            ["crop.noteRestored"] = "Verhältnis = {0}: Rechteck auf {1}×{2} px zurückgesetzt (Größe wie vor dem Drehen)",
+            ["crop.noteFlipped"] = "Verhältnis = {0}: Rechteck von {1}×{2} auf {3}×{4} px gedreht (lange Seite und Mitte bleiben)",
+            ["crop.noteUnchanged"] = "Verhältnis = {0}: Rechteck unverändert",
+            ["crop.noteAdjusted"] = "Verhältnis = {0}: Rechteck von {1}×{2} auf {3}×{4} px angepasst",
+            ["crop.errDirection"] = "Unerwarteter Fehler beim Richtungswechsel ({0}) — ignoriert",
+            ["crop.errRatio"] = "Unerwarteter Fehler beim Verhältniswechsel ({0}) — ignoriert",
+            ["crop.errDragStart"] = "Unerwarteter Fehler beim Start des Ziehens ({0}) — ignoriert, das Fenster funktioniert",
+            ["crop.errDragMove"] = "Unerwarteter Fehler beim Ziehen ({0}) — dieses Ziehen endet, das Fenster funktioniert",
+            ["crop.errEmpty"] = "Die Auswahl ist das ganze Bild, also nichts zum Zuschneiden — kleiner ziehen (oder Esc)",
+            ["crop.errConfirm"] = "Unerwarteter Fehler beim Bestätigen ({0}) — nichts gesendet",
+            ["crop.selftestEmpty"] = "Selbsttest: Rechteck {0},{1},{2},{3} ist bei dieser Größe leer",
+
+            ["field.outputFolder"] = "Ausgabeordner",
+            ["out.source"] = "Neben der Quelle",
+            ["out.desktop"] = "Desktop",
+            ["out.custom"] = "Eigener Ordner",
+            ["out.needPath"] = "Geben Sie für den eigenen Ordner einen vollständigen Pfad an (zum Beispiel C:\\Ausgabe).",
+
+            ["field.jpgQuality"] = "JPG-Qualität",
+            ["field.webpQuality"] = "WebP-Qualität",
+
+            ["field.compressionMode"] = "Komprimierung",
+            ["field.compressionTargetKb"] = "Größenlimit",
+            ["compress.small"] = "Kleine Datei",
+            ["compress.standard"] = "Standard",
+            ["compress.high"] = "Hohe Qualität",
+            ["compress.targetSize"] = "Komprimieren auf",
+            ["compress.needSize"] = "Für „Komprimieren auf“ ein Limit zwischen 1 und 1048576 eingeben und KB oder MB wählen.",
+            ["unit.kb"] = "KB",
+            ["unit.mb"] = "MB",
+
+            ["field.namingCollision"] = "Namenskonflikt",
+            ["naming.value"] = "Automatisch nummerieren (1), (2), …",
+            ["naming.reason"] = "Im MVP fest: nie überschreiben, nie nachfragen.",
+
+            ["field.timeout"] = "Aufnahme-Zeitlimit",
+            ["unit.seconds"] = " s",
+
+            ["field.emergencyHotkey"] = "Notfall-Hotkey",
+            ["field.diagnostics"] = "Diagnoseprotokoll",
+
+            ["stub.badge"] = "NICHT AKTIV",
+            ["stub.emergencyHotkey"] = "Noch nicht aktiv: nur gespeichert; der globale Hotkey ist nicht verdrahtet.",
+
+            ["toggle.on"] = "An",
+            ["toggle.off"] = "Aus",
+
+            ["lang.system"] = "Systemeinstellung folgen",
+            ["lang.zh-Hant"] = "繁體中文",
+            ["lang.en"] = "English",
+            ["lang.zh-Hans"] = "简体中文",
+            ["lang.ja"] = "日本語",
+            ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
+            ["palette.midnight"] = "Mitternacht",
+            ["palette.graphite"] = "Graphit",
+            ["palette.citrus"] = "Zitrus",
+            ["palette.celadon"] = "Seladon",
+            ["palette.plum"] = "Pflaume",
+            ["palette.porcelain"] = "Porzellan",
+
+            ["tool.label.rotate90"] = "ROTIEREN",
+            ["tool.label.strip-metadata"] = "SAUBERN",
+            ["tool.label.compress"] = "KOMPRIM.",
+            ["tool.label.crop"] = "ZUSCHN.",
+            ["tool.label.read-qr"] = "QR LESEN",
+            ["tool.label.merge-pdf"] = "FUSION",
+            ["tool.label.remove-bg"] = "FREISTEL",
+
+            ["btn.save"] = "Sichern",
+            ["btn.cancel"] = "Abbrechen",
+            ["path.prefix"] = "Einstellungsdatei: ",
+            ["path.missing"] = "(noch nicht angelegt; wird beim Sichern geschrieben)",
+            ["status.idle"] = "Noch keine Änderung.",
+            ["status.dirty"] = "Ungesicherte Änderungen.",
+            ["status.saved"] = "Gesichert: {0}",
+            ["status.saveFailed"] = "Sichern fehlgeschlagen (Einstellungen unverändert): {0}",
+            ["status.badField"] = "Sichern nicht möglich: {0} akzeptiert den aktuellen Wert nicht ({1}). Korrigieren und erneut sichern.",
+            ["status.openRejected"] = "Das Einstellungsfenster ist bereits offen; diese Anfrage wurde ignoriert.",
+            ["status.alreadyOpen"] = "Das Einstellungsfenster ist bereits offen.",
+            ["status.openFailed"] = "Einstellungsfenster konnte nicht geöffnet werden: {0}",
+            ["status.saveFailedOnOpen"] = "Einstellungen konnten nicht geladen werden: {0}",
+
+            ["vk.Space"] = "Leertaste",
+            ["vk.Tab"] = "Tab",
+            ["vk.CapsLock"] = "Feststell",
+            ["vk.Escape"] = "Esc",
+            ["vk.Shift"] = "Umschalt",
+            ["vk.Enter"] = "Enter",
+            ["vk.Backspace"] = "Rücktaste",
+            ["vk.ArrowUp"] = "Hoch",
+            ["vk.ArrowDown"] = "Runter",
+            ["vk.ArrowLeft"] = "Links",
+            ["vk.ArrowRight"] = "Rechts",
+
+            ["tool.rotate90"] = "Drehen",
+            ["tool.stripMetadata"] = "Säubern",
+            ["tool.compress"] = "Verkleinern",
+            ["tool.crop"] = "Zuschneiden",
+            ["tool.readQr"] = "Scannen",
+            ["tool.mergePdf"] = "Zusammenführen",
+            ["tool.removeBg"] = "Freistellen",
+
+            ["wheel.holdToConvert"] = "Auslösetaste halten",
+
+            ["tray.openSettings"] = "Einstellungen öffnen",
+            ["tray.pause"] = "Umwandlung pausieren",
+            ["tray.resume"] = "Umwandlung fortsetzen",
+            ["tray.exit"] = "Beenden",
+
+            ["progress.moreHidden"] = "…{0} weitere",
+
+            ["format.moreKinds"] = "und {0} weitere",
+            ["format.example"] = " (z. B. {0})",
+
+            ["err.unsupported"] = "Format nicht unterstützt",
+            ["err.decodeFailed"] = "Dekodieren fehlgeschlagen",
+            ["err.targetUnavailable"] = "Dieses Format kann gerade nicht geschrieben werden",
+            ["err.sourceMissing"] = "Die Quelldatei existiert nicht mehr",
+            ["err.unreadable"] = "Quelldatei nicht lesbar",
+            ["err.writeDenied"] = "In diesen Ordner kann nicht geschrieben werden",
+            ["err.noSpace"] = "Nicht genug Speicherplatz",
+            ["err.locked"] = "Die Datei ist gesperrt",
+            ["err.timeout"] = "Zeitlimit beim Cloud-Download überschritten",
+            ["err.targetTooSmall"] = "Selbst die niedrigste Qualität liegt über der Zielgröße",
+            ["err.cropRectEmpty"] = "Die Auswahl ist leer",
+            ["err.cropNothingToDo"] = "Die Auswahl ist das ganze Bild",
+            ["err.writeConflict"] = "Ein anderer Prozess hält diesen Ausgabenamen",
+            ["err.qrNotFound"] = "Kein QR-Code im Bild gefunden",
+            ["err.mergeFailed"] = "Dieses PDF ließ sich nicht zusammenführen",
+            ["err.mergeNeedsPassword"] = "Dieses PDF braucht ein Passwort; entfernen Sie es vor dem Zusammenführen",
+            ["err.noSubjectFound"] = "Kein Motiv gefunden, also nichts freizustellen",
+            ["err.modelUnavailable"] = "Das Freistell-Modell fehlt; tools\\get-rembg-model.ps1 ausführen",
+            ["err.modelCorrupt"] = "Das Freistell-Modell ist beschädigt oder unvollständig; erneut herunterladen",
+            ["err.generic"] = "Umwandlung fehlgeschlagen",
+            ["err.withPosition"] = "{0} (Datei {1}) {2}",
+            ["err.summaryMore"] = "{0} ({1} Dateien)"
+        },
+
+        [Es] = new(StringComparer.Ordinal)
+        {
+            ["window.title"] = "Ajustes de Confern",
+            ["window.subtitle"] = "Los nueve ajustes de la sección 8, más la carpeta de salida de la sección 9.5. Nada se escribe hasta pulsar Guardar.",
+
+            ["page.behaviour"] = "Comportamiento",
+            ["page.quality"] = "Calidad de imagen y tiempos",
+            ["page.safety"] = "Seguridad y diagnóstico",
+            ["page.behaviourDesc"] = "La capa de captura solo acepta un soltar mientras se mantiene pulsada la tecla de disparo.",
+            ["page.qualityDesc"] = "Calidad de conversión y cuánto tiempo permanece la capa de captura.",
+            ["page.safetyDesc"] = "Todo lo marcado NO ACTIVO solo guarda el valor por ahora.",
+
+            ["field.triggerKey"] = "Tecla de disparo",
+            ["btn.capture"] = "Pulsa una tecla nueva",
+            ["btn.capturing"] = "Pulsa una tecla…",
+            ["key.captureHint"] = "pulsa una tecla",
+            ["key.captureHintModifier"] = "una tecla modificadora no puede disparar sola",
+            ["key.captureHintUnsupported"] = "esa tecla aún no es compatible",
+            ["key.unknown"] = "no compatible",
+            ["key.customLabel"] = "Tecla personalizada ({0})",
+
+            ["field.startWithWindows"] = "Iniciar con Windows",
+            ["field.language"] = "Idioma",
+            ["field.palette"] = "Paleta",
+            ["crop.directionPrefix"] = "Dirección: ",
+            ["ratio.free"] = "Libre",
+            ["ratio.square"] = "1:1",
+            ["ratio.wide"] = "16:9",
+            ["ratio.tall"] = "9:16",
+            ["ratio.classic"] = "4:3",
+            ["ratio.classicTall"] = "3:4",
+            ["ratio.original"] = "Original",
+            ["ratio.originalFlipped"] = "Original 90°",
+            ["merge.ok"] = "Aceptar (Intro)",
+            ["merge.cancel"] = "Cancelar (Esc)",
+            ["merge.title"] = "Unir PDF: define el orden",
+            ["merge.hint"] = "El orden de arriba es el orden de unión (la página 1 del primer archivo va primero). Arrastra la agarradera de la derecha para mover una fila, o el botón de papelera para quitarla. Nada se une hasta confirmar, y cancelar no produce ningún archivo.",
+            ["merge.up"] = "Subir",
+            ["merge.down"] = "Bajar",
+            ["merge.pageSize"] = "Tamaño de página",
+            ["merge.sizeOriginal"] = "Tamaño de cada archivo",
+            ["merge.sizeFirst"] = "Como el primer archivo",
+            ["merge.sizeA4"] = "A4, centrado",
+            ["merge.range"] = "Mostrando filas {0}-{1} de {2}",
+            ["merge.pagesTotal"] = "{0} páginas en total",
+            ["merge.pagesTotalOne"] = "{0} página en total",
+            ["merge.pagesUnknown"] = "Total desconocido ({0} archivos sin número de páginas legible)",
+            ["merge.pagesOf"] = "{0} páginas",
+            ["merge.pagesOfOne"] = "{0} página",
+            ["merge.pagesUnreadable"] = "número de páginas ilegible",
+            ["merge.gripTip"] = "Arrastra aquí para reordenar",
+            ["merge.remove"] = "Quitar",
+            ["merge.removeTip"] = "Quitar este archivo de la lista de unión",
+            ["merge.rowDragTip"] = "Arrastra esta fila para reordenarla",
+            ["merge.errMove"] = "Error inesperado al mover ({0}) — el orden no cambió",
+            ["merge.errLastRemove"] = "Una unión necesita al menos un archivo — el último no se puede quitar (Esc para abandonar)",
+            ["merge.errRemove"] = "Error inesperado al quitar ({0}) — la lista no cambió",
+            ["merge.errEmpty"] = "No hay nada que unir — deja al menos un archivo o pulsa Esc",
+            ["merge.errConfirm"] = "Error inesperado al confirmar ({0}) — no se envió nada",
+            ["qr.hint"] = "Esto es lo que decodificó la imagen (no se generó ningún archivo). Selecciónalo y pulsa Ctrl+C, o usa el botón de abajo.",
+            ["qr.copy"] = "Copiar",
+            ["qr.title"] = "Leer QR",
+            ["qr.notUrl"] = "{0}　(no es una URL, así que solo se muestra aquí)",
+            ["note.capped"] = "Carpeta expandida: límite alcanzado, solo se tomaron los primeros {0} archivos",
+            ["note.folderFiles"] = "Carpeta expandida: {0} archivos leídos ({1} omitidos)",
+            ["note.tooDeep"] = "{0} carpetas más están a más de {1} niveles y no se recogieron",
+            ["fmt.mixedKinds"] = "Selección mixta — elige un solo tipo: ",
+            ["fmt.listSeparator"] = ", ",
+            ["svc.interrupted"] = "Servicio de conversión interrumpido",
+            ["svc.versionMismatchRestarted"] = "Versión del servicio de conversión incompatible — reiniciado",
+            ["svc.versionMismatch"] = "Versión del servicio de conversión incompatible",
+            ["svc.error"] = "Error del servicio de conversión",
+            ["svc.timeout"] = "Se agotó el tiempo de conversión",
+            ["svc.cannotStart"] = "El servicio de conversión no pudo arrancar",
+            ["progress.files"] = "{0} archivos",
+            ["fmt.mixedShort"] = "Selección mixta — elige un solo tipo",
+            ["fmt.noTarget"] = "Ningún formato de salida convertible",
+            ["crop.directionNone"] = "Dirección",
+            ["crop.wide"] = "Horizontal",
+            ["crop.tall"] = "Vertical",
+            ["crop.ok"] = "Aceptar (Intro)",
+            ["crop.cancel"] = "Cancelar (Esc)",
+            ["crop.title"] = "Recortar",
+            ["crop.hint"] = "Dibuja un rectángulo sobre la imagen (muévelo o tira de bordes y esquinas) · Intro para confirmar · Esc para cancelar",
+            ["crop.ratio"] = "Proporción",
+            ["crop.batchNote"] = "(la misma proporción se aplica a cada imagen de este lote, calculada con su propio tamaño)",
+            ["crop.infoBatch"] = "　({0} imágenes en este lote, cada una según su tamaño)",
+            ["crop.selection"] = "Seleccionado {0}×{1} px　normalizado {2},{3},{4},{5}",
+            ["crop.tipDirection"] = "El encuadre es {0} ahora mismo. Pulsa para pasar a la otra dirección ({1} ↔ {2}).",
+            ["crop.tipNoDirection"] = "{0} no tiene otra dirección — solo proporciones como 16:9 / 4:3 / original tienen dos.",
+            ["crop.noteRestored"] = "Proporción = {0}: rectángulo restaurado a {1}×{2} px (vuelve al tamaño de antes de girar)",
+            ["crop.noteFlipped"] = "Proporción = {0}: rectángulo girado de {1}×{2} a {3}×{4} px (se conservan lado largo y centro)",
+            ["crop.noteUnchanged"] = "Proporción = {0}: rectángulo sin cambios",
+            ["crop.noteAdjusted"] = "Proporción = {0}: rectángulo ajustado de {1}×{2} a {3}×{4} px",
+            ["crop.errDirection"] = "Error inesperado al cambiar de dirección ({0}) — ignorado",
+            ["crop.errRatio"] = "Error inesperado al cambiar de proporción ({0}) — ignorado",
+            ["crop.errDragStart"] = "Error inesperado al iniciar el arrastre ({0}) — ignorado, la ventana sigue funcionando",
+            ["crop.errDragMove"] = "Error inesperado al arrastrar ({0}) — este arrastre se detuvo, la ventana sigue funcionando",
+            ["crop.errEmpty"] = "La selección es toda la imagen, así que no hay nada que recortar — dibuja un rectángulo más pequeño (o pulsa Esc)",
+            ["crop.errConfirm"] = "Error inesperado al confirmar ({0}) — no se envió nada",
+            ["crop.selftestEmpty"] = "autoprueba: el rectángulo {0},{1},{2},{3} está vacío con este tamaño",
+
+            ["field.outputFolder"] = "Carpeta de salida",
+            ["out.source"] = "Junto al original",
+            ["out.desktop"] = "Escritorio",
+            ["out.custom"] = "Carpeta personalizada",
+            ["out.needPath"] = "Escribe una ruta completa para la carpeta personalizada (por ejemplo C:\\Salida).",
+
+            ["field.jpgQuality"] = "Calidad JPG",
+            ["field.webpQuality"] = "Calidad WebP",
+
+            ["field.compressionMode"] = "Compresión",
+            ["field.compressionTargetKb"] = "Límite de tamaño",
+            ["compress.small"] = "Archivo pequeño",
+            ["compress.standard"] = "Estándar",
+            ["compress.high"] = "Alta calidad",
+            ["compress.targetSize"] = "Comprimir a",
+            ["compress.needSize"] = "Para Comprimir a, escribe un límite entre 1 y 1048576 y elige KB o MB.",
+            ["unit.kb"] = "KB",
+            ["unit.mb"] = "MB",
+
+            ["field.namingCollision"] = "Conflicto de nombre",
+            ["naming.value"] = "Numeración automática (1), (2), …",
+            ["naming.reason"] = "Fijo en el MVP: nunca sobrescribir, nunca preguntar.",
+
+            ["field.timeout"] = "Tiempo de captura",
+            ["unit.seconds"] = " s",
+
+            ["field.emergencyHotkey"] = "Atajo de emergencia",
+            ["field.diagnostics"] = "Registro de diagnóstico",
+
+            ["stub.badge"] = "NO ACTIVO",
+            ["stub.emergencyHotkey"] = "Aún no activo: solo se guarda; el atajo global no está conectado.",
+
+            ["toggle.on"] = "Sí",
+            ["toggle.off"] = "No",
+
+            ["lang.system"] = "Seguir al sistema",
+            ["lang.zh-Hant"] = "繁體中文",
+            ["lang.en"] = "English",
+            ["lang.zh-Hans"] = "简体中文",
+            ["lang.ja"] = "日本語",
+            ["lang.ko"] = "한국어",
+            ["lang.fr"] = "Français",
+            ["lang.de"] = "Deutsch",
+            ["lang.es"] = "Español",
+            ["palette.midnight"] = "Medianoche",
+            ["palette.graphite"] = "Grafito",
+            ["palette.citrus"] = "Cítrico",
+            ["palette.celadon"] = "Celadón",
+            ["palette.plum"] = "Ciruela",
+            ["palette.porcelain"] = "Porcelana",
+
+            ["tool.label.rotate90"] = "GIRAR",
+            ["tool.label.strip-metadata"] = "LIMPIAR",
+            ["tool.label.compress"] = "COMPRIMIR",
+            ["tool.label.crop"] = "RECORTAR",
+            ["tool.label.read-qr"] = "LEER QR",
+            ["tool.label.merge-pdf"] = "UNIR",
+            ["tool.label.remove-bg"] = "SIN FONDO",
+
+            ["btn.save"] = "Guardar",
+            ["btn.cancel"] = "Cancelar",
+            ["path.prefix"] = "Archivo de ajustes: ",
+            ["path.missing"] = "(aún no creado; se escribe al pulsar Guardar)",
+            ["status.idle"] = "Sin cambios todavía.",
+            ["status.dirty"] = "Cambios sin guardar.",
+            ["status.saved"] = "Guardado: {0}",
+            ["status.saveFailed"] = "Error al guardar (ajustes sin cambios): {0}",
+            ["status.badField"] = "No se puede guardar: {0} no acepta el valor actual ({1}). Corrígelo y guarda otra vez.",
+            ["status.openRejected"] = "La ventana de ajustes ya está abierta; esta petición se ignoró.",
+            ["status.alreadyOpen"] = "La ventana de ajustes ya está abierta.",
+            ["status.openFailed"] = "No se pudo abrir la ventana de ajustes: {0}",
+            ["status.saveFailedOnOpen"] = "No se pudieron cargar los ajustes: {0}",
+
+            ["vk.Space"] = "Espacio",
+            ["vk.Tab"] = "Tab",
+            ["vk.CapsLock"] = "Bloq Mayús",
+            ["vk.Escape"] = "Esc",
+            ["vk.Shift"] = "Mayús",
+            ["vk.Enter"] = "Intro",
+            ["vk.Backspace"] = "Retroceso",
+            ["vk.ArrowUp"] = "Arriba",
+            ["vk.ArrowDown"] = "Abajo",
+            ["vk.ArrowLeft"] = "Izquierda",
+            ["vk.ArrowRight"] = "Derecha",
+
+            ["tool.rotate90"] = "Girar",
+            ["tool.stripMetadata"] = "Limpiar",
+            ["tool.compress"] = "Comprimir",
+            ["tool.crop"] = "Recortar",
+            ["tool.readQr"] = "Escanear",
+            ["tool.mergePdf"] = "Unir",
+            ["tool.removeBg"] = "Sin fondo",
+
+            ["wheel.holdToConvert"] = "Mantén la tecla de disparo",
+
+            ["tray.openSettings"] = "Abrir ajustes",
+            ["tray.pause"] = "Pausar conversión",
+            ["tray.resume"] = "Reanudar conversión",
+            ["tray.exit"] = "Salir",
+
+            ["progress.moreHidden"] = "…{0} más",
+
+            ["format.moreKinds"] = "y {0} más",
+            ["format.example"] = " (p. ej. {0})",
+
+            ["err.unsupported"] = "Formato no compatible",
+            ["err.decodeFailed"] = "No se pudo decodificar",
+            ["err.targetUnavailable"] = "Este formato no se puede escribir ahora",
+            ["err.sourceMissing"] = "El archivo original ya no existe",
+            ["err.unreadable"] = "No se pudo leer el archivo original",
+            ["err.writeDenied"] = "No se puede escribir en esta carpeta",
+            ["err.noSpace"] = "No hay espacio en disco suficiente",
+            ["err.locked"] = "El archivo está bloqueado",
+            ["err.timeout"] = "Se agotó el tiempo al descargar el archivo en la nube",
+            ["err.targetTooSmall"] = "Incluso la calidad más baja supera el tamaño objetivo",
+            ["err.cropRectEmpty"] = "La selección está vacía",
+            ["err.cropNothingToDo"] = "La selección es toda la imagen",
+            ["err.writeConflict"] = "Otro proceso está usando ese nombre de salida",
+            ["err.qrNotFound"] = "No se encontró ningún código QR en la imagen",
+            ["err.mergeFailed"] = "No se pudo unir este PDF",
+            ["err.mergeNeedsPassword"] = "Este PDF necesita contraseña; quítala antes de unir",
+            ["err.noSubjectFound"] = "No se encontró ningún sujeto, así que no hay nada que recortar",
+            ["err.modelUnavailable"] = "Falta el modelo de quitar fondo; ejecuta tools\\get-rembg-model.ps1",
+            ["err.modelCorrupt"] = "El modelo de quitar fondo está dañado o incompleto; descárgalo otra vez",
+            ["err.generic"] = "La conversión falló",
+            ["err.withPosition"] = "{0} (archivo {1}) {2}",
+            ["err.summaryMore"] = "{0} ({1} archivos)"
         }
     };
+
 }

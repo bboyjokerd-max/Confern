@@ -461,7 +461,7 @@ internal partial class SettingsWindow : Window
         try
         {
             LanguageBox.Items.Clear();
-            foreach (string value in new[] { UiStrings.System, UiStrings.ZhHant, UiStrings.ZhHans, UiStrings.Ja, UiStrings.Ko, UiStrings.En })
+            foreach (string value in new[] { UiStrings.System, UiStrings.ZhHant, UiStrings.ZhHans, UiStrings.Ja, UiStrings.Ko, UiStrings.Fr, UiStrings.De, UiStrings.Es, UiStrings.En })
                 LanguageBox.Items.Add(MakeItem(UiStrings.Get($"lang.{value}", _language), value));
 
             LanguageBox.SelectedItem = LanguageBox.Items
@@ -553,6 +553,9 @@ internal partial class SettingsWindow : Window
         if (string.Equals(tag, "zh-Hans", StringComparison.OrdinalIgnoreCase)) return UiStrings.ZhHans;
         if (string.Equals(tag, "ja", StringComparison.OrdinalIgnoreCase)) return UiStrings.Ja;
         if (string.Equals(tag, "ko", StringComparison.OrdinalIgnoreCase)) return UiStrings.Ko;
+        if (string.Equals(tag, "fr", StringComparison.OrdinalIgnoreCase)) return UiStrings.Fr;
+        if (string.Equals(tag, "de", StringComparison.OrdinalIgnoreCase)) return UiStrings.De;
+        if (string.Equals(tag, "es", StringComparison.OrdinalIgnoreCase)) return UiStrings.Es;
         if (string.Equals(tag, "en", StringComparison.OrdinalIgnoreCase)) return UiStrings.En;
         return tag;
     }
