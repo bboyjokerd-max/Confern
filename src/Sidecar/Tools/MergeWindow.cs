@@ -66,6 +66,15 @@ namespace Sidecar;
 /// </summary>
 internal sealed class MergeWindow : Window
 {
+
+    /// <summary>
+    /// <summary>「N 頁」。英文要分單複數（1 page / 2 pages）——這正是英文 dump 抓到的細節。</summary>
+    private static string PagesText(int count) =>
+        UiStrings.Format(count == 1 ? "merge.pagesOfOne" : "merge.pagesOf", count);
+    /// 移除鈕的識別標記。**不可以拿顯示文字當識別**（2026-10-21）：那行本來比對的是 <c>"移除"</c>，
+    /// 介面一翻成英文就找不到按鈕，而且不會有任何錯誤——自測會「靜靜地少按一次」。
+    /// </summary>
+    private const string RemoveButtonTag = "merge.removeButton";
     /// <summary>一列的高度（px）。拖曳的換算要用它，所以它是常數而不是算出來的。</summary>
     public const double RowHeightPx = 40;
 
@@ -153,8 +162,8 @@ internal sealed class MergeWindow : Window
 
         // ⚠ 兩顆按鈕**必須先建好**再交給 BuildFooter（與 CropWindow 同一個順序）：它們是唯讀的
         //    自動屬性，只能在建構函式裡被指派一次；把建立藏在 BuildFooter 裡就沒有地方可以指派。
-        OkButton = new Button { Content = "確認 (Enter)", Width = 128, Height = 32, Margin = new Thickness(0, 0, 10, 0) };
-        CancelButton = new Button { Content = "取消 (Esc)", Width = 128, Height = 32 };
+        OkButton = new Button { Content = UiStrings.Get("merge.ok"), Width = 128, Height = 32, Margin = new Thickness(0, 0, 10, 0) };
+        CancelButton = new Button { Content = UiStrings.Get("merge.cancel"), Width = 128, Height = 32 };
         SettingsUi.StyleKit.PrimaryButton(OkButton);
         SettingsUi.StyleKit.SecondaryButton(CancelButton);
         OkButton.Click += (_, _) => Confirm();
@@ -176,7 +185,7 @@ internal sealed class MergeWindow : Window
     private void BuildHeader(Grid root)
     {
         var header = new StackPanel();
-        var title = new TextBlock { Text = "合併 PDF：排順序", FontSize = 21, FontWeight = FontWeights.SemiBold };
+        var title = new TextBlock { Text = UiStrings.Get("merge.title"), FontSize = 21, FontWeight = FontWeights.SemiBold };
         title.Foreground = SettingsUi.StyleKit.TextMain;
 
         // 這一句是整個視窗的說明。它必須說出**兩件使用者會懷疑的事**：
@@ -184,8 +193,7 @@ internal sealed class MergeWindow : Window
         //   ② 取消不會產生任何檔案（否則「取消」看起來像「照原順序合併」）。
         var subtitle = new TextBlock
         {
-            Text = "上面的順序就是要合併的順序（第 1 個檔的頁面會在最前面）。" +
-                   "拖曳右邊的把手可以上下移動，垃圾桶可以移除。確認之後才合併，取消不會產生任何檔案。",
+            Text = UiStrings.Get("merge.hint"),
             FontSize = 12,
             Margin = new Thickness(0, 5, 0, 0),
             TextWrapping = TextWrapping.Wrap
@@ -231,8 +239,8 @@ internal sealed class MergeWindow : Window
             Margin = new Thickness(0, 8, 0, 0)
         };
 
-        _upButton = new Button { Content = "上", Width = 56, Height = 26 };
-        _downButton = new Button { Content = "下", Width = 56, Height = 26 };
+        _upButton = new Button { Content = UiStrings.Get("merge.up"), Width = 56, Height = 26 };
+        _downButton = new Button { Content = UiStrings.Get("merge.down"), Width = 56, Height = 26 };
         SettingsUi.StyleKit.SecondaryButton(_upButton);
         SettingsUi.StyleKit.SecondaryButton(_downButton);
         _upButton.Click += (_, _) => Page(-1);
@@ -290,7 +298,7 @@ internal sealed class MergeWindow : Window
             var row = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
             var label = new TextBlock
             {
-                Text = "頁面大小",
+                Text = UiStrings.Get("merge.pageSize"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 10, 0)
             };
@@ -298,9 +306,9 @@ internal sealed class MergeWindow : Window
 
             var choices = new (string Id, string Text)[]
             {
-                ("original", "各自原始尺寸"),
-                ("first", "統一成第一張"),
-                ("a4", "A4 置中留邊")
+                ("original", UiStrings.Get("merge.sizeOriginal")),
+                ("first", UiStrings.Get("merge.sizeFirst")),
+                ("a4", UiStrings.Get("merge.sizeA4"))
             };
             foreach ((string id, string text) in choices)
             {
@@ -378,7 +386,8 @@ internal sealed class MergeWindow : Window
             _list.Children.Add(row);
         }
 
-        _rangeText.Text = $"顯示第 {(_order.Count == 0 ? 0 : _listTop + 1)}-{last} 列，共 {_order.Count} 列";
+        _rangeText.Text = UiStrings.Format("merge.range",
+            (_order.Count == 0 ? 0 : _listTop + 1), last, _order.Count);
         _upButton.IsEnabled = _listTop > 0;
         _downButton.IsEnabled = last < _order.Count;
 
@@ -394,8 +403,8 @@ internal sealed class MergeWindow : Window
         // 摘要說的是「這一份合併檔會有幾頁」。讀不到就不報總數——0 與「不知道」是不同的主張，
         // 而把讀不到的那一份算成 0 頁會讓使用者以為它不存在。
         _summaryText.Text = total is { } pages
-            ? $"合計 {pages} 頁"
-            : $"合計頁數未知（{unreadable} 個檔讀不到頁數）";
+            ? UiStrings.Format(pages == 1 ? "merge.pagesTotalOne" : "merge.pagesTotal", pages)
+            : UiStrings.Format("merge.pagesUnknown", unreadable);
     }
 
     /// <summary>畫一列。編號由 <paramref name="index"/> 推導，所以「畫面上的編號」與「真正的順序」不可能不一致。</summary>
@@ -438,7 +447,7 @@ internal sealed class MergeWindow : Window
         var pages = new TextBlock
         {
             // 「讀不到頁數」說出來，不寫 0：0 頁是一個具體的主張，而這裡的主張是「不知道」。
-            Text = count is { } n ? $"{n} 頁" : "頁數讀不到",
+            Text = count is { } n ? PagesText(n) : UiStrings.Get("merge.pagesUnreadable"),
             FontSize = 12,
             Margin = new Thickness(10, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center
@@ -456,7 +465,7 @@ internal sealed class MergeWindow : Window
             Margin = new Thickness(12, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Cursor = Cursors.SizeNS,
-            ToolTip = "按住這裡上下拖曳來調整順序"
+            ToolTip = UiStrings.Get("merge.gripTip")
         };
         grip.Foreground = SettingsUi.StyleKit.TextFaint;
         Grid.SetColumn(grip, 3);
@@ -464,11 +473,12 @@ internal sealed class MergeWindow : Window
 
         var remove = new Button
         {
-            Content = "移除",
+            Content = UiStrings.Get("merge.remove"),
+            Tag = RemoveButtonTag,
             Width = 62,
             Height = 26,
             Margin = new Thickness(12, 0, 0, 0),
-            ToolTip = "把這一份從合併清單裡拿掉"
+            ToolTip = UiStrings.Get("merge.removeTip")
         };
         SettingsUi.StyleKit.SecondaryButton(remove);
         int captured = index;
@@ -488,7 +498,7 @@ internal sealed class MergeWindow : Window
             BorderBrush = SettingsUi.StyleKit.CardBorder,
             Child = grid,
             Cursor = Cursors.SizeAll,
-            ToolTip = "拖曳這一列可以調整順序"
+            ToolTip = UiStrings.Get("merge.rowDragTip")
         };
         if (index == _dragFrom && _dragFrom >= 0)
         {
@@ -573,7 +583,7 @@ internal sealed class MergeWindow : Window
         catch (Exception ex)
         {
             // 拖曳的數學壞掉不可以殺掉 UI 執行緒（見類別說明）。
-            Notice($"移動時發生未預期的錯誤（{ex.GetType().Name}）——順序沒有改變");
+            Notice(UiStrings.Format("merge.errMove", ex.GetType().Name));
             _log?.Invoke($"merge ui: MoveTo threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
@@ -590,7 +600,7 @@ internal sealed class MergeWindow : Window
             if (index < 0 || index >= _order.Count) return;
             if (_order.Count <= 1)
             {
-                Notice("至少要留一份檔案才能合併——最後這一份不能移除（要放棄就按 Esc 取消）");
+                Notice(UiStrings.Get("merge.errLastRemove"));
                 _log?.Invoke("merge ui: remove refused (it is the last file; a merge needs at least one)");
                 return;
             }
@@ -604,7 +614,7 @@ internal sealed class MergeWindow : Window
         }
         catch (Exception ex)
         {
-            Notice($"移除時發生未預期的錯誤（{ex.GetType().Name}）——清單沒有改變");
+            Notice(UiStrings.Format("merge.errRemove", ex.GetType().Name));
             _log?.Invoke($"merge ui: RemoveRow threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -674,7 +684,7 @@ internal sealed class MergeWindow : Window
             Sanitize();
             if (_order.Count == 0)
             {
-                Notice("沒有任何檔案可以合併——請至少留一份，或按 Esc 取消");
+                Notice(UiStrings.Get("merge.errEmpty"));
                 _log?.Invoke("merge ui: confirm refused (the order is empty)");
                 return;
             }
@@ -689,7 +699,7 @@ internal sealed class MergeWindow : Window
         catch (Exception ex)
         {
             // 連確認都不可以丟例外：留下提示、把視窗留著讓使用者能做別的事。
-            Notice($"確認時發生未預期的錯誤（{ex.GetType().Name}）——沒有任何東西被送出");
+            Notice(UiStrings.Format("merge.errConfirm", ex.GetType().Name));
             _log?.Invoke($"merge ui: Confirm threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -880,7 +890,7 @@ internal sealed class MergeWindow : Window
             DependencyObject node = stack.Pop();
             if (node is Button button &&
                 button.Content is string text &&
-                string.Equals(text, "移除", StringComparison.Ordinal))
+                string.Equals(button.Tag as string, RemoveButtonTag, StringComparison.Ordinal))
                 return button;
             int children = VisualTreeHelper.GetChildrenCount(node);
             for (int i = 0; i < children; i++)
