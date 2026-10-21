@@ -4498,6 +4498,12 @@ internal static class App
         // `--crop-ui-dump` 自己先開一次（只為了畫圖），不跑整條自測。
         if (dumpOnly)
         {
+            // dump 要反映**真實狀態**：`--settings-file` 指的是哪一份設定（介面語言、配色都在裡面），
+            // 畫面就該長那個樣子。少了這一行，中文與英文的 dump 會逐位元相同——
+            // 「英文版長什麼樣」就無法用這條路徑驗，而那正是這個旗標存在的理由。
+            if (!string.IsNullOrEmpty(opt.SettingsFile) && File.Exists(opt.SettingsFile))
+                SettingsStore.Load(opt.SettingsFile, lines.Enqueue);
+
             CropUi.Open(batch, _ => { }, lines.Enqueue);
             bool up = WaitFor(() => CropUi.IsOpen, 8000);
             if (!up)

@@ -22,7 +22,14 @@ namespace Sidecar;
 /// </summary>
 /// <param name="Id">穩定識別碼。會進 worker 協議與日誌，**不得就地改字**。</param>
 /// <param name="Label">按鈕上的字（zh-Hant，比照圓心膠囊與設定頁）。</param>
-internal sealed record CropRatioPreset(string Id, string Label);
+internal sealed record CropRatioPreset(string Id, string LabelKey)
+{
+    /// <summary>
+    /// 顯示用的字。**跟著介面語言走**（2026-10-21）：這裡以前存的是寫死的中文字串，
+    /// 所以英文介面下比例鈕會冒出「自由」「原比例」——那是 dump 抓出來的，不是猜的。
+    /// </summary>
+    public string Label => UiStrings.Get(LabelKey);
+}
 
 /// <summary>
 /// 比例預設的正規值集合與查表。**純函式、無狀態**（比照 <see cref="WheelDesign"/> 的紀律：
@@ -78,10 +85,10 @@ internal static class CropRatios
     /// </summary>
     public static readonly CropRatioPreset[] Presets =
     {
-        new(IdFree, "自由"),
-        new(IdSquare, "1:1"),
-        new(IdWide, "16:9"),
-        new(IdClassic, "4:3"),
+        new(IdFree, "ratio.free"),
+        new(IdSquare, "ratio.square"),
+        new(IdWide, "ratio.wide"),
+        new(IdClassic, "ratio.classic"),
         new(IdOriginal, "原比例")
     };
 
@@ -91,14 +98,14 @@ internal static class CropRatios
     /// </summary>
     public static readonly CropRatioPreset[] All =
     {
-        new(IdFree, "自由"),
-        new(IdSquare, "1:1"),
-        new(IdWide, "16:9"),
-        new(IdTall, "9:16"),
-        new(IdClassic, "4:3"),
-        new(IdClassicTall, "3:4"),
-        new(IdOriginal, "原比例"),
-        new(IdOriginalFlipped, "原比例 90°")
+        new(IdFree, "ratio.free"),
+        new(IdSquare, "ratio.square"),
+        new(IdWide, "ratio.wide"),
+        new(IdTall, "ratio.tall"),
+        new(IdClassic, "ratio.classic"),
+        new(IdClassicTall, "ratio.classicTall"),
+        new(IdOriginal, "ratio.original"),
+        new(IdOriginalFlipped, "ratio.originalFlipped")
     };
 
     /// <summary>

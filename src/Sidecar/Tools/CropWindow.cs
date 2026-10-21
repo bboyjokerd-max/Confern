@@ -86,15 +86,15 @@ internal sealed class CropWindow : Window
     public const double DirectionButtonWidth = 96;
 
     /// <summary>方向鈕的文字前綴（啟用時）：`方向：橫式` / `方向：直式`。</summary>
-    public const string DirectionLabelPrefix = "方向：";
+    public static string DirectionLabelPrefix => UiStrings.Get("crop.directionPrefix");
 
     /// <summary>方向鈕在「沒有方向可換」時的文字。**只是一個短標籤，不是原因**——
     /// 原因在 ToolTip，理由見 <see cref="SyncDirectionButton"/>。</summary>
-    public const string DirectionLabelDisabled = "方向";
+    public static string DirectionLabelDisabled => UiStrings.Get("crop.directionNone");
 
     /// <summary>矩形現在是橫的還是直的（方向鈕的標籤就說這個）。</summary>
-    public const string DirectionWide = "橫式";
-    public const string DirectionTall = "直式";
+    public static string DirectionWide => UiStrings.Get("crop.wide");
+    public static string DirectionTall => UiStrings.Get("crop.tall");
 
     // 顯示對應（①↔②）
     private double _scale = 1;
@@ -215,8 +215,8 @@ internal sealed class CropWindow : Window
         BuildRatioRow(root);
         BuildNotice(root);
 
-        OkButton = new Button { Content = "確認 (Enter)", Width = 128, Height = 32, Margin = new Thickness(0, 0, 10, 0) };
-        CancelButton = new Button { Content = "取消 (Esc)", Width = 128, Height = 32 };
+        OkButton = new Button { Content = UiStrings.Get("crop.ok"), Width = 128, Height = 32, Margin = new Thickness(0, 0, 10, 0) };
+        CancelButton = new Button { Content = UiStrings.Get("crop.cancel"), Width = 128, Height = 32 };
         SettingsUi.StyleKit.PrimaryButton(OkButton);
         SettingsUi.StyleKit.SecondaryButton(CancelButton);
         OkButton.Click += (_, _) => Confirm();
@@ -251,11 +251,11 @@ internal sealed class CropWindow : Window
     private void BuildHeader(Grid root)
     {
         var header = new StackPanel();
-        var title = new TextBlock { Text = "裁切", FontSize = 21, FontWeight = FontWeights.SemiBold };
+        var title = new TextBlock { Text = UiStrings.Get("crop.title"), FontSize = 21, FontWeight = FontWeights.SemiBold };
         title.Foreground = SettingsUi.StyleKit.TextMain;
         var subtitle = new TextBlock
         {
-            Text = "在圖上拖一個矩形（可移動、可拉四邊與四角）· Enter 確認 · Esc 取消",
+            Text = UiStrings.Get("crop.hint"),
             FontSize = 12, Margin = new Thickness(0, 5, 0, 0), TextWrapping = TextWrapping.Wrap
         };
         subtitle.Foreground = SettingsUi.StyleKit.TextDim;
@@ -377,7 +377,7 @@ internal sealed class CropWindow : Window
         var row = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         var label = new TextBlock
         {
-            Text = "比例", FontSize = 12, VerticalAlignment = VerticalAlignment.Center,
+            Text = UiStrings.Get("crop.ratio"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 12, 0)
         };
         label.Foreground = SettingsUi.StyleKit.TextFaint;
@@ -435,7 +435,7 @@ internal sealed class CropWindow : Window
             // （實測：`maxChildRight=962 > constraint=962`，見 `--crop-ui-selftest` 的
             // `ratio-button-row` 那一行）。讓文字換行是唯一不必動到按鈕本身、也不必動凍結版面的做法。
             MaxWidth = 250, TextWrapping = TextWrapping.Wrap,
-            Text = "（同一比例會套用到這一批的每一張圖，每一張依自己的尺寸換算）",
+            Text = UiStrings.Get("crop.batchNote"),
             FontSize = 12, Margin = new Thickness(8, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -492,12 +492,14 @@ internal sealed class CropWindow : Window
 
         CropSpec normalized = CropMath.ToNormalized(_rect, _imageWidth, _imageHeight, _ratioId);
         _infoText.Text = $"{_fileName}　{_imageWidth}×{_imageHeight} px" +
-                         (_batchCount > 1 ? $"　（這一批共 {_batchCount} 張，每一張依自己的尺寸換算）" : "");
-        _rectText.Text = $"選取 {_rect.Width}×{_rect.Height} px　正規化 " +
-                         $"{normalized.X.ToString("0.####", CultureInfo.InvariantCulture)}," +
-                         $"{normalized.Y.ToString("0.####", CultureInfo.InvariantCulture)}," +
-                         $"{normalized.Width.ToString("0.####", CultureInfo.InvariantCulture)}," +
-                         $"{normalized.Height.ToString("0.####", CultureInfo.InvariantCulture)}";
+                         (_batchCount > 1 ? UiStrings.Format("crop.infoBatch", _batchCount) : "");
+        _rectText.Text = UiStrings.Format(
+            "crop.selection",
+            _rect.Width, _rect.Height,
+            normalized.X.ToString("0.####", CultureInfo.InvariantCulture),
+            normalized.Y.ToString("0.####", CultureInfo.InvariantCulture),
+            normalized.Width.ToString("0.####", CultureInfo.InvariantCulture),
+            normalized.Height.ToString("0.####", CultureInfo.InvariantCulture));
         SyncRatioButtons();
     }
 
@@ -569,8 +571,11 @@ internal sealed class CropWindow : Window
             string direction = CurrentRectDirectionLabel();
             _directionButton.Content = DirectionLabelPrefix + direction;
             _directionButton.IsEnabled = true;
-            _directionButton.ToolTip = $"目前的構圖是{direction}。按下去換成另一個方向" +
-                                       $"（{CropRatios.LabelOf(_ratioId)} ↔ {CropRatios.LabelOf(CropRatios.Counterpart(_ratioId))}）。";
+            _directionButton.ToolTip = UiStrings.Format(
+                "crop.tipDirection",
+                direction,
+                CropRatios.LabelOf(_ratioId),
+                CropRatios.LabelOf(CropRatios.Counterpart(_ratioId)));
             _directionButton.Background = SettingsUi.StyleKit.SurfaceBg;
             _directionButton.Foreground = SettingsUi.StyleKit.TextMain;
             _directionButton.BorderBrush = SettingsUi.StyleKit.SecondaryBorder;
@@ -581,8 +586,7 @@ internal sealed class CropWindow : Window
             _directionButton.Content = DirectionLabelDisabled;
             _directionButton.IsEnabled = false;
             // 原因在提示裡（移上去才顯示）：沒有一個字進到按鈕標籤，列寬因此與選中的比例無關。
-            _directionButton.ToolTip = $"{CropRatios.LabelOf(_ratioId)}沒有方向可以換——" +
-                                       "只有 16:9／4:3／原比例 這一類有兩個方向。";
+            _directionButton.ToolTip = UiStrings.Format("crop.tipNoDirection", CropRatios.LabelOf(_ratioId));
             _directionButton.Background = SettingsUi.StyleKit.SurfaceBg;
             _directionButton.Foreground = SettingsUi.StyleKit.TextFaint;
             _directionButton.BorderBrush = SettingsUi.StyleKit.CardBorder;
@@ -624,8 +628,8 @@ internal sealed class CropWindow : Window
                 _flipRestoreRect = null;
                 _flipRestoreId = null;
                 _flipResult = null;
-                Notice($"比例＝{CropRatios.LabelOf(_ratioId)}" +
-                       $"：矩形還原為 {_rect.Width}×{_rect.Height} px（翻回切換前的大小）");
+                Notice(UiStrings.Format("crop.noteRestored",
+                    CropRatios.LabelOf(_ratioId), _rect.Width, _rect.Height));
                 _log?.Invoke($"crop ui: direction -> {_ratioId} (restored) " +
                              $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height}");
                 UpdateVisuals();
@@ -641,10 +645,10 @@ internal sealed class CropWindow : Window
             _flipRestoreRect = before;
             _flipRestoreId = CropRatios.CanonicalId(CropRatios.Counterpart(to) ?? to);
             _flipResult = _rect;
-            Notice($"比例＝{CropRatios.LabelOf(_ratioId)}" +
-                   (before.Width != _rect.Width || before.Height != _rect.Height
-                       ? $"：矩形由 {before.Width}×{before.Height} 翻轉為 {_rect.Width}×{_rect.Height} px（保留長邊與中心）"
-                       : "：矩形不變"));
+            Notice(before.Width != _rect.Width || before.Height != _rect.Height
+                ? UiStrings.Format("crop.noteFlipped", CropRatios.LabelOf(_ratioId),
+                    before.Width, before.Height, _rect.Width, _rect.Height)
+                : UiStrings.Format("crop.noteUnchanged", CropRatios.LabelOf(_ratioId)));
             _log?.Invoke($"crop ui: direction -> {_ratioId} " +
                          $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height} " +
                          $"longSideBefore={Math.Max(before.Width, before.Height)}");
@@ -652,7 +656,7 @@ internal sealed class CropWindow : Window
         }
         catch (Exception ex)
         {
-            Notice($"切換方向時發生未預期的錯誤（{ex.GetType().Name}）——已忽略");
+            Notice(UiStrings.Format("crop.errDirection", ex.GetType().Name));
             _log?.Invoke($"crop ui: ToggleDirection threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -700,7 +704,7 @@ internal sealed class CropWindow : Window
         {
             // 事件處理常式**不准把例外丟出去**：那會穿過 WPF 的 dispatcher frame，
             // 而這個專案已經為同一件事付過代價。記下來、繼續活著。
-            Notice($"拖曳開始時發生未預期的錯誤（{ex.GetType().Name}）——已忽略，視窗仍可使用");
+            Notice(UiStrings.Format("crop.errDragStart", ex.GetType().Name));
             _log?.Invoke($"crop ui: mouse down threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -720,7 +724,7 @@ internal sealed class CropWindow : Window
         catch (Exception ex)
         {
             _dragMode = DragMode.None;
-            Notice($"拖曳時發生未預期的錯誤（{ex.GetType().Name}）——已停止這次拖曳，視窗仍可使用");
+            Notice(UiStrings.Format("crop.errDragMove", ex.GetType().Name));
             _log?.Invoke($"crop ui: mouse move threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -966,17 +970,17 @@ internal sealed class CropWindow : Window
             Int32Rect before = _rect;
             _rect = Constrain(_rect, DragMode.Move);
             CropSpec normalized = CropMath.ToNormalized(_rect, _imageWidth, _imageHeight, _ratioId);
-            Notice($"比例＝{CropRatios.LabelOf(_ratioId)}" +
-                   (before.Width != _rect.Width || before.Height != _rect.Height
-                       ? $"：矩形由 {before.Width}×{before.Height} 調整為 {_rect.Width}×{_rect.Height} px"
-                       : "：矩形不變"));
+            Notice(before.Width != _rect.Width || before.Height != _rect.Height
+                ? UiStrings.Format("crop.noteAdjusted", CropRatios.LabelOf(_ratioId),
+                    before.Width, before.Height, _rect.Width, _rect.Height)
+                : UiStrings.Format("crop.noteUnchanged", CropRatios.LabelOf(_ratioId)));
             _log?.Invoke($"crop ui: ratio -> {_ratioId} " +
                          $"rect={_rect.X},{_rect.Y},{_rect.Width},{_rect.Height} {normalized.Describe()}");
             UpdateVisuals();
         }
         catch (Exception ex)
         {
-            Notice($"切換比例時發生未預期的錯誤（{ex.GetType().Name}）——已忽略");
+            Notice(UiStrings.Format("crop.errRatio", ex.GetType().Name));
             _log?.Invoke($"crop ui: SelectRatio threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -999,7 +1003,7 @@ internal sealed class CropWindow : Window
             Sanitize();
             if (_rect.Width >= _imageWidth && _rect.Height >= _imageHeight)
             {
-                Notice("選取範圍等於整張圖，沒有東西可以裁——請拖出一個比較小的矩形（或按 Esc 取消）");
+                Notice(UiStrings.Get("crop.errEmpty"));
                 _log?.Invoke($"crop ui: confirm refused (the rectangle covers the whole " +
                              $"{_imageWidth}x{_imageHeight} image)");
                 return;
@@ -1013,7 +1017,7 @@ internal sealed class CropWindow : Window
         catch (Exception ex)
         {
             // 連確認都不可以丟例外：留下提示、把視窗留著讓使用者能做別的事。
-            Notice($"確認時發生未預期的錯誤（{ex.GetType().Name}）——沒有任何東西被送出");
+            Notice(UiStrings.Format("crop.errConfirm", ex.GetType().Name));
             _log?.Invoke($"crop ui: Confirm threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -1074,7 +1078,7 @@ internal sealed class CropWindow : Window
                                                    out Int32Rect rect, out List<string> notes);
         if (outcome == CropOutcome.EmptyRect)
         {
-            Notice($"自測：矩形 {x},{y},{w},{h} 在這個尺寸上是空的");
+            Notice(UiStrings.Format("crop.selftestEmpty", x, y, w, h));
             return false;
         }
         // ⚠ <see cref="CropOutcome.FullFrame"/> 的時候，TryToPixels **不會**填 rect（那條路是「沒東西可裁」，
