@@ -3103,3 +3103,75 @@ VLM 說這張表「最底部那行文字被裁切」。實際量測：footer 起
 
 英文設定頁的 `Start with Windows` 標籤被 92px 的標籤欄截斷（放大圖看得到 `Start with Windo…`）。
 這屬於第 (1) 步「英文介面」的收尾，不在配色這一批裡。
+
+## 2026-10-21 英文介面：從「轉檔時看得到的字」做到「每一個字」
+
+使用者要的兩件事（英文介面、五種配色）到這一批全部落地。配色那一批記在上面；
+這一則是英文介面從第一段做到收尾。
+
+### 三步的順序是使用者指定的：2 → 3 → 1
+
+（2）膠囊遮擋 ⇒ commit `199bcbf`；（3）設定頁配色列 ⇒ `e9bdfae`（含上面那則記錄）；
+（1）英文介面剩下的字 ⇒ 這一則。
+
+### 第一批：真正會看到的字（`fc85082`）
+
+輪盤標籤、膠囊、進度卡、tray 選單、錯誤原因。做法是 `UiStrings` 當唯一出口，
+中文當基準表，英文另一張表，`Get`／`Format` 兩個入口。
+
+### 第二批：裁切視窗（`deede0b`）
+
+25 個鍵。三個坑：
+
+1. **比例鈕漏翻。** 英文 dump 讀回來是「Free / 1:1 / 16:9 / 4:3 / **原比例**」——
+   `CropRatioPreset` 的標籤是**建表時就寫死的中文**，跟我改的 `CropWindow` 無關。
+   改成 `LabelKey` + 計算屬性 `Label`，`LabelOf()` 一個字都不用改。
+2. **`const` 不能呼叫 `UiStrings`。** `DirectionLabelPrefix` 等四個常數改成 static 屬性。
+3. **`--crop-ui-dump` 根本沒載 `--settings-file`。** 中英兩張 dump 逐位元相同
+   （sha B739568FF430），也就是說「英文版長什麼樣」用這條路徑**驗不了**。
+   自測那條有載、dump 這條沒載。補上之後才有辦法驗。
+
+### 第三批：合併排序視窗（`8178fb1`）
+
+24 個鍵，外加兩個只有翻過去才會現形的東西：
+
+1. **`FindRemoveButton` 比對 `button.Content == "移除"`。** 一翻成英文，那顆按鈕就再也
+   找不到——而且**不會有任何錯誤訊息**，自測只會靜靜地少按一次。改成比對 `Tag`。
+   這是「拿顯示文字當識別」的典型，跟下面 Program.cs 那處是同一類。
+2. **英文複數。** dump 抓到「1 pages」。加 `PagesText()`：1 page / 2 pages in total。
+
+### 第四批：其餘的字（`ba76d37`）
+
+QR 視窗、資料夾展開的三則提示、混合選取的拒絕訊息（含中文的「、」與英文的 ", "）、
+轉檔服務的五種狀態、輪盤預覽的「{0} 個檔案」。
+
+⚠ 全域審計抓到一個**編譯器不會報**的錯：`CropRatioPreset.Presets` 最後一顆沒有逗號，
+我上一批的替換只命中 `All` 那一份，於是那顆的 `LabelKey` 還是中文「原比例」。
+編譯照過、中文照對，只有英文模式會冒出中文。修掉之後才在英文 dump 上確認
+比例列是 Free / 1:1 / 16:9 / 4:3 / Original。
+
+### 第五批：英文設定頁的長標籤（`5d79128`）
+
+`Start with Windows` 被十二列共用的寫死 92px 標籤欄切成 `Start with Windo…`
+（13px Segoe UI 量到 119px）。改成 `Auto + MinWidth=92 + SharedSizeGroup`，
+作用域掛在本文區的 StackPanel：英文長大、**中文因為 MinWidth 停在 92**。
+五個用 `Margin="92,4,0,0"` 硬對齊的說明行改成同一個兩欄格。
+中文 dump 改動前後逐位元相同（`2C584172BCEB9D03`）⇒ 中文零副作用。
+
+### 量到的結果
+
+| 檢查 | 結果 |
+|---|---|
+| 英文裁切視窗 | Free / 1:1 / 16:9 / 4:3 / Original / Direction / OK (Enter) / Cancel (Esc)，零中文 |
+| 中文裁切視窗 | 從第一批到收尾都是 `B739568FF430`（逐位元不變） |
+| 英文合併視窗 | Merge PDFs: set the order / 1 page / 2 pages in total / Up / Down / Remove，零中文 |
+| 英文設定頁 | `Start with Windows` 完整、五個下拉都看得到目前值、捲軸 0 列 |
+| 中文設定頁 | 逐位元不變，捲軸 0 列 |
+| 回歸（11 支套件） | 404 項、**0 失敗**；inconclusive 只有「需真實輸入」那幾項 |
+
+### 留給下一次的
+
+- 稽核債（看不見的那種）：`docs\aegis\work\2026-10-02-falsifiability\fix-plan.md` 的 P1 3–11、P2 1–6。
+- 縮短過的膠囊文案等使用者否決：zh `去中繼資料`→`清除`、`依設定壓縮`→`壓縮`、`合併 PDF`→`合併`；
+  en `Rotate 90°`→`Rotate`、`Clean tags`→`Clean`、`Compress`→`Shrink`、`Read QR`→`Scan`、`Merge PDF`→`Merge`。
+- `porcelain`（冷瓷）這套淺色票還沒開放，要先量過可讀性。
