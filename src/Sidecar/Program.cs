@@ -154,6 +154,14 @@ internal static class Program
         }
 
         // M1f：把設定頁畫成一張 PNG（設計審查用；也讓「WPF 在這個行程裡真的畫得出來」有檔案可查）。
+        // 展開後的下拉清單（獨立 Popup 視窗）：主視窗的 dump 拍不到，所以另外一支。
+        if (!string.IsNullOrEmpty(opt.SettingsUiDumpPopup))
+        {
+            Native.AttachParentConsole();
+            using var popupEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunSettingsUiDumpPopup(opt, popupEvidence);
+        }
+
         if (!string.IsNullOrEmpty(opt.SettingsUiDump))
         {
             Native.AttachParentConsole();
@@ -567,6 +575,11 @@ internal sealed class Options
           --settings-ui             open the settings page only (no overlay); exits when the window closes
           --settings-ui-live        start the overlay AND open the settings page (saving applies at once)
           --settings-ui-dump <png>  render the settings page to a PNG and exit (visual evidence)
+          --settings-ui-dump-popup <png>
+                                    render an OPEN dropdown list to a PNG; the list lives in its
+                                    own Popup window, so --settings-ui-dump never captures it
+          --settings-ui-popup-box <name>
+                                    which dropdown to capture (default LanguageBox)
           --settings-ui-selftest    open the settings page, verify it opens/closes and exits (diagnostic)
           --tray-selftest           create the tray icon, verify registration/menu/tooltip, run each menu
                                     command through the shared dispatch, then prove the shell let it go
@@ -1029,6 +1042,15 @@ internal sealed class Options
     public bool SettingsUiLive;
     /// <summary>--settings-ui-dump &lt;png&gt;：把設定頁畫成一張 PNG（設計審查與視覺證據用）。</summary>
     public string SettingsUiDump = "";
+
+    /// <summary>
+    /// `--settings-ui-dump-popup <png>`：把下拉選單**展開後**的清單拍成一張 PNG。
+    /// 下拉清單是獨立 Popup 視窗，主視窗的 dump 看不到它（見 SettingsUi.DumpPopupFrame）。
+    /// </summary>
+    public string SettingsUiDumpPopup = "";
+
+    /// <summary>`--settings-ui-popup-box <x:Name>`：要拍哪一個下拉（預設 LanguageBox）。</summary>
+    public string SettingsUiPopupBox = "LanguageBox";
     /// <summary>
     /// --settings-ui-selftest：不必人眼就能驗設定頁的生命週期（開得起來、第二次開啟被拒、關得掉、
     /// 而且**不會讓行程結束不掉**）。最後那一項人眼看不到，卻是設定頁最現實的失效模式。
@@ -1285,6 +1307,12 @@ internal sealed class Options
                 case "--settings-ui-live": o.SettingsUiLive = true; break;
                 case "--settings-ui-dump":
                     if (++i < args.Length) o.SettingsUiDump = args[i];
+                    break;
+                case "--settings-ui-dump-popup":
+                    if (++i < args.Length) o.SettingsUiDumpPopup = args[i];
+                    break;
+                case "--settings-ui-popup-box":
+                    if (++i < args.Length) o.SettingsUiPopupBox = args[i];
                     break;
                 case "--settings-ui-selftest": o.SettingsUiSelfTest = true; break;
                 case "--tray-selftest": o.TraySelfTest = true; break;
@@ -5897,6 +5925,40 @@ internal static class App
         SettingsUi.Close();
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
         evidence.Line($"settings ui dump: ok={ok} detail={detail} path={opt.SettingsUiDump}");
+        return ok ? 0 : 1;
+    }
+
+    /// <summary>
+    /// `--settings-ui-dump-popup <png>`：與 <see cref="RunSettingsUiDump"/> 同一套開窗流程，
+    /// 差別只在最後拍的是**展開後的下拉清單**（`SettingsUi.DumpPopupFrame`）。
+    /// 這個入口存在的理由是一個具體的失敗：下拉選單「白底白字」躲過了整組驗收，
+    /// 因為所有 dump 都只拍主視窗，而清單在另一個視窗裡。
+    /// </summary>
+    internal static int RunSettingsUiDumpPopup(Options opt, Evidence evidence)
+    {
+        string path = string.IsNullOrEmpty(opt.SettingsFile)
+            ? Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-settings-dump.json")
+            : opt.SettingsFile;
+        Settings settings = SettingsStore.Load(File.Exists(path) ? path : null, evidence.Line);
+        var lines = new ConcurrentQueue<string>();
+
+        evidence.Line($"settings ui popup dump: opening (path={path}, box={opt.SettingsUiPopupBox})");
+        SettingsUi.Open(settings, path, _ => { }, lines.Enqueue);
+
+        var sw = Stopwatch.StartNew();
+        while (!SettingsUi.IsOpen && sw.ElapsedMilliseconds < 5000) Thread.Sleep(25);
+        if (!SettingsUi.IsOpen)
+        {
+            while (lines.TryDequeue(out string? early)) evidence.Line(early);
+            evidence.Line("settings ui popup dump: FAILED to open");
+            return 1;
+        }
+        Thread.Sleep(500);
+        bool ok = SettingsUi.DumpPopupFrame(opt.SettingsUiPopupBox, opt.SettingsUiDumpPopup, 5000,
+                                            out string detail, lines.Enqueue);
+        SettingsUi.Close();
+        while (lines.TryDequeue(out string? line)) evidence.Line(line);
+        evidence.Line($"settings ui popup dump: ok={ok} detail={detail} path={opt.SettingsUiDumpPopup}");
         return ok ? 0 : 1;
     }
 

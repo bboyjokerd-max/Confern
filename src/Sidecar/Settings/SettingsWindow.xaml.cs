@@ -323,9 +323,10 @@ internal partial class SettingsWindow : Window
 
     private ComboBoxItem MakeItem(string text, string tag)
     {
-        var item = new ComboBoxItem { Content = text, Tag = tag };
-        SettingsUi.StyleKit.StyleComboItem(item);
-        return item;
+        // 顏色由 StyleKit.StyleCombo 給的項目樣式決定（靜止／滑過／選中），
+        // 這裡**刻意不再逐項上色**：項目的區域值優先於樣式觸發條件，逐項上色會讓
+        // 「滑過」與「選中」那一列變回看不出來的顏色。
+        return new ComboBoxItem { Content = text, Tag = tag };
     }
 
     /// <summary>

@@ -293,6 +293,78 @@ Check 'S14.32 the page renders to a PNG (a real frame, not a blank one)' (
   $dumpFinished -and $d.ExitCode -eq 0 -and $pngBytes -gt 5000 -and $pngW -gt 400 -and $colours -gt 50) `
   "size=${pngBytes}B ${pngW}x${pngH} colours=$colours"
 
+# ---- S14.32b-d: the OPEN dropdown list -------------------------------------------------------
+# On 2026-10-21 the user reported "the dropdown is white on white". That bug survived a full
+# 412-check sweep for one very specific reason: the list is a separate Popup window, and
+# --settings-ui-dump only captures the main window, so nothing had ever looked at it.
+#
+# These checks look at PIXELS, not at the colours we declare, and that distinction is the whole
+# point: before the fix the evidence line read
+#     popup item 1: bg=#15171B fg=#FFFFFF contrast=17.9:1
+# which is perfectly healthy. The default WPF ComboBoxItem style rewrites the background of the
+# item's TEMPLATE on IsSelected/IsHighlighted, so it never touches the property and the declared
+# colour stays right while the drawn one turns white. Only a pixel measurement catches that.
+$popupPng = Join-Path $uiWork 'dropdown.png'
+$popupLog = Join-Path $uiWork 'dropdown.log'
+$popupProc = Start-Process -FilePath $Exe -ArgumentList @(
+  '--settings-ui-dump-popup', $popupPng, '--settings-ui-popup-box', 'LanguageBox',
+  '--quiet', '--log', $popupLog) -PassThru -WindowStyle Hidden
+$popupFinished = $popupProc.WaitForExit(20000)
+if (-not $popupFinished) { $popupProc.Kill(); $popupProc.WaitForExit(5000) | Out-Null }
+
+$popupBytes = 0; $popupW = 0; $popupH = 0; $worstRow = 0
+$itemLines = @()
+if (Test-Path -LiteralPath $popupLog) {
+  $itemLines = @(Get-Content -LiteralPath $popupLog | Where-Object { $_ -match 'popup item \d+:' })
+}
+if (Test-Path -LiteralPath $popupPng) {
+  $popupBytes = (Get-Item -LiteralPath $popupPng).Length
+  $popupBmp = [System.Drawing.Bitmap]::FromFile($popupPng)
+  $popupW = $popupBmp.Width; $popupH = $popupBmp.Height
+  # Mean luminance per row. A white-on-white row measures ~243; the healthy rows measure 51-60
+  # and the selected row 123 (measured before/after the fix, not guessed).
+  if ($itemLines.Count -gt 0 -and $popupH -gt 0) {
+    $rowH = [int]($popupH / $itemLines.Count)
+    if ($rowH -lt 1) { $rowH = 1 }
+    for ($r = 0; $r -lt $itemLines.Count; $r++) {
+      $y0 = $r * $rowH
+      $y1 = [Math]::Min($y0 + $rowH - 1, $popupH - 1)
+      $lsum = 0; $lcnt = 0
+      for ($y = $y0; $y -le $y1; $y++) {
+        for ($x = 0; $x -lt $popupW; $x++) {
+          $px = $popupBmp.GetPixel($x, $y)
+          $lsum += [int](($px.R + $px.G + $px.B) / 3); $lcnt++
+        }
+      }
+      if ($lcnt -gt 0) {
+        $mean = [int]($lsum / $lcnt)
+        if ($mean -gt $worstRow) { $worstRow = $mean }
+      }
+    }
+  }
+  $popupBmp.Dispose()
+}
+
+Check 'S14.32b the open dropdown renders to its own PNG (the list lives in a separate Popup window)' (
+  $popupFinished -and $popupProc.ExitCode -eq 0 -and $popupBytes -gt 800 -and
+  $popupW -gt 100 -and $itemLines.Count -ge 2) `
+  "size=${popupBytes}B ${popupW}x${popupH} items=$($itemLines.Count)"
+
+$minContrast = 99.0
+foreach ($ln in $itemLines) {
+  if ($ln -match 'contrast=([0-9.]+):1') {
+    $v = [double]$Matches[1]
+    if ($v -lt $minContrast) { $minContrast = $v }
+  }
+}
+Check 'S14.32c every dropdown row is legible (WCAG contrast >= 4.5:1)' (
+  $itemLines.Count -ge 2 -and $minContrast -ge 4.5) "minContrast=${minContrast}:1 items=$($itemLines.Count)"
+
+Check 'S14.32d no dropdown row is drawn near-white (guards the 2026-10-21 white-on-white bug)' (
+  $worstRow -gt 0 -and $worstRow -lt 200) `
+  "brightestRowMean=$worstRow (white-on-white measures 243, seen 2026-10-21; healthy rows 51-60, selected row 73-79)"
+Expect 3
+
 "=== S14.34-S14.35 diagnostics: OFF means essential events only, not silence ==="
 # The semantics were settled by the user on 2026-10-02: OFF = essential events only, ON = plus the
 # high-frequency detail lines. Both directions are asserted here, because a switch that is only ever

@@ -838,6 +838,179 @@ internal static class SettingsUi
     }
 
     /// <summary>
+    /// `--settings-ui-dump-popup <png>`：把某個下拉選單**展開之後**的清單拍成一張 PNG。
+    ///
+    /// 為什麼要另外一支：WPF 的下拉清單是一個獨立的 <see cref="Popup"/> 視窗，不在主視窗的
+    /// 視覺樹裡，所以 <see cref="DumpFrame"/> 永遠拍不到它。2026-10-21 使用者回報「下拉是
+    /// 白底白字」時，這個盲點讓那個 bug 躲過了整組驗收——沒有哪一條斷言看過展開之後的樣子。
+    ///
+    /// 做法：開下拉讓版面跑完，把 <c>PART_Popup</c> 的 Child（那圈 Border 加清單）直接
+    /// RenderTargetBitmap 拍下來，拍完關掉。不必把彈出視窗真的留在螢幕上等它關。
+    /// 每一列**實際解析到**的底色／字色與對比度會寫進證據行，所以「看不看得清楚」是一個
+    /// 數字，不是一句形容詞。
+    /// </summary>
+    internal static bool DumpPopupFrame(string boxName, string path, int timeoutMs,
+        out string detail, Action<string> log)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            detail = "popup dump: rejected (empty path)";
+            Log(log, detail);
+            return false;
+        }
+
+        byte[]? png = null;
+        string report = "(no popup was captured)";
+
+        bool ran = RunOnUiThread(timeoutMs, log, "dump popup", out string failure, () =>
+        {
+            SettingsWindow? w = _window;
+            if (w == null || !w.IsLoaded)
+                return "(no settings window is open)";
+
+            if (w.FindName(boxName) is not ComboBox box)
+                return $"(no ComboBox named '{boxName}' on this page)";
+
+            w.UpdateLayout();
+            if (box.Template?.FindName("PART_Popup", box) is not Popup popup ||
+                popup.Child is not FrameworkElement panel)
+                return "(the ComboBox template has no PART_Popup child)";
+
+            bool wasOpen = box.IsDropDownOpen;
+            box.IsDropDownOpen = true;
+            try
+            {
+                w.UpdateLayout();
+                if (panel.ActualWidth <= 0 || panel.ActualHeight <= 0)
+                {
+                    panel.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+                    panel.Arrange(new System.Windows.Rect(default, panel.DesiredSize));
+                    panel.UpdateLayout();
+                }
+
+                int cw = (int)Math.Ceiling(panel.ActualWidth);
+                int ch = (int)Math.Ceiling(panel.ActualHeight);
+                if (cw <= 0 || ch <= 0)
+                    return $"(the popup has no size: {cw}x{ch})";
+
+                // 證據：每一列**畫得出來**的顏色（不是我們宣告了什麼，是解析完剩什麼）。
+                // Popup.Child 宣告成 FrameworkElement，而 Aero2 的實際型別是 Border，
+                // 所以底色／外框依型別取——不要假設它是哪一種。
+                System.Windows.Media.Brush? panelBg = panel switch
+                {
+                    Border bd => bd.Background,
+                    Control ct => ct.Background,
+                    System.Windows.Controls.Panel pn => pn.Background,
+                    _ => null
+                };
+                System.Windows.Media.Brush? panelBorder = panel switch
+                {
+                    Border bd => bd.BorderBrush,
+                    Control ct => ct.BorderBrush,
+                    _ => null
+                };
+                SolidColorBrush? panelBrush = panelBg as SolidColorBrush;
+                Log(log, $"popup backdrop: box={boxName} size={cw}x{ch} " +
+                         $"type={panel.GetType().Name} bg={BrushText(panelBg)} border={BrushText(panelBorder)}");
+                for (int i = 0; i < box.Items.Count; i++)
+                {
+                    if (box.ItemContainerGenerator.ContainerFromIndex(i) is not ComboBoxItem item)
+                    {
+                        Log(log, $"popup item {i}: (container not realised)");
+                        continue;
+                    }
+                    SolidColorBrush? back = (item.Background as SolidColorBrush) ?? panelBrush;
+                    SolidColorBrush? fore = item.Foreground as SolidColorBrush;
+                    string ratio = (fore != null && back != null)
+                        ? $"{Contrast(fore.Color, back.Color):0.0}:1"
+                        : "?";
+                    Log(log, $"popup item {i}: bg={BrushText(item.Background)} " +
+                             $"backdrop={BrushText(back)} fg={BrushText(fore)} contrast={ratio}");
+                }
+
+                var rtb = new RenderTargetBitmap(cw, ch, 96, 96, PixelFormats.Pbgra32);
+                rtb.Render(panel);
+
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(rtb));
+                var buffer = new MemoryStream();
+                encoder.Save(buffer);
+                byte[] bytes = buffer.ToArray();
+                if (bytes.Length == 0)
+                    return "(the PNG encoder produced 0 bytes)";
+
+                png = bytes;
+                report = $"{boxName} {cw}x{ch}, {bytes.Length} bytes, " +
+                         $"backdrop={BrushText(panelBg)}";
+                return null;
+            }
+            finally
+            {
+                box.IsDropDownOpen = wasOpen;
+            }
+        });
+
+        if (!ran)
+        {
+            detail = $"popup dump: {failure}";
+            Log(log, detail);
+            return false;
+        }
+
+        if (png == null)
+        {
+            detail = $"popup dump: {report}";
+            Log(log, detail);
+            return false;
+        }
+
+        try
+        {
+            File.WriteAllBytes(path, png);
+        }
+        catch (Exception ex)
+        {
+            detail = $"popup dump: could not write {path} ({ex.GetType().Name}: {ex.Message})";
+            Log(log, detail);
+            return false;
+        }
+
+        detail = $"popup dump: {path} ({report})";
+        Log(log, detail);
+        return true;
+    }
+
+    /// <summary>筆刷寫成人看得懂的樣子：`#RRGGBB`、`none`（沒有設定）或 `non-solid`。</summary>
+    private static string BrushText(System.Windows.Media.Brush? brush) =>
+        brush switch
+        {
+            null => "none",
+            SolidColorBrush s => $"#{s.Color.R:X2}:{s.Color.G:X2}:{s.Color.B:X2}",
+            _ => "non-solid"
+        };
+
+    /// <summary>
+    /// WCAG 2.1 的對比度（前景／背景），1:1 到 21:1。正文的門檻是 4.5:1、大字是 3:1。
+    /// 用它把「看不看得清楚」變成一个可斷言的數字。
+    /// </summary>
+    private static double Contrast(System.Windows.Media.Color a, System.Windows.Media.Color b)
+    {
+        double la = RelativeLuminance(a);
+        double lb = RelativeLuminance(b);
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    private static double RelativeLuminance(System.Windows.Media.Color c)
+    {
+        static double Channel(byte v)
+        {
+            double s = v / 255.0;
+            return s <= 0.03928 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+    }
+
+    /// <summary>
     /// 把 <paramref name="work"/> 排到 UI 執行緒上執行並**等它做完**。
     /// <paramref name="work"/> 回傳 null 表示成功，否則回傳失敗原因。
     /// 已在這條 UI 執行緒上時直接執行（排隊會自我等待）。不丟例外。
@@ -1003,6 +1176,18 @@ internal static class SettingsUi
         /// <summary>選中／作用中＝選中扇區填色 <see cref="WheelDesign.SelFill"/>（實心 #3F6B7A）。</summary>
         public static readonly SolidColorBrush SelectedBg = Opaque(WheelDesign.SelFill);
 
+        /// <summary>
+        /// 下拉清單「滑鼠移上去」那一列的底色＝白 26 % 疊在視窗底色上（<see cref="SurfaceBg"/>
+        /// 是 13 %，這裡刻意是它的兩倍：要看得出來比靜止亮，又不能亮到跟
+        /// <see cref="SelectedBg"/> 混淆）。
+        ///
+        /// 為什麼非得有這個權杖：WPF 預設的 <c>ComboBoxItem</c> 樣式在 IsHighlighted／IsSelected
+        /// 時會把那一列**直接改成主題的淺色底**（模板裡的 setter，不是屬性），而字色是我們設的
+        /// 近白 ⇒ 白底白字。2026-10-21 使用者回報的正是這個：下拉一展開，選取中的那一列看不見。
+        /// 實測（--settings-ui-dump-popup）：修好前那一列平均亮度 243，其餘五列 51–53。
+        /// </summary>
+        public static readonly SolidColorBrush HoverBg = Opaque(WheelDesign.Veil, GdiColors.White, 26);
+
         // ---- 裁切視窗（M3 第四顆扇形）----
         // 這三個是**唯一**允許帶透明度的筆刷：它們疊在「使用者自己的照片」上，而不是疊在
         // 不透明的視窗底色上。照片的亮度無法預測，所以遮罩必須是半透明的（不透明的遮罩會把
@@ -1123,10 +1308,7 @@ internal static class SettingsUi
                 window.CompressModeBox, window.CompressUnitBox
             })
             {
-                box.Background = SurfaceBg;
-                box.Foreground = TextMain;
-                box.BorderBrush = CardBorder;
-                box.FontFamily = Font;
+                StyleKit.StyleCombo(box);
             }
 
             // 輸出資料夾的自訂路徑：與緊急熱鍵的文字框同一種外觀（這一頁只有這一種輸入框樣式）
@@ -1209,13 +1391,82 @@ internal static class SettingsUi
             toggle.BorderBrush = on ? SecondaryBorder : CardBorder;
         }
 
-        /// <summary>下拉選單的項目（Popup 裡自己一份，不繼承 ComboBox 的顏色）。</summary>
-        public static void StyleComboItem(ComboBoxItem item)
+        /// <summary>
+        /// 一個下拉選單的全部外觀——**包含清單展開之後的每一列**。
+        ///
+        /// 這裡之所以是一個方法而不是散在各處的幾行賦值：外框的顏色跟清單裡每一列的顏色
+        /// 必須一起換，只換一半的症狀就是「展開之後選取中的那一列白底白字」（2026-10-21 回報）。
+        /// </summary>
+        public static void StyleCombo(ComboBox box)
         {
-            item.Background = SurfaceBg;
-            item.Foreground = TextMain;
-            item.FontFamily = Font;
-            item.Padding = new Thickness(8, 4, 8, 4);
+            box.Background = SurfaceBg;
+            box.Foreground = TextMain;
+            box.BorderBrush = CardBorder;
+            box.FontFamily = Font;
+            // 項目樣式給整個 ComboBox：Popup 裡那些列是它生出來的容器，會套用這一份。
+            box.ItemContainerStyle = ComboItemStyle;
+        }
+
+        /// <summary>共用一份：同一個 <see cref="Style"/> 可以套在任意數量的控制項上。</summary>
+        private static Style ComboItemStyle => _comboItemStyle ??= BuildComboItemStyle();
+
+        private static Style? _comboItemStyle;
+
+        /// <summary>
+        /// 一列下拉選項的樣式。**自己給 ControlTemplate**，不讓主題的 ComboBoxItem 樣式有機會
+        /// 插手——它會在 IsHighlighted／IsSelected 時把底色換成淺色，而我們的字是近白。
+        /// 顏色權杖只有一份（本類別的靜態欄位），所以靜止／滑過／選中三種狀態永遠同一套語言：
+        /// 靜止＝<see cref="SurfaceBg"/>、滑過＝<see cref="HoverBg"/>、選中＝<see cref="SelectedBg"/>
+        /// （與設定頁開關「開」的狀態同一個顏色）。
+        /// </summary>
+        private static Style BuildComboItemStyle()
+        {
+            var style = new Style(typeof(ComboBoxItem));
+            style.Setters.Add(new Setter(Control.BackgroundProperty, SurfaceBg));
+            style.Setters.Add(new Setter(Control.ForegroundProperty, TextMain));
+            style.Setters.Add(new Setter(Control.FontFamilyProperty, Font));
+            style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
+            style.Setters.Add(new Setter(Control.BorderBrushProperty, System.Windows.Media.Brushes.Transparent));
+            style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.Name = "Bd";
+            border.SetValue(Border.BackgroundProperty,
+                            new TemplateBindingExtension(Control.BackgroundProperty));
+            // 外框也交給樣式：選中那一列靠左側一道琥珀豎條標示（見下面的 selected 觸發條件）
+            border.SetValue(Border.BorderBrushProperty,
+                            new TemplateBindingExtension(Control.BorderBrushProperty));
+            border.SetValue(Border.BorderThicknessProperty,
+                            new TemplateBindingExtension(Control.BorderThicknessProperty));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+            border.SetValue(Border.MarginProperty, new Thickness(2, 1, 2, 1));
+            border.SetValue(Border.SnapsToDevicePixelsProperty, true);
+
+            var content = new FrameworkElementFactory(typeof(ContentPresenter));
+            content.SetValue(FrameworkElement.MarginProperty, new Thickness(8, 4, 8, 4));   // 與修改前同一組內距：清單高度不變
+            content.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            border.AppendChild(content);
+
+            var template = new ControlTemplate(typeof(ComboBoxItem)) { VisualTree = border };
+
+            var hover = new Trigger { Property = ComboBoxItem.IsHighlightedProperty, Value = true };
+            hover.Setters.Add(new Setter(Control.BackgroundProperty, HoverBg));
+            template.Triggers.Add(hover);
+
+            // 選中那一列**不用** SelectedBg。這裡跟設定頁的開關不同：開關的字在開關外面，
+            // 文字從來沒有疊在 SelFill 上；這裡文字疊在自己身上，而 SelFill 在 graphite 是
+            // #787B7E 中灰（白字實測 4.3:1，低於 WCAG AA 的 4.5），citrus／celadon 更亮更糟。
+            // 所以改成：底色與 hover 同一個 HoverBg（白對它約 19:1）、左側一道琥珀豎條、
+            // 字加半粗——「目前的值」照樣一眼看得出來，而且不必靠一條會隨配色變得看不清的底。
+            var selected = new Trigger { Property = ComboBoxItem.IsSelectedProperty, Value = true };
+            selected.Setters.Add(new Setter(Control.BackgroundProperty, HoverBg));
+            selected.Setters.Add(new Setter(Control.BorderBrushProperty, SecondaryBorder));
+            selected.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(2, 0, 0, 0)));
+            selected.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.SemiBold));
+            template.Triggers.Add(selected);
+
+            style.Setters.Add(new Setter(Control.TemplateProperty, template));
+            return style;
         }
     }
 }
