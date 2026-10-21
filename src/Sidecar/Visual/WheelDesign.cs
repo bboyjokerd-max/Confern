@@ -185,6 +185,19 @@ internal static class WheelDesign
     public const float CapPadYPx = 5f;
     public const float CapMinWidthPx = 100f;
 
+    /// <summary>
+    /// 膠囊字級的**下限**：字串放不進「左右標籤之間的淨空」時自動往下縮，縮到這裡為止。
+    ///
+    /// 存在的理由（2026-10-21 量測）：六／七扇區的輪盤在 0°與 180°附近有標籤，
+    /// 而膠囊寬度原本只有下限、沒有上限 ⇒ 字一長就壓過標籤的起筆
+    /// （中文「去中繼資料」膠囊 126px、英文 "Rotate 90°" 121px，實測都把 `READ QR` 吃掉一截）。
+    /// 12px 是「還讀得出來」的下限；再長就吃掉左右 padding，絕不越過淨空。
+    /// </summary>
+    public const float CapFontFloorPx = 12f;
+
+    /// <summary>膠囊邊緣與標籤文字之間至少留的橫向間隙（px）。</summary>
+    public const float CapLabelGapPx = 6f;
+
     /// <summary>縮圖取不到時的佔位漸層（上→下）。</summary>
     public static Color ThumbTop => Palettes.Current.ThumbTop;
     public static Color ThumbBottom => Palettes.Current.ThumbBottom;

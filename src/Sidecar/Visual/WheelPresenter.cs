@@ -31,6 +31,16 @@ internal sealed class WheelPresenter
     private IReadOnlyList<string> _targets = Array.Empty<string>();
     private Func<int, string?>? _preview;
     private Func<int, string?>? _caption;
+
+    /// <summary>
+    /// 中央膠囊左右各能伸到哪裡（px，相對輪心的半寬）。由 DrawWheel 的標籤迴圈
+    /// **實際量出來的文字內緣**寫入，DrawCapsule 讀它當寬度上限。
+    /// 預設 400＝實質無上限（沒有標籤擋路的情況，例如四扇區的格式層）。
+    /// </summary>
+    private float _capClearHalfPx = 400f;
+
+    /// <summary>這一輪挑出來的膠囊字級（0＝還沒算）。每輪重置，見 CapFontFor。</summary>
+    private float _capFitFontPx;
     private IReadOnlyList<ToolIcon>? _icons;
     private WheelMode _mode = WheelMode.Format;
     private string? _notice;
@@ -488,6 +498,8 @@ internal sealed class WheelPresenter
 
     private void DrawWheel(Graphics g, float cx, float cy, float r)
     {
+        _capClearHalfPx = 400f;   // 每輪重算：沒有標籤擋路時回到實質無上限
+        _capFitFontPx = 0f;
         int count = _targets.Count;
         double step = 360.0 / count;
         double sweep = WheelDesign.SweepDeg(count);
@@ -549,6 +561,18 @@ internal sealed class WheelPresenter
             float lx = cx + (float)(Math.Cos(mid) * r * ratio);
             float ly = cy + (float)(Math.Sin(mid) * r * ratio);
             var ink = i == _selected ? bright : dim;
+
+            // 中央膠囊的橫向淨空：只把「縱向會被膠囊掃到」的標籤算進來。
+            // 四扇區（格式層）的標籤落在 45° 上、垂直就閃開膠囊 ⇒ 這裡不會命中，
+            // 上限維持 400（實質無上限）⇒ 格式層的膠囊一個位元都不會變。
+            float capHalfH = WheelDesign.CapFontPx * 0.8f + WheelDesign.CapPadYPx + 2f;
+            float labelTop = ly - 12f + iconLift;
+            float labelBottom = ly + 12f + iconLift;
+            if (labelTop < cy + capHalfH && labelBottom > cy - capHalfH)
+            {
+                float labelInkW = g.MeasureString(_targets[i], font).Width;
+                _capClearHalfPx = Math.Min(_capClearHalfPx, Math.Abs(lx - cx) - labelInkW / 2f);
+            }
             if (_mode == WheelMode.Tool && _icons != null && i < _icons.Count)
             {
                 if (DrawToolIcon(g, _icons[i], ink, lx, ly - iconLift))
@@ -861,20 +885,62 @@ internal sealed class WheelPresenter
         Ridge(WheelDesign.ThumbRidgeFront, cy + ri * 0.42f, ri * 0.70f, ri * 1.6f);
     }
 
-    /// <summary>中心膠囊：白底半透明、深色字 <c>原格式 → 目標格式</c>（字 17px、padding 5·16、alpha .85）。</summary>
+
+    /// <summary>膠囊可用的總寬（px）＝左右標籤淨空 ×2（見 _capClearHalfPx）。</summary>
+    private float CapsuleWidthLimit() =>
+        Math.Max(72f, (_capClearHalfPx - WheelDesign.CapLabelGapPx) * 2f);
+
+    /// <summary>第 i 顆扇區在膠囊裡要顯示的那句話（格式層是「來源 → 目標」）。</summary>
+    private string CaptionOf(int i) =>
+        _mode == WheelMode.Tool && _caption != null
+            ? (_caption(i) ?? _targets[i])
+            : _targets.Count == 0
+                ? _sourceFormat
+                : $"{_sourceFormat} → {_targets[i]}";
+
+    /// <summary>
+    /// 這一輪膠囊該用多大字級：**整個輪盤共用一個**，取「所有說明都放得進淨空」的最大值。
+    ///
+    /// 為什麼不是每顆各自挑：膠囊一次只顯示一顆（hover 到哪顆就換哪顆），
+    /// 若字級跟著字數跳，使用者會看到字忽大忽小。四扇區的格式層淨空是無限大（見 _capClearHalfPx），
+    /// 這裡永遠回 CapFontPx ⇒ 格式層一個位元都不會變。
+    /// </summary>
+    private float CapFontFor(Graphics g, float limit)
+    {
+        if (_capFitFontPx > 0f) { return _capFitFontPx; }
+
+        int count = Math.Max(1, _targets.Count);
+        for (int px = (int)WheelDesign.CapFontPx; px >= WheelDesign.CapFontFloorPx; px--)
+        {
+            bool fits = true;
+            for (int i = 0; i < count && fits; i++)
+            {
+                if (MeasureCapText(g, CaptionOf(i), px) + WheelDesign.CapPadXPx * 2f > limit) { fits = false; }
+            }
+            if (fits || px == (int)WheelDesign.CapFontFloorPx) { _capFitFontPx = px; break; }
+        }
+        return _capFitFontPx;
+    }
+
+    /// <summary>量字寬（自己開字型、自己關）——只給膠囊「挑字級」用。</summary>
+    private static float MeasureCapText(Graphics g, string text, float px)
+    {
+        using var f = MakeFontPx(px);
+        return g.MeasureString(text, f).Width;
+    }    /// <summary>中心膠囊：白底半透明、深色字 <c>原格式 → 目標格式</c>（字 17px、padding 5·16、alpha .85）。</summary>
     private void DrawCapsule(Graphics g, float cx, float cy)
     {
         // 工具輪盤的膠囊顯示**當前 hover 的工具動作**（參考版式「中心顯示 hover 動作」）；
         // 格式輪盤維持「原格式 → 目標格式」。兩者都只是字串——膠囊不知道兩者的差別。
-        string label = _mode == WheelMode.Tool && _caption != null
-            ? (_caption(_selected) ?? _targets[_selected])
-            : _targets.Count == 0
-                ? _sourceFormat
-                : $"{_sourceFormat} → {_targets[_selected]}";
+        string label = CaptionOf(_selected);
 
-        using var font = MakeFontPx(WheelDesign.CapFontPx);
+        // 字級：**整個輪盤共用一個**（見 CapFontFor）——hover 換顆時不會忽大忽小。
+        float limit = CapsuleWidthLimit();
+        float fontPx = CapFontFor(g, limit);
+        using var font = MakeFontPx(fontPx);
         var size = g.MeasureString(label, font);
-        float w = Math.Max(WheelDesign.CapMinWidthPx, size.Width + WheelDesign.CapPadXPx * 2);
+        // 寬度：**不得超過淨空**——寧可把左右 padding 吃掉，也不壓到標籤的起筆。
+        float w = Math.Min(Math.Max(WheelDesign.CapMinWidthPx, size.Width + WheelDesign.CapPadXPx * 2), limit);
         float h = size.Height + WheelDesign.CapPadYPx * 2;
         float x = cx - w / 2f, y = cy - h / 2f, rad = h / 2f;
 

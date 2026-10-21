@@ -214,11 +214,11 @@ internal static class UiStrings
             ["vk.ArrowRight"] = "→",
             // ── 2026-10-21：轉檔時真正會看到的畫面（工具輪盤／托盤／失敗原因）──
             ["tool.rotate90"] = "轉 90°",
-            ["tool.stripMetadata"] = "去中繼資料",
-            ["tool.compress"] = "依設定壓縮",
+            ["tool.stripMetadata"] = "清除",
+            ["tool.compress"] = "壓縮",
             ["tool.crop"] = "裁切",
             ["tool.readQr"] = "讀 QR",
-            ["tool.mergePdf"] = "合併 PDF",
+            ["tool.mergePdf"] = "合併",
             ["tool.removeBg"] = "去背",
 
             ["wheel.holdToConvert"] = "按住觸發鍵",
@@ -348,13 +348,13 @@ internal static class UiStrings
             ["vk.ArrowLeft"] = "Left",
             ["vk.ArrowRight"] = "Right",
             // 2026-10-21: the surface you actually see while converting (wheel / tray / failure reasons)
-            ["tool.rotate90"] = "Rotate 90°",
-            ["tool.stripMetadata"] = "Clean tags",
-            ["tool.compress"] = "Compress",
+            ["tool.rotate90"] = "Rotate",
+            ["tool.stripMetadata"] = "Clean",
+            ["tool.compress"] = "Shrink",
             ["tool.crop"] = "Crop",
-            ["tool.readQr"] = "Read QR",
-            ["tool.mergePdf"] = "Merge PDF",
-            ["tool.removeBg"] = "Cut out",
+            ["tool.readQr"] = "Scan",
+            ["tool.mergePdf"] = "Merge",
+            ["tool.removeBg"] = "Cutout",
 
             ["wheel.holdToConvert"] = "Hold the trigger key",
 
