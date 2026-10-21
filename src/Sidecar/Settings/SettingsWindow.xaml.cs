@@ -82,6 +82,9 @@ internal partial class SettingsWindow : Window
     /// <summary>目前要顯示的語言（正規值：system／zh-Hant／en）。</summary>
     private string _language;
 
+    /// <summary>配色下拉目前的 id（五套色票的 id 在 <see cref="Palettes"/>）。</summary>
+    private string _palette;
+
     /// <summary>目前 UI 上的觸發鍵正規名（例如 <c>Space</c>）。建構時由 <see cref="LoadFromSettings"/> 指派。</summary>
     private string _triggerKey = "Space";
 
@@ -125,7 +128,7 @@ internal partial class SettingsWindow : Window
         _onSaved = onSaved;
         _log = log;
         _generation = generation;
-        _language = current.Language;
+        _language = current.Language;        _palette = Palettes.CurrentId;      // 設定檔在 Load 時已經套用過了，這裡只記住它
 
         InitializeComponent();
 
@@ -143,7 +146,7 @@ internal partial class SettingsWindow : Window
         HotkeyBox.TextChanged += OnHotkeyTextChanged;
 
         TriggerPresetBox.SelectionChanged += OnTriggerPresetChanged;
-        LanguageBox.SelectionChanged += OnLanguageChanged;
+        LanguageBox.SelectionChanged += OnLanguageChanged;        PaletteBox.SelectionChanged += OnPaletteChanged;
         OutputPresetBox.SelectionChanged += OnOutputPresetChanged;
         OutputPathBox.TextChanged += OnOutputPathChanged;
 
@@ -193,7 +196,7 @@ internal partial class SettingsWindow : Window
         HotkeyBox.IsEnabled = hotkeyOn;
 
         RebuildTriggerItems();
-        RebuildLanguageItems();
+        RebuildLanguageItems();        RebuildPaletteItems();
         LoadOutputFolder(s.OutputFolder);
         RebuildOutputItems();
         RefreshOutput();
@@ -236,7 +239,7 @@ internal partial class SettingsWindow : Window
         StartupLabel.Text = L("field.startWithWindows");
         StartupStubBadge.Text = L("stub.badge");
 
-        LanguageLabel.Text = L("field.language");
+        LanguageLabel.Text = L("field.language");        PaletteLabel.Text = L("field.palette");
         OutputLabel.Text = L("field.outputFolder");
 
         JpgLabel.Text = L("field.jpgQuality");
@@ -266,7 +269,7 @@ internal partial class SettingsWindow : Window
         UpdateQualityLabels();
 
         RebuildTriggerItems();
-        RebuildLanguageItems();
+        RebuildLanguageItems();        RebuildPaletteItems();
         RebuildOutputItems();
         RebuildCompressionItems();
         RefreshTrigger();
@@ -480,7 +483,7 @@ internal partial class SettingsWindow : Window
         {
             // 選到的值 SettingsStore 不接受：把畫面拉回目前值，並說出來
             Report($"[settings] language selection '{item.Tag}' rejected by SettingsStore");
-            RebuildLanguageItems();
+            RebuildLanguageItems();        RebuildPaletteItems();
             return;
         }
 
@@ -494,6 +497,49 @@ internal partial class SettingsWindow : Window
     /// 顯示字 → 正規值。**這是本檔唯一自己做的欄位轉換**：SettingsStore 沒有反向查表，
     /// 而 <c>TryApply</c> 要的是正規值；查不到就原樣送出，讓 SettingsStore 去拒絕並說原因。
     /// </summary>
+    /// <summary>
+    /// 配色下拉（2026-10-21）。顯示名跟著介面語言（Palette.NameZh / Palette.NameEn），
+    /// 值是色票 id；**只送 id 給 SettingsStore**——認不得的 id 由它拒絕並說明，這裡不自己判斷。
+    /// </summary>
+    private void RebuildPaletteItems()
+    {
+        bool previous = _suppressComboEvents;
+        _suppressComboEvents = true;
+        try
+        {
+            PaletteBox.Items.Clear();
+            bool en = string.Equals(UiStrings.Current, UiStrings.En, StringComparison.Ordinal);
+            foreach (Palette palette in Palettes.Selectable)
+                PaletteBox.Items.Add(MakeItem(en ? palette.NameEn : palette.NameZh, palette.Id));
+
+            PaletteBox.SelectedItem = PaletteBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag as string, _palette, StringComparison.Ordinal));
+        }
+        finally
+        {
+            _suppressComboEvents = previous;
+        }
+    }
+
+    /// <summary>選了另一套配色：當場換（Palettes.Current 是唯一狀態），並記進待存的設定。</summary>
+    private void OnPaletteChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressComboEvents) return;
+        if (PaletteBox.SelectedItem is not ComboBoxItem item) return;
+
+        string id = item.Tag as string ?? "";
+        if (!SettingsStore.TryApply(_saved, "palette", id, Report, out Settings next))
+        {
+            Report($"[settings] palette selection '{id}' rejected by SettingsStore");
+            RebuildPaletteItems();
+            return;
+        }
+
+        _saved = next;
+        _palette = Palettes.CurrentId;
+        MarkDirty();
+    }
     private string CanonicalLanguage(string tag)
     {
         if (string.Equals(tag, "system", StringComparison.OrdinalIgnoreCase)) return UiStrings.System;
@@ -847,7 +893,7 @@ internal partial class SettingsWindow : Window
     /// </summary>
     internal void ApplyEdited(Settings edited)
     {
-        _language = edited.Language;     // 語言是下拉的狀態，LoadFromSettings 不含它
+        _language = edited.Language;        _palette = Palettes.CurrentId;     // 語言是下拉的狀態，LoadFromSettings 不含它
         LoadFromSettings(edited);        // 與開啟時「載入現值」走同一條路
         ApplyLanguage();                 // 文字重新指派（語言可能變了）
     }
@@ -879,7 +925,7 @@ internal partial class SettingsWindow : Window
         {
             new("triggerKey", _triggerKey),
             new("startWithWindows", (StartupToggle.IsChecked == true).ToString()),
-            new("language", _language),
+            new("language", _language),            new("palette", _palette),
             new("jpgQuality", ((int)Math.Round(JpgSlider.Value)).ToString()),
             new("webpQuality", ((int)Math.Round(WebpSlider.Value)).ToString()),
             new("captureTimeoutSeconds", ((int)Math.Round(TimeoutSlider.Value)).ToString()),

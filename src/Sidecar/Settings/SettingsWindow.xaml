@@ -30,6 +30,11 @@
   for the same measured reason (one 28px row + 6px margin + one wrapped 11px notice line
   with a 4px margin). The dump is re-read after the change; a scrollbar here is a red run.
 
+  The thirteenth row (colour palette, 2026-10-21) went between the language row and the
+  output row, and the height went 884 -> 918 for the same measured reason: at 884 the
+  dump grew a scrollbar (a #CDCDCD track at x=515 from y=95 down, read out of the frame)
+  and the cards lost width. One row costs 28px + 6px margin = 34px.
+
   Element names are referenced by SettingsWindow.xaml.cs; renaming one here without
   renaming it there is a compile error (the generated fields are typed), which is the
   point: no silent lookup by string -> no silent no-op control.
@@ -38,7 +43,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:ClassModifier="internal"
-        Width="540" Height="884"
+        Width="540" Height="918"
         ResizeMode="CanMinimize"
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False"
@@ -110,6 +115,20 @@
                             <TextBlock x:Name="LanguageLabel" FontSize="13" VerticalAlignment="Center" />
                             <ComboBox x:Name="LanguageBox" Grid.Column="2" Height="26" Width="150"
                                       VerticalAlignment="Center" FontSize="12" />
+                        </Grid>
+
+                        <!-- 配色（2026-10-21）：五套可選色票，資料在 Visual\Palette.cs。
+                             這裡只做「選哪一套」——換色當場生效（Palettes.Current 是唯一狀態），
+                             與語言下拉同一個模式：值正規化與拒絕都在 SettingsStore。 -->
+                        <Grid x:Name="PaletteRow" Height="28" Margin="0,6,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="PaletteLabel" FontSize="13" VerticalAlignment="Center" />
+                            <ComboBox x:Name="PaletteBox" Grid.Column="2" Height="26" Width="150"
+                                  VerticalAlignment="Center" FontSize="12" />
                         </Grid>
 
                         <!--

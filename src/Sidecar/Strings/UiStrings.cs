@@ -130,6 +130,7 @@ internal static class UiStrings
             // ---- 開機啟動 ----
             ["field.startWithWindows"] = "開機啟動",
             ["field.language"] = "語言",
+["field.palette"] = "配色",
 
             // ---- 輸出資料夾（規格 §9.5）----
             // ⚠ 這些是**畫面上的標籤**，不是寫進設定檔的值：寫進檔案的永遠是
@@ -279,6 +280,7 @@ internal static class UiStrings
 
             ["field.startWithWindows"] = "Start with Windows",
             ["field.language"] = "Language",
+["field.palette"] = "Palette",
 
             // Output folder (spec 9.5). Labels only: the file stores '' / 'desktop' / a path.
             ["field.outputFolder"] = "Output folder",

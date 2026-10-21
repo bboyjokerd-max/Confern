@@ -1099,7 +1099,7 @@ internal static class SettingsUi
 
             foreach (ComboBox box in new[]
             {
-                window.TriggerPresetBox, window.LanguageBox, window.OutputPresetBox,
+                window.TriggerPresetBox, window.LanguageBox, window.PaletteBox, window.OutputPresetBox,
                 window.CompressModeBox, window.CompressUnitBox
             })
             {
