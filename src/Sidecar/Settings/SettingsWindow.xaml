@@ -35,6 +35,15 @@
   dump grew a scrollbar (a #CDCDCD track at x=515 from y=95 down, read out of the frame)
   and the cards lost width. One row costs 28px + 6px margin = 34px.
 
+  The label column (2026-10-21, English UI): it used to be a fixed Width=92 on all twelve
+  rows, so the English label "Start with Windows" (measured 119px at 13px Segoe UI) was
+  cut off mid-word; read straight out of the English settings dump, not guessed. The
+  column is now Width=Auto MinWidth=92 SharedSizeGroup="SettingsLabel" with one
+  Grid.IsSharedSizeScope on the body StackPanel: every label of a language shares the
+  widest one, so English grows and Chinese stays at exactly 92 (the Chinese dump is
+  byte-identical before and after, sha 2C584172BCEB9D03). The five explanation lines that
+  used to hard-code Margin=92 now sit in the same two-column grid for the same reason.
+  A scrollbar here is a red run: the English dump at Height=918 still has none.
   Element names are referenced by SettingsWindow.xaml.cs; renaming one here without
   renaming it there is a compile error (the generated fields are typed), which is the
   point: no silent lookup by string -> no silent no-op control.
@@ -65,7 +74,7 @@
 
         <!-- Settings body -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
-            <StackPanel Margin="24,0,18,14">
+            <StackPanel Margin="24,0,18,14" Grid.IsSharedSizeScope="True">
 
                 <Border x:Name="BehaviourCard" CornerRadius="8" Padding="12,10">
                     <StackPanel>
@@ -74,7 +83,7 @@
 
                         <Grid x:Name="TriggerRow" Height="28">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="54" />
@@ -91,11 +100,17 @@
                         </Grid>
 
                         <!-- Spec 8 warning for the Shift trigger key; empty unless Shift is chosen -->
-                        <TextBlock x:Name="TriggerWarningText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TriggerWarningText" Grid.Column="1" FontSize="11" TextWrapping="Wrap" />
+                        </Grid>
 
                         <Grid x:Name="StartupRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -108,7 +123,7 @@
 
                         <Grid x:Name="LanguageRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -122,7 +137,7 @@
                              與語言下拉同一個模式：值正規化與拒絕都在 SettingsStore。 -->
                         <Grid x:Name="PaletteRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -141,7 +156,7 @@
                         -->
                         <Grid x:Name="OutputRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -160,7 +175,13 @@
                           disappear without moving anything else on the page, which is also
                           why the window is 40px taller than it used to be.
                         -->
-                        <TextBlock x:Name="OutputNoticeText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="OutputNoticeText" Grid.Column="1" FontSize="11" TextWrapping="Wrap" />
+                        </Grid>
                     </StackPanel>
                 </Border>
 
@@ -171,7 +192,7 @@
 
                         <Grid x:Name="JpgRow" Height="28">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="54" />
                             </Grid.ColumnDefinitions>
@@ -184,7 +205,7 @@
 
                         <Grid x:Name="WebpRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="54" />
                             </Grid.ColumnDefinitions>
@@ -197,7 +218,7 @@
 
                         <Grid x:Name="NamingRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <TextBlock x:Name="NamingLabel" FontSize="13" VerticalAlignment="Center" />
@@ -206,11 +227,17 @@
                         </Grid>
 
                         <!-- Spec 8: MVP is fixed to auto-numbering; the reason must be on screen -->
-                        <TextBlock x:Name="NamingReasonText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="NamingReasonText" Grid.Column="1" FontSize="11" TextWrapping="Wrap" />
+                        </Grid>
 
                         <Grid x:Name="TimeoutRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="54" />
                             </Grid.ColumnDefinitions>
@@ -236,7 +263,7 @@
                         -->
                         <Grid x:Name="CompressRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
@@ -250,7 +277,13 @@
                                       Margin="8,0,0,0" VerticalAlignment="Center" FontSize="12" />
                         </Grid>
 
-                        <TextBlock x:Name="CompressNoticeText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="CompressNoticeText" Grid.Column="1" FontSize="11" TextWrapping="Wrap" />
+                        </Grid>
                     </StackPanel>
                 </Border>
 
@@ -261,7 +294,7 @@
 
                         <Grid x:Name="HotkeyRow" Height="28">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -273,11 +306,17 @@
                         </Grid>
 
                         <!-- Spec 8: this hotkey is not wired up yet; the UI has to say so -->
-                        <TextBlock x:Name="HotkeyStubText" FontSize="11" Margin="92,4,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="HotkeyStubText" Grid.Column="1" FontSize="11" TextWrapping="Wrap" />
+                        </Grid>
 
                         <Grid x:Name="DiagnosticsRow" Height="28" Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="92" />
+                                <ColumnDefinition Width="Auto" MinWidth="92" SharedSizeGroup="SettingsLabel" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
