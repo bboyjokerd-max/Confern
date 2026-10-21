@@ -3399,3 +3399,38 @@ S14.32d/g 從「不准有接近白色的列」改成量**像素對比**——第
 五套既有配色設定頁逐像素相同；冷瓷輪盤 dump sha 與基準相同（`371E23C6FC2B0D9E`）。
 
 交付圖：`C:\Users\User\Desktop\Confern測試\冷瓷配色-2026-10-21.png`
+### 2026-10-21 第二批語言：法文／德文／西班牙文（介面語言 5 → 8 種）
+
+**真正的門檻不是版面**：原本以為卡在「觸發鍵那一列只有 468px，法文要多 58px」。三張表寫完、
+跑起來才發現介面**還是中文**——問題在 `UiStrings.Resolve` 那份**手寫 if 串**只認得五種語言，
+其餘一律 `return SystemLanguage()`。所以 `SetLanguage("fr")` 不報錯、不記錄、也不生效，
+直接退回系統語言。這個 bug 看起來像「翻譯沒做完」：表對、鍵齊、畫面還是中文。
+抓到它的方式是量測——dump 出來的畫面裡「尚未生效」四個字（法文應該是 INACTIF）就在證據裡。
+已補上 `Resolve`，並把 `SystemLanguage()` 的 LANGID 接起來：0x07 德、0x09 英、0x0A 西、0x0C 法，
+其餘語言仍回英文。
+
+**翻譯**：三張表各 206 鍵（203 內容 + 3 個語言名稱鍵），八張表逐鍵對齊。
+佔位符與基準表對齊（出錯只會在執行期丟 `FormatException`，而且只有那個語言的那一個訊息會炸）。
+扇形標籤挑短的、量過：法文 COMPRIMER 77px、西文 COMPRIMIR 74.3px，框是 80px。
+
+**新增版面自檢**（這次最該留下的東西）：字變長在 WPF 裡不會報錯、不會撐大視窗，固定 28px 的列
+只會把控制項擠出列外或讓文字壓到鄰居。既有的捲軸守衛有兩個盲點：只看縱向（橫向是裁切、永遠
+不會長捲軸）、而且它找「夠長的亮色直條」，淺色配色整頁都亮會誤判。現在每次 dump 都印一行
+`settings ui layout: viewport=.. extent=.. scrollbar=False rowOverflow=0 overlaps=0 labelColumn=..`。
+
+⚠ **第一版判準是錯的，八種語言（含中文基準）一致誤報 8 筆**：我比的是「DesiredSize 比
+ActualWidth 寬」，但 TextBlock 的 `ClipToBounds` 預設 false——框比字窄**不會截字**，字會溢出框
+繼續畫。改成「文字要求的右緣超出去所在那一列」才是真的會出事的情況。
+
+**守衛**：新產品自檢 `--strings-selftest`（一行看完八張表：`aligned/missing/extra/badPlaceholders`），
+`verify-m1f` 加 S14.37a-d（40 → 44 條）：表逐鍵對齊、八種語言 dump 全部不出列不重疊不需捲軸、
+八張 dump 互不相同、語言下拉 9 項。並驗過 a 不是空檢查（法文 `merge.range` 的 `{2}` 改成 `{7}`
+→ `aligned=False badPlaceholders=1`、exit 1）。
+
+**驗收**：完整 12 套、**422 檢查：396 pass、0 fail、26 inconclusive**；五張輪盤 dump sha 全不相同；
+法文語言下拉選中列 16.7:1。
+
+交付圖：`C:\Users\User\Desktop\Confern測試\歐洲三語-2026-10-21.png`
+
+**還沒做**：義／葡／荷等語言沒有表（系統語言是那些的一律顯示英文）。`labelColumn` 已到
+258-266px，再加語言（俄文／波蘭文這種長字）之前要先量，不要假設還有空間。
