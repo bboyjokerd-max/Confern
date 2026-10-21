@@ -89,7 +89,7 @@ internal static class CropRatios
         new(IdSquare, "ratio.square"),
         new(IdWide, "ratio.wide"),
         new(IdClassic, "ratio.classic"),
-        new(IdOriginal, "原比例")
+        new(IdOriginal, "ratio.original")
     };
 
     /// <summary>

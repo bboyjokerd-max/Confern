@@ -3351,8 +3351,8 @@ internal static class App
     private static Func<int, string?> PreviewFactory(IReadOnlyList<string> targets, IFormatCatalog catalog,
                                                      string[] paths, int forcedCount)
     {
-        if (forcedCount > 1) return _ => $"{forcedCount} 個檔案";
-        if (paths.Length > 1) return _ => $"{paths.Length} 個檔案";
+        if (forcedCount > 1) return _ => UiStrings.Format("progress.files", forcedCount);
+        if (paths.Length > 1) return _ => UiStrings.Format("progress.files", paths.Length);
         if (paths.Length == 0) return _ => null;
 
         string stem = Path.GetFileNameWithoutExtension(paths[0]);
@@ -3403,8 +3403,8 @@ internal static class App
         //   ③Mixed／連目錄都不認識的 Unsupported -> 既有拒絕訊息，工具清單為空（規格 §4.3）。
         string? notice = verdict.Status switch
         {
-            PayloadStatus.Mixed => catalog.DescribeMix(paths) ?? "混合選取，請選同類別",       // 規格 §4.3 的原文
-            PayloadStatus.Unsupported => "不支援的格式",
+            PayloadStatus.Mixed => catalog.DescribeMix(paths) ?? UiStrings.Get("fmt.mixedShort"),       // 規格 §4.3 的原文
+            PayloadStatus.Unsupported => UiStrings.Get("err.unsupported"),
             _ => null
         };
 
@@ -3413,7 +3413,7 @@ internal static class App
             : Array.Empty<string>();
         if (notice == null && targets.Count == 0)
         {
-            notice = "沒有可轉換的目標格式";
+            notice = UiStrings.Get("fmt.noTarget");
             // 這一層沒有東西可選，但工具層可能有 ⇒ 工具清單**不跟著清掉**（見上面 ②）。
             // 若連工具都沒有（例如一個目錄認識、卻沒有任何工具適用的格式），
             // `tools` 本來就是空的，畫面與改動前一樣。
@@ -4432,8 +4432,8 @@ internal static class App
         // status= 與 notice= 一起印：只印清單的話，看不出「這一批到底是被拒絕還是被接受」。
         string? notice = verdict.Status switch
         {
-            PayloadStatus.Mixed => mixNotice ?? "混合選取，請選同類別",
-            PayloadStatus.Unsupported => "不支援的格式",
+            PayloadStatus.Mixed => mixNotice ?? UiStrings.Get("fmt.mixedShort"),
+            PayloadStatus.Unsupported => UiStrings.Get("err.unsupported"),
             _ => null
         };
         evidence.Line($"tool list: count={tools.Count} tools=[{string.Join(",", tools.Select(t => t.Id))}] " +
@@ -5657,7 +5657,7 @@ internal static class App
         string[] lastOne = MergeUi.SelfTestOrder();
         bool lastRefused = MergeUi.SelfTestRemoveRow(0, 5000, out string lastDetail, lines.Enqueue);
         string afterLastNotice = MergeUi.SelfTestState();
-        bool noticeSaysWhy = afterLastNotice.Contains("至少要留一份", StringComparison.Ordinal);
+        bool noticeSaysWhy = afterLastNotice.Contains(UiStrings.Get("merge.errLastRemove"), StringComparison.Ordinal);
         bool stillOne = MergeUi.SelfTestOrder().Length == 1;
         evidence.Line($"merge ui selftest: the last file cannot be removed: left={leftCount} " +
                       $"pressed={lastRefused} stillOne={stillOne} noticeSaysWhy={noticeSaysWhy} " +

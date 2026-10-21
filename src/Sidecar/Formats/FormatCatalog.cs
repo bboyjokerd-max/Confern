@@ -170,7 +170,7 @@ internal sealed class FormatCatalog : IFormatCatalog
 
         // 回傳**整句話**：這樣「混合選取要怎麼講」只有這一個地方決定。原本輪盤與 --tools-list
         // 各抄了一份「混合選取，請選同類別」，兩份就會各自演化（而使用者只會看到其中一句）。
-        return "混合選取，請選同類別：" + string.Join("、", parts)
+        return UiStrings.Get("fmt.mixedKinds") + string.Join(UiStrings.Get("fmt.listSeparator"), parts)
              + UiStrings.Format("format.example", Path.GetFileName(sample[rarest]));
     }
 

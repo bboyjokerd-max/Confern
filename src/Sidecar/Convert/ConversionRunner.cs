@@ -89,7 +89,7 @@ internal sealed class ConversionRunner : IDisposable
     private void ReportStartFailure(int fileCount, bool showProgress = true)
     {
         var failed = new ConversionSnapshot(0, fileCount, null, true, 0, fileCount,
-                                            Array.Empty<string>(), "轉檔服務無法啟動");
+                                            Array.Empty<string>(), UiStrings.Get("svc.cannotStart"));
         if (showProgress) _progress.Update(failed);
         _log($"conversion: reporting the failure in the snapshot (pill={showProgress})");
     }

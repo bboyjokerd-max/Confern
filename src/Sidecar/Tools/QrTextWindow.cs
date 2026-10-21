@@ -116,7 +116,7 @@ internal sealed class QrTextWindow : Window
 
         var hint = new TextBlock
         {
-            Text = "這是圖片裡解出來的內容（沒有產生任何檔案）。可以選取，Ctrl+C 或下面的按鈕複製。",
+            Text = UiStrings.Get("qr.hint"),
             FontSize = 12,
             Margin = new Thickness(0, 10, 0, 0),
             TextWrapping = TextWrapping.Wrap
@@ -125,7 +125,7 @@ internal sealed class QrTextWindow : Window
         Grid.SetRow(hint, 2);
         root.Children.Add(hint);
 
-        CopyButton = new Button { Content = "複製", Width = 128, Height = 32 };
+        CopyButton = new Button { Content = UiStrings.Get("qr.copy"), Width = 128, Height = 32 };
         SettingsUi.StyleKit.PrimaryButton(CopyButton);
         CopyButton.Click += (_, _) => Copy();
 
@@ -146,11 +146,11 @@ internal sealed class QrTextWindow : Window
     private void BuildHeader(Grid root)
     {
         var header = new StackPanel();
-        var title = new TextBlock { Text = "讀 QR", FontSize = 21, FontWeight = FontWeights.SemiBold };
+        var title = new TextBlock { Text = UiStrings.Get("qr.title"), FontSize = 21, FontWeight = FontWeights.SemiBold };
         title.Foreground = SettingsUi.StyleKit.TextMain;
         var subtitle = new TextBlock
         {
-            Text = $"{_sourceName}　（不是網址，所以只顯示在這裡）",
+            Text = UiStrings.Format("qr.notUrl", _sourceName),
             FontSize = 12,
             Margin = new Thickness(0, 5, 0, 0),
             TextWrapping = TextWrapping.Wrap

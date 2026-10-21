@@ -204,7 +204,7 @@ internal sealed class ConversionClient : IDisposable
                 ConversionSnapshot current = _snapshot;
                 _snapshot = new ConversionSnapshot(current.Done, current.Total, null, true,
                                                    current.Ok, current.Failed, current.Failures,
-                                                   "轉檔服務中斷", current.FailureFiles)
+                                                   UiStrings.Get("svc.interrupted"), current.FailureFiles)
                 {
                     // 管道在 summary 之前就斷了也要留住已經收到的產物（理由見 Summary 那一格）。
                     QrText = current.QrText,
@@ -292,7 +292,7 @@ internal sealed class ConversionClient : IDisposable
             _log($"worker: protocol mismatch (worker={message.protocolVersion}, " +
                  $"ui={WorkerProtocol.Version}) -> restarting worker");
             _snapshot = new ConversionSnapshot(done, total, null, true, ok, failed, failures,
-                                               "轉檔服務版本不符，已重新啟動", failureFiles);
+                                               UiStrings.Get("svc.versionMismatchRestarted"), failureFiles);
             KillWorker();
             return;
         }
@@ -357,7 +357,7 @@ internal sealed class ConversionClient : IDisposable
                 _log($"worker error: code={message.code} detail={message.detail}");
                 _snapshot = new ConversionSnapshot(done, total, null, true, ok, failed, failures,
                                                    message.code == WorkerErrorCodes.ProtocolMismatch
-                                                       ? "轉檔服務版本不符" : "轉檔服務錯誤",
+                                                       ? UiStrings.Get("svc.versionMismatch") : UiStrings.Get("svc.error"),
                                                    failureFiles)
                 {
                     QrText = current.QrText,
@@ -382,7 +382,7 @@ internal sealed class ConversionClient : IDisposable
             ConversionSnapshot current = _snapshot;
             _snapshot = new ConversionSnapshot(current.Done, current.Total, null, true,
                                                current.Ok, current.Failed, current.Failures,
-                                               "轉檔逾時", current.FailureFiles);
+                                               UiStrings.Get("svc.timeout"), current.FailureFiles);
             KillWorker();
             return;
         }

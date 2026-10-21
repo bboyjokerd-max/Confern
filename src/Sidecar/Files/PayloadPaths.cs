@@ -80,8 +80,8 @@ internal static class PayloadPaths
             kept.Sort(NaturalCompare);
         }
 
-        if (capped) notice = $"資料夾展開：已達上限，只取前 {MaxFiles} 個檔";
-        else if (folders > 0) notice = $"資料夾展開：讀到 {kept.Count} 個檔（跳過 {skipped} 個）";
+        if (capped) notice = UiStrings.Format("note.capped", MaxFiles);
+        else if (folders > 0) notice = UiStrings.Format("note.folderFiles", kept.Count, skipped);
         truncated = capped || tooDeep > 0;
         // 🔴 2026-10-16（③）：深度上限原本是**靜默**的——`Collect` 到頂就 return，沒有任何一行
         //    說出來。也就是說「拖了一個結構很深的資料夾」會安靜地少收檔案，而使用者拿到的
@@ -89,7 +89,7 @@ internal static class PayloadPaths
         //    這一條與檔案數上限（capped）是同一條規矩：**截斷可以，靜默不行**。
         if (tooDeep > 0)
             notice += (notice.Length > 0 ? "；" : "") +
-                      $"另有 {tooDeep} 個資料夾在 {MaxDepth} 層以下，未收";
+                      UiStrings.Format("note.tooDeep", tooDeep, MaxDepth);
 
         log?.Invoke($"payload paths: in={dropped.Count} folders={folders} out={kept.Count} " +
                     $"skipped={skipped} capped={capped} tooDeep={tooDeep}");
