@@ -223,8 +223,8 @@ internal static class Palettes
 
     /// <summary>
     /// 冷瓷（**淺色**）：整套唯一淺底的一套。亮點靠**深**（#1F4E79），標籤也跟著變深——
-    /// 沒有這一份，白字會在白底上消失。⚠ 目前**不列入選單**：淺遮罩蓋在不同的桌面上
-    /// 辨識度還沒實測，等實測過再放出來（放出來只要把 <see cref="Selectable"/> 加一筆）。
+    /// 沒有這一份，白字會在白底上消失。✅ 2026-10-21 起列入選單（淺遮罩蓋在不同的桌面上
+    /// 辨識度已實測，見 <see cref="Selectable"/>。
     /// </summary>
     private static readonly Palette Porcelain = new()
     {
@@ -253,8 +253,15 @@ internal static class Palettes
         NoticeFill = Color.FromArgb(255, 170, 60, 60)
     };
 
-    /// <summary>使用者在選單裡看得到的五套（順序＝設定頁的顯示順序，預設在第一個）。</summary>
-    public static readonly Palette[] Selectable = { Midnight, Graphite, Citrus, Celadon, Plum };
+    /// <summary>
+    /// 使用者在選單裡看得到的六套（順序＝設定頁的顯示順序，預設在第一個）。
+    ///
+    /// 冷瓷在 2026-10-21 之前一直被擋在外面，理由是「淺色底上的辨識度還沒實測」。現在量過了：
+    /// 主文 16.5:1、說明文字 6.0:1、下拉清單最差 13.1:1（WCAG 正文門檻 4.5:1），
+    /// 卡片靠外框與頁面分開（外框對比 1.3:1）。**當初卡住它的其實不是配色本身，是
+    /// StyleKit 把「淡一階」一律往白調**——淺底上疊白等於看不見（說明文字實測 1.05:1）。
+    /// </summary>
+    public static readonly Palette[] Selectable = { Midnight, Graphite, Citrus, Celadon, Plum, Porcelain };
 
     /// <summary>所有認得的 id（含尚未列入選單的），供 <see cref="TrySet"/> 解析。</summary>
     private static readonly Palette[] All = { Midnight, Graphite, Citrus, Celadon, Plum, Porcelain };

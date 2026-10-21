@@ -576,6 +576,8 @@ internal sealed class Options
           --settings-ui-live        start the overlay AND open the settings page (saving applies at once)
           --settings-ui-dump <png>  render the settings page to a PNG and exit (visual evidence)
           --settings-ui-dump-popup <png>
+          --settings-ui-dump-after-palette <id>  (diagnostic) switch palette in the same process before the dump
+
                                     render an OPEN dropdown list to a PNG; the list lives in its
                                     own Popup window, so --settings-ui-dump never captures it
           --settings-ui-popup-box <name>
@@ -1048,6 +1050,8 @@ internal sealed class Options
     /// 下拉清單是獨立 Popup 視窗，主視窗的 dump 看不到它（見 SettingsUi.DumpPopupFrame）。
     /// </summary>
     public string SettingsUiDumpPopup = "";
+    /// <summary>`--settings-ui-dump-after-palette &lt;id&gt;`：拍照前先在**同一行程內**換配色。</summary>
+    public string SettingsUiDumpAfterPalette = "";
 
     /// <summary>`--settings-ui-popup-box <x:Name>`：要拍哪一個下拉（預設 LanguageBox）。</summary>
     public string SettingsUiPopupBox = "LanguageBox";
@@ -1310,6 +1314,9 @@ internal sealed class Options
                     break;
                 case "--settings-ui-dump-popup":
                     if (++i < args.Length) o.SettingsUiDumpPopup = args[i];
+                    break;
+                case "--settings-ui-dump-after-palette":
+                    if (++i < args.Length) o.SettingsUiDumpAfterPalette = args[i];
                     break;
                 case "--settings-ui-popup-box":
                     if (++i < args.Length) o.SettingsUiPopupBox = args[i];
@@ -5921,7 +5928,8 @@ internal static class App
             return 1;
         }
         Thread.Sleep(500);      // 沒畫完就截會得到半張圖，所以先讓它畫完
-        bool ok = SettingsUi.DumpFrame(opt.SettingsUiDump, 5000, out string detail, lines.Enqueue);
+        bool ok = SettingsUi.DumpFrame(opt.SettingsUiDump, opt.SettingsUiDumpAfterPalette, 5000,
+            out string detail, lines.Enqueue);
         SettingsUi.Close();
         while (lines.TryDequeue(out string? line)) evidence.Line(line);
         evidence.Line($"settings ui dump: ok={ok} detail={detail} path={opt.SettingsUiDump}");

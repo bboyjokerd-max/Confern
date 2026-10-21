@@ -538,6 +538,12 @@ internal partial class SettingsWindow : Window
 
         _saved = next;
         _palette = Palettes.CurrentId;
+
+        // 重新套用一次樣式（2026-10-21）。權杖現在會隨配色重算，但**控件手上握的是上一次的
+        // 筆刷實例**——不重新指派的話要重開程式才看得到新配色（改之前正是如此：輪盤變了、
+        // 設定頁沒變）。Apply 會把每一個命名控件重新指一次，所以一次呼叫就夠。
+        SettingsUi.StyleKit.Apply(this);
+
         MarkDirty();
     }
     private string CanonicalLanguage(string tag)

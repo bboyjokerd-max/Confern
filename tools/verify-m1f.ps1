@@ -43,6 +43,25 @@ function Inconclusive($name, $why) {
 $script:ExpectedChecks = 34
 function Expect([int]$n) { $script:ExpectedChecks += $n }
 
+# 量一個「列」的**像素對比**：最亮的像素 vs 最暗的像素（WCAG 相對亮度）。
+# 為什麼不是「不准接近白色」：2026-10-21 第一次寫守衛時這樣寫，然後在淺色配色（porcelain）
+# 上失敗——那一套的列本來就是淺底深字（實測 240 的列平均亮度），是對的。
+# 真正的不變式是「字跟底分得開」，與哪一邊亮無關；白底白字量出來是 1.0:1，深淺都會被抓到。
+function RowPixelContrast($bmp, [int]$y0, [int]$y1) {
+  $minL = 2.0; $maxL = -1.0
+  for ($y = $y0; $y -le $y1; $y++) {
+    for ($x = 0; $x -lt $bmp.Width; $x += 2) {
+      $px = $bmp.GetPixel($x, $y)
+      $f = { param($v) $s = $v / 255.0; if ($s -le 0.03928) { $s / 12.92 } else { [Math]::Pow(($s + 0.055) / 1.055, 2.4) } }
+      $l = 0.2126 * (& $f $px.R) + 0.7152 * (& $f $px.G) + 0.0722 * (& $f $px.B)
+      if ($l -lt $minL) { $minL = $l }
+      if ($l -gt $maxL) { $maxL = $l }
+    }
+  }
+  if ($maxL -lt 0) { return 0.0 }
+  return ($maxL + 0.05) / ($minL + 0.05)
+}
+
 # P1-3 (2026-10-02): the runner's own window instrument. S14.24 used to assert
 # `SettingsUi.IsOpen`, which is true after the FIRST open succeeds whatever the second
 # open did -- delete the singleton guard entirely and that check stayed green. Asking the
@@ -360,9 +379,118 @@ foreach ($ln in $itemLines) {
 Check 'S14.32c every dropdown row is legible (WCAG contrast >= 4.5:1)' (
   $itemLines.Count -ge 2 -and $minContrast -ge 4.5) "minContrast=${minContrast}:1 items=$($itemLines.Count)"
 
-Check 'S14.32d no dropdown row is drawn near-white (guards the 2026-10-21 white-on-white bug)' (
-  $worstRow -gt 0 -and $worstRow -lt 200) `
-  "brightestRowMean=$worstRow (white-on-white measures 243, seen 2026-10-21; healthy rows 51-60, selected row 73-79)"
+# 像素層的對比：白底白字（或淺底白字）在這裡是 1.0:1，宣告的顏色再怎麼正確也躲不掉。
+$minRowPx = 99.0
+if (Test-Path -LiteralPath $popupPng) {
+  $rb = [System.Drawing.Bitmap]::FromFile($popupPng)
+  $rn = $itemLines.Count
+  if ($rn -gt 0 -and $rb.Height -gt 0) {
+    $rh = [int]($rb.Height / $rn)
+    if ($rh -lt 1) { $rh = 1 }
+    for ($r = 0; $r -lt $rn; $r++) {
+      $c0 = $r * $rh
+      $c1 = [Math]::Min($c0 + $rh - 1, $rb.Height - 1)
+      $v = RowPixelContrast $rb $c0 $c1
+      if ($v -lt $minRowPx) { $minRowPx = $v }
+    }
+  }
+  $rb.Dispose()
+}
+Check 'S14.32d every dropdown row really has legible pixels (guards the 2026-10-21 white-on-white bug)' (
+  $minRowPx -lt 99.0 -and $minRowPx -ge 4.5) `
+  "minRowPixelContrast=$([Math]::Round($minRowPx, 1)):1 (white-on-white measures 1.0:1; healthy rows 13-19:1 in every direction)"
+Expect 3
+
+# ---- S14.32e-g: EVERY selectable palette, not just the one this machine happens to use -------
+# 2026-10-21: the first fix for white-on-white selected SelectedBg for the highlighted row. It
+# measured 5.8:1 on midnight (this box's palette) and was fine — but the user's real settings are
+# graphite, where SelFill is a mid grey #787B7E and white text sits at 4.3:1, below WCAG AA.
+# A guard that only ever looks at one palette cannot see that. So: dump the dropdown in all six
+# and require every one of them to pass. porcelain (the light palette, exposed the same day) is the
+# one that would have broken silently too - its "dim" tokens had to be re-derived toward black.
+$allPalettes = @('midnight', 'graphite', 'citrus', 'celadon', 'plum', 'porcelain')
+$perPalette = @()
+$worstAll = 99.0;   $worstAllPal = ''
+$brightest = 99.0;  $brightestPal = ''
+$minItems = 99
+foreach ($pal in $allPalettes) {
+  $palFile = Join-Path $uiWork "palette-$pal.json"
+  Set-Content -LiteralPath $palFile -Value "{ `"Language`": `"en`", `"Palette`": `"$pal`" }" -Encoding UTF8
+  $palPng = Join-Path $uiWork "palette-$pal.png"
+  $palLog = Join-Path $uiWork "palette-$pal.log"
+  $palProc = Start-Process -FilePath $Exe -ArgumentList @(
+    '--settings-ui-dump-popup', $palPng, '--settings-ui-popup-box', 'PaletteBox',
+    '--settings-file', $palFile, '--quiet', '--log', $palLog) -PassThru -WindowStyle Hidden
+  $palOk = $palProc.WaitForExit(20000)
+  if (-not $palOk) { $palProc.Kill(); $palProc.WaitForExit(5000) | Out-Null }
+
+  $palItems = @()
+  if (Test-Path -LiteralPath $palLog) {
+    $palItems = @(Get-Content -LiteralPath $palLog | Where-Object { $_ -match 'popup item \d+:' })
+  }
+  $palMin = 99.0
+  foreach ($ln in $palItems) {
+    if ($ln -match 'contrast=([0-9.]+):1') {
+      $v = [double]$Matches[1]
+      if ($v -lt $palMin) { $palMin = $v }
+    }
+  }
+  if ($palItems.Count -lt $minItems) { $minItems = $palItems.Count }
+  if ($palMin -lt $worstAll) { $worstAll = $palMin; $worstAllPal = $pal }
+
+  $palBright = 0
+  if (Test-Path -LiteralPath $palPng) {
+    $pb = [System.Drawing.Bitmap]::FromFile($palPng)
+    $n = $palItems.Count
+    if ($n -gt 0 -and $pb.Height -gt 0) {
+      $rowH = [int]($pb.Height / $n)
+      if ($rowH -lt 1) { $rowH = 1 }
+      for ($r = 0; $r -lt $n; $r++) {
+        $y0 = $r * $rowH
+        $y1 = [Math]::Min($y0 + $rowH - 1, $pb.Height - 1)
+        $sum = 0; $cnt = 0
+        for ($y = $y0; $y -le $y1; $y++) {
+          for ($x = 0; $x -lt $pb.Width; $x++) {
+            $px = $pb.GetPixel($x, $y)
+            $sum += [int](($px.R + $px.G + $px.B) / 3); $cnt++
+          }
+        }
+        if ($cnt -gt 0) {
+          $mean = [int]($sum / $cnt)
+          if ($mean -gt $palBright) { $palBright = $mean }
+        }
+      }
+    }
+    $pb.Dispose()
+  }
+  # 像素層的對比（與 S14.32d 同一個量法）：淺底深字與深底淺字都會過，白底白字不會。
+  $palPx = 99.0
+  if (Test-Path -LiteralPath $palPng) {
+    $pq = [System.Drawing.Bitmap]::FromFile($palPng)
+    $qn = $palItems.Count
+    if ($qn -gt 0 -and $pq.Height -gt 0) {
+      $qh = [int]($pq.Height / $qn)
+      if ($qh -lt 1) { $qh = 1 }
+      for ($r = 0; $r -lt $qn; $r++) {
+        $q0 = $r * $qh
+        $q1 = [Math]::Min($q0 + $qh - 1, $pq.Height - 1)
+        $v = RowPixelContrast $pq $q0 $q1
+        if ($v -lt $palPx) { $palPx = $v }
+      }
+    }
+    $pq.Dispose()
+  }
+  if ($palPx -lt $brightest) { $brightest = $palPx; $brightestPal = $pal }
+  $perPalette += "$pal(items=$($palItems.Count) declared=$palMin pixels=$([Math]::Round($palPx, 1)))"
+}
+
+Check 'S14.32e every palette lists all six palettes in the dropdown' ($minItems -eq 6) `
+  "itemsPerPalette=$($perPalette -join ' ')"
+Check 'S14.32f the dropdown is legible in EVERY palette (WCAG >= 4.5:1)' ($worstAll -ge 4.5) `
+  "worst=$worstAllPal $worstAll`:1; all=[$($perPalette -join ' ')]"
+Check 'S14.32g every palette''s dropdown rows have legible pixels (light palettes included)' `
+  ($brightest -lt 99.0 -and $brightest -ge 4.5) `
+  "worstPixels=$brightestPal $([Math]::Round($brightest,1)):1 (white-on-white = 1.0:1); porcelain is the light one"
 Expect 3
 
 "=== S14.34-S14.35 diagnostics: OFF means essential events only, not silence ==="

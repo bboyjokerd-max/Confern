@@ -759,7 +759,22 @@ internal static class SettingsUi
     /// 整張只有 1 種顏色＝空白圖，這種圖不寫檔、回 false 並說出原因。
     /// 也就是說：回 true 保證檔案裡有真的畫面，不會偶爾交出空白圖。
     /// </summary>
+    /// <summary>
+    /// 拍照前先換配色？用 <see cref="DumpFrame(string?, string, int, out string, Action{string})"/>。
+    /// </summary>
     public static bool DumpFrame(string path, int timeoutMs, out string detail, Action<string> log)
+        => DumpFrame(path, null, timeoutMs, out detail, log);
+
+    /// <summary>
+    /// 把設定頁拍成一張 PNG（<paramref name="switchPalette"/> 見下）。
+    ///
+    /// <paramref name="switchPalette"/> 非空時，會在**同一個行程內**先換成那套配色、重套樣式，
+    /// 然後才拍。為什麼需要這個入口：兩個行程各拍一張證明不了任何事——那時權杖是在建構
+    /// 視窗時就用對的配色算好的；「在 GUI 裡換配色，設定頁會不會跟著變」只有同一個行程
+    /// 換兩次才看得到（2026-10-21：改之前不會變，要重開程式才套用）。
+    /// </summary>
+    public static bool DumpFrame(string path, string? switchPalette, int timeoutMs,
+        out string detail, Action<string> log)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -776,6 +791,14 @@ internal static class SettingsUi
             SettingsWindow? w = _window;
             if (w == null || !w.IsLoaded)
                 return "(no settings window is open)";
+
+            if (!string.IsNullOrWhiteSpace(switchPalette))
+            {
+                if (!Palettes.TrySet(switchPalette, out Palette applied))
+                    return $"(unknown palette '{switchPalette}')";
+                StyleKit.Apply(w);
+                log($"settings ui dump: palette switched in-process to '{applied.Id}' before capture");
+            }
 
             w.UpdateLayout();
             int pw = (int)Math.Ceiling(w.ActualWidth);
@@ -991,7 +1014,7 @@ internal static class SettingsUi
 
     /// <summary>
     /// WCAG 2.1 的對比度（前景／背景），1:1 到 21:1。正文的門檻是 4.5:1、大字是 3:1。
-    /// 用它把「看不看得清楚」變成一个可斷言的數字。
+    /// 用它把「看不看得清楚」變成一個可斷言的數字。
     /// </summary>
     private static double Contrast(System.Windows.Media.Color a, System.Windows.Media.Color b)
     {
@@ -1137,56 +1160,129 @@ internal static class SettingsUi
     /// </summary>
     internal static class StyleKit
     {
-        /// <summary>不透明的視窗底色：<see cref="WheelDesign.Veil"/> 的顏色（暗罩本身是 .80，這裡取實心）。</summary>
-        public static readonly SolidColorBrush WindowBg = Opaque(WheelDesign.Veil);
+        // ---- 顏色權杖 ----------------------------------------------------------
+        //
+        // ⚠ 為什麼是屬性而不是 static readonly：直到 2026-10-21 這些是 static readonly，
+        // 在類別初始化的那一刻算一次。症狀是「在 GUI 裡換配色，輪盤變了、設定頁沒變」——
+        // 要重開程式才套用。現在 key 是 Palettes.CurrentId，換色票後第一次讀就重算
+        // （與下面 Font 同一個做法）。
+        //
+        // ⚠ 第二件事：**「淡一階」在淺色配色要往黑調，不是往白調**。原本這幾個權杖一律疊白：
+        // 深色底疊白＝變亮＝看得見；淺色底疊白＝幾乎同色＝看不見（冷瓷實測對比 1.05:1）。
+        // 現在方向由遮罩亮度決定（VeilIsLight），透明度百分比兩邊共用——所以五套深色配色的
+        // 輸出連一個位元都不變（驗收：五套的設定頁 dump 與改動前逐像素相同）。
+        private sealed record Tokens(
+            SolidColorBrush WindowBg, SolidColorBrush SurfaceBg, SolidColorBrush CardBorder,
+            SolidColorBrush TextMain, SolidColorBrush TextDim, SolidColorBrush TextFaint,
+            SolidColorBrush PrimaryBg, SolidColorBrush PrimaryFg, SolidColorBrush SecondaryBorder,
+            SolidColorBrush WarningFg, SolidColorBrush StubFg, SolidColorBrush FailFg,
+            SolidColorBrush SelectedBg, SolidColorBrush HoverBg,
+            SolidColorBrush CropMask, SolidColorBrush SelectionStroke, SolidColorBrush HandleFill);
 
-        /// <summary>卡片／輸入框底：白 5 % 疊在視窗底色上（輪盤沒有這個權杖，因為它沒有卡片）。</summary>
-        public static readonly SolidColorBrush SurfaceBg = Opaque(WheelDesign.Veil, GdiColors.White, 13);
+        private static Tokens? _tokens;
+        private static string _tokensFor = "";
+
+        /// <summary>現在這套配色的權杖。換配色（<see cref="Palettes.CurrentId"/> 變了）就重算一次。</summary>
+        private static Tokens T
+        {
+            get
+            {
+                string id = Palettes.CurrentId;
+                if (_tokens == null || !string.Equals(_tokensFor, id, StringComparison.Ordinal))
+                {
+                    _tokens = BuildTokens();
+                    _tokensFor = id;
+                }
+                return _tokens;
+            }
+        }
+
+        /// <summary>遮罩夠亮嗎？決定「淡一階」要疊黑還是疊白。</summary>
+        private static bool VeilIsLight()
+        {
+            GdiColor veil = WheelDesign.Veil;
+            return RelativeLuminance(System.Windows.Media.Color.FromRgb(veil.R, veil.G, veil.B)) > 0.5;
+        }
+
+        private static Tokens BuildTokens()
+        {
+            GdiColor veil = WheelDesign.Veil;
+            // 深色配色疊白、淺色配色疊黑；百分比共用 ⇒ 深色配色的輸出與改動前完全相同。
+            GdiColor dimStep = VeilIsLight() ? GdiColors.Black : GdiColors.White;
+            return new Tokens(
+                WindowBg: Opaque(veil),
+                SurfaceBg: Opaque(veil, GdiColors.White, 13),
+                CardBorder: Opaque(veil, WheelDesign.Rim, 46),
+                TextMain: Opaque(veil, WheelDesign.Label, 255),
+                TextDim: Opaque(veil, dimStep, 158),
+                TextFaint: Opaque(veil, dimStep, 107),
+                PrimaryBg: Opaque(WheelDesign.Rim),
+                PrimaryFg: Opaque(WheelDesign.CapFg),
+                SecondaryBorder: Opaque(WheelDesign.SelStroke),
+                WarningFg: Opaque(WheelDesign.SelStroke),
+                StubFg: Opaque(WheelDesign.SelStroke),
+                FailFg: Opaque(WheelDesign.NoticeFill),
+                SelectedBg: Opaque(WheelDesign.SelFill),
+                HoverBg: Opaque(veil, dimStep, 26),
+                CropMask: new SolidColorBrush(System.Windows.Media.Color.FromArgb(
+                    153, WheelDesign.Veil.R, WheelDesign.Veil.G, WheelDesign.Veil.B)),
+                SelectionStroke: new SolidColorBrush(System.Windows.Media.Color.FromArgb(
+                    255, WheelDesign.SelStroke.R, WheelDesign.SelStroke.G, WheelDesign.SelStroke.B)),
+                HandleFill: new SolidColorBrush(System.Windows.Media.Color.FromArgb(
+                    255, WheelDesign.Label.R, WheelDesign.Label.G, WheelDesign.Label.B)));
+        }
+
+        /// <summary>不透明的視窗底色：<see cref="WheelDesign.Veil"/> 的顏色（暗罩本身是 .80，這裡取實心）。</summary>
+        public static SolidColorBrush WindowBg => T.WindowBg;
+
+        /// <summary>卡片／輸入框底：白 13 % 疊在視窗底色上（輪盤沒有這個權杖，因為它沒有卡片）。</summary>
+        public static SolidColorBrush SurfaceBg => T.SurfaceBg;
 
         /// <summary>卡片外框：外緣薄荷 <see cref="WheelDesign.Rim"/> 的顏色，透明度壓到 18 %（原 55 % 太重）。</summary>
-        public static readonly SolidColorBrush CardBorder = Opaque(WheelDesign.Veil, WheelDesign.Rim, 46);
+        public static SolidColorBrush CardBorder => T.CardBorder;
 
         /// <summary>主要內文＝<see cref="WheelDesign.Label"/>（輪盤標籤白）。</summary>
-        public static readonly SolidColorBrush TextMain = Opaque(WheelDesign.Veil, WheelDesign.Label, 255);
-
-        /// <summary>說明文字＝白 62 % 疊底（沿用輪盤「未選中標籤要壓暗」的 <see cref="WheelDesign.LabelDimOpacity"/> 家族）。</summary>
-        public static readonly SolidColorBrush TextDim = Opaque(WheelDesign.Veil, GdiColors.White, 158);
-
-        /// <summary>更弱的一層（設定檔路徑、區塊標題）。</summary>
-        public static readonly SolidColorBrush TextFaint = Opaque(WheelDesign.Veil, GdiColors.White, 107);
-
-        /// <summary>主要按鈕底＝外緣薄荷 <see cref="WheelDesign.Rim"/>（實心；配深字對比約 17:1）。</summary>
-        public static readonly SolidColorBrush PrimaryBg = Opaque(WheelDesign.Rim);
-
-        /// <summary>主要按鈕字＝<see cref="WheelDesign.CapFg"/>（近黑深青）。</summary>
-        public static readonly SolidColorBrush PrimaryFg = Opaque(WheelDesign.CapFg);
-
-        /// <summary>次要按鈕框＝琥珀 <see cref="WheelDesign.SelStroke"/>（與「選中外框」、「警告」、「尚未生效」同一色）。</summary>
-        public static readonly SolidColorBrush SecondaryBorder = Opaque(WheelDesign.SelStroke);
-
-        /// <summary>警告文字（含 Shift 的規格警告）＝琥珀。</summary>
-        public static readonly SolidColorBrush WarningFg = Opaque(WheelDesign.SelStroke);
-
-        /// <summary>「尚未生效」標記＝琥珀。</summary>
-        public static readonly SolidColorBrush StubFg = Opaque(WheelDesign.SelStroke);
-
-        /// <summary>失敗訊息＝<see cref="WheelDesign.NoticeFill"/>（產品內「這是錯誤」的唯一紅）。</summary>
-        public static readonly SolidColorBrush FailFg = Opaque(WheelDesign.NoticeFill);
-
-        /// <summary>選中／作用中＝選中扇區填色 <see cref="WheelDesign.SelFill"/>（實心 #3F6B7A）。</summary>
-        public static readonly SolidColorBrush SelectedBg = Opaque(WheelDesign.SelFill);
+        public static SolidColorBrush TextMain => T.TextMain;
 
         /// <summary>
-        /// 下拉清單「滑鼠移上去」那一列的底色＝白 26 % 疊在視窗底色上（<see cref="SurfaceBg"/>
-        /// 是 13 %，這裡刻意是它的兩倍：要看得出來比靜止亮，又不能亮到跟
-        /// <see cref="SelectedBg"/> 混淆）。
+        /// 說明文字：深色配色＝白 62 % 疊底；**淺色配色＝黑 62 % 疊底**（往白調會在淺底上消失）。
+        /// </summary>
+        public static SolidColorBrush TextDim => T.TextDim;
+
+        /// <summary>更弱的一層（設定檔路徑、區塊標題）。同樣依配色的明暗決定疊黑或疊白。</summary>
+        public static SolidColorBrush TextFaint => T.TextFaint;
+
+        /// <summary>主要按鈕底＝外緣薄荷 <see cref="WheelDesign.Rim"/>（實心；配深字對比約 17:1）。</summary>
+        public static SolidColorBrush PrimaryBg => T.PrimaryBg;
+
+        /// <summary>主要按鈕字＝<see cref="WheelDesign.CapFg"/>（近黑深青）。</summary>
+        public static SolidColorBrush PrimaryFg => T.PrimaryFg;
+
+        /// <summary>次要按鈕框＝琥珀 <see cref="WheelDesign.SelStroke"/>（與「選中外框」、「警告」、「尚未生效」同一色）。</summary>
+        public static SolidColorBrush SecondaryBorder => T.SecondaryBorder;
+
+        /// <summary>警告文字（含 Shift 的規格警告）＝琥珀。</summary>
+        public static SolidColorBrush WarningFg => T.WarningFg;
+
+        /// <summary>「尚未生效」標記＝琥珀。</summary>
+        public static SolidColorBrush StubFg => T.StubFg;
+
+        /// <summary>失敗訊息＝<see cref="WheelDesign.NoticeFill"/>（產品內「這是錯誤」的唯一紅）。</summary>
+        public static SolidColorBrush FailFg => T.FailFg;
+
+        /// <summary>選中／作用中＝選中扇區填色 <see cref="WheelDesign.SelFill"/>（深色配色是 #3F6B7A）。</summary>
+        public static SolidColorBrush SelectedBg => T.SelectedBg;
+
+        /// <summary>
+        /// 下拉清單「滑鼠移上去／目前選中」那一列的底色：比 <see cref="SurfaceBg"/> 再差一階
+        /// （深色配色疊白 26 %、淺色配色疊黑 26 %）。
         ///
         /// 為什麼非得有這個權杖：WPF 預設的 <c>ComboBoxItem</c> 樣式在 IsHighlighted／IsSelected
         /// 時會把那一列**直接改成主題的淺色底**（模板裡的 setter，不是屬性），而字色是我們設的
         /// 近白 ⇒ 白底白字。2026-10-21 使用者回報的正是這個：下拉一展開，選取中的那一列看不見。
         /// 實測（--settings-ui-dump-popup）：修好前那一列平均亮度 243，其餘五列 51–53。
         /// </summary>
-        public static readonly SolidColorBrush HoverBg = Opaque(WheelDesign.Veil, GdiColors.White, 26);
+        public static SolidColorBrush HoverBg => T.HoverBg;
 
         // ---- 裁切視窗（M3 第四顆扇形）----
         // 這三個是**唯一**允許帶透明度的筆刷：它們疊在「使用者自己的照片」上，而不是疊在
@@ -1195,16 +1291,13 @@ internal static class SettingsUi
         // 「被選取的範圍」在全產品是同一個顏色。
 
         /// <summary>裁切框**以外**的暗化遮罩：暗罩 <see cref="WheelDesign.Veil"/> 壓到 60 %。</summary>
-        public static readonly SolidColorBrush CropMask = new(System.Windows.Media.Color.FromArgb(
-            153, WheelDesign.Veil.R, WheelDesign.Veil.G, WheelDesign.Veil.B));
+        public static SolidColorBrush CropMask => T.CropMask;
 
         /// <summary>裁切框線與把手外框＝琥珀 <see cref="WheelDesign.SelStroke"/>（與「選中扇區」同一色）。</summary>
-        public static readonly SolidColorBrush SelectionStroke = new(System.Windows.Media.Color.FromArgb(
-            255, WheelDesign.SelStroke.R, WheelDesign.SelStroke.G, WheelDesign.SelStroke.B));
+        public static SolidColorBrush SelectionStroke => T.SelectionStroke;
 
         /// <summary>把手填色＝輪盤標籤白 <see cref="WheelDesign.Label"/>（實心，抓得到的那一種白）。</summary>
-        public static readonly SolidColorBrush HandleFill = new(System.Windows.Media.Color.FromArgb(
-            255, WheelDesign.Label.R, WheelDesign.Label.G, WheelDesign.Label.B));
+        public static SolidColorBrush HandleFill => T.HandleFill;
 
         /// <summary>字體。無襯線；中文用 <c>Microsoft JhengHei UI</c>，缺字時 WPF 自己往後退。</summary>
         /// <summary>
@@ -1325,12 +1418,15 @@ internal static class SettingsUi
             foreach (ToggleButton toggle in new[]
             { window.StartupToggle, window.HotkeyToggle, window.DiagnosticsToggle })
             {
-                toggle.Background = SurfaceBg;
                 toggle.Foreground = TextMain;
-                toggle.BorderBrush = CardBorder;
                 toggle.FontFamily = Font;
                 toggle.Template = ToggleTemplate();
                 toggle.Cursor = System.Windows.Input.Cursors.Hand;
+                // **狀態由這裡還原，不是由呼叫端**：先前的寫法是無條件設 Background = SurfaceBg，
+                // 於是「換配色」重跑這一段時，本來是「開」的開關會被悄悄打回「關」（2026-10-21
+                // 用 --settings-ui-dump-after-palette 量到：切換後那兩顆的像素既不是新配色也不是
+                // 舊配色，因為它們停在關的底色上）。Apply 是「整頁重新上色」的唯一入口，狀態也歸它。
+                SetToggleState(toggle, toggle.IsChecked == true);
             }
         }
 
@@ -1408,9 +1504,28 @@ internal static class SettingsUi
         }
 
         /// <summary>共用一份：同一個 <see cref="Style"/> 可以套在任意數量的控制項上。</summary>
-        private static Style ComboItemStyle => _comboItemStyle ??= BuildComboItemStyle();
+        /// <summary>
+        /// 下拉項目的樣式。**依配色快取**：這個樣式包著 <see cref="HoverBg"/> 與
+        /// <see cref="SecondaryBorder"/>，換配色時若不重建，滑過與選中的顏色會留在上一套，
+        /// 於是「頁面其他部分都換了，只有清單那一列沒換」。
+        /// </summary>
+        private static Style ComboItemStyle
+        {
+            get
+            {
+                string id = Palettes.CurrentId;
+                if (_comboItemStyle == null ||
+                    !string.Equals(_comboItemStyleFor, id, StringComparison.Ordinal))
+                {
+                    _comboItemStyle = BuildComboItemStyle();
+                    _comboItemStyleFor = id;
+                }
+                return _comboItemStyle;
+            }
+        }
 
         private static Style? _comboItemStyle;
+        private static string _comboItemStyleFor = "";
 
         /// <summary>
         /// 一列下拉選項的樣式。**自己給 ControlTemplate**，不讓主題的 ComboBoxItem 樣式有機會
