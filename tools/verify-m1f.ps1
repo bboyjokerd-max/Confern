@@ -493,6 +493,126 @@ Check 'S14.32g every palette''s dropdown rows have legible pixels (light palette
   "worstPixels=$brightestPal $([Math]::Round($brightest,1)):1 (white-on-white = 1.0:1); porcelain is the light one"
 Expect 3
 
+# =============================================================================================
+"=== S14.38 the dropdown boxes that are NOT open (the bug that survived two fixes) ==="
+# 2026-10-22, the user's third report: "為何設定框裡的下拉選單還是一樣白底白字?"
+#
+# He was right, and both earlier fixes were aimed at the wrong half. S14.32b-g above measure the
+# dropdown LIST -- the popup that opens. That list was already correct (18.9:1 rows). What was
+# white-on-white was the box itself, the part that is on screen all the time:
+#
+#     box                before this fix    after
+#     LanguageBox        bg=#E7E7E7 fg=#FFFFFF  1.2:1      bg=#111112 fg=#FFFFFF  18.9:1
+#     TriggerPresetBox   bg=#7EB4EA fg=#FFFFFF  2.2:1      bg=#111112 fg=#FFFFFF  18.9:1
+#
+# Aero2's ComboBox ControlTemplate never paints our Background inside the box; it paints the theme
+# surface (light grey, and pale blue on hover), and our text is near-white. So the whole row of six
+# dropdowns was illegible while every popup measurement stayed green.
+#
+# The measurement below takes the box rects from the product (`settings ui combo:` lines) and then
+# reads ONLY pixels from the page PNG. Sensitivity is not assumed: the same rects on the previous
+# build's page dump read 1.1-2.2:1, i.e. this check would have gone red.
+$comboImg = Join-Path $uiWork 'page-after.png'
+$comboLog = Join-Path $uiWork 'page-after.log'
+# 用真實設定的一份複本：要看到的就是使用者此刻看到的畫面（繁中＋石墨），但絕不寫回他的檔案。
+$comboCfg = Join-Path $uiWork 'combo-real.json'
+Copy-Item -LiteralPath $realSettings -Destination $comboCfg -Force -EA SilentlyContinue
+$comboRun = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump', $comboImg, '--settings-file', $comboCfg, '--log', $comboLog) -PassThru -WindowStyle Hidden
+$comboDone = $comboRun.WaitForExit(25000)
+if (-not $comboDone) { $comboRun.Kill(); $comboRun.WaitForExit(5000) | Out-Null }
+$comboText = if (Test-Path -LiteralPath $comboLog) { Get-Content -LiteralPath $comboLog -Raw -Encoding UTF8 } else { '' }
+$combos = @()
+foreach ($line in ($comboText -split "`r?`n")) {
+  if ($line -match 'settings ui combo: (\S+) rect=(\d+),(\d+),(\d+)x(\d+) selected=''?(.+?)''?$') {
+    $combos += [pscustomobject]@{ Name = $Matches[1]; X = [int]$Matches[2]; Y = [int]$Matches[3]; W = [int]$Matches[4]; H = [int]$Matches[5]; Sel = $Matches[6] }
+  }
+}
+# 去重（同一份 dump 會因為多次 UpdateLayout 印好幾輪）
+$combos = @($combos | Sort-Object Name, X, Y -Unique)
+$comboBad = @(); $comboDetail = @()
+# WCAG 相對亮度。這裡刻意不沿用 RowPixelContrast：那個量的是「整列最暗 vs 最亮」，
+# 用在這一格時會把 1px 外框也算進去；下拉框要問的是「框底（最常見的顏色）vs 字（最亮的像素）」。
+function LumOfArgb([int]$r, [int]$g, [int]$b) {
+  $chan = {
+    param([int]$v)
+    $s = $v / 255.0
+    if ($s -le 0.03928) { return $s / 12.92 }
+    return [Math]::Pow(($s + 0.055) / 1.055, 2.4)
+  }
+  return 0.2126 * (& $chan $r) + 0.7152 * (& $chan $g) + 0.0722 * (& $chan $b)
+}
+if ($combos.Count -gt 0 -and (Test-Path -LiteralPath $comboImg)) {
+  $cBmp = [System.Drawing.Bitmap]::FromFile($comboImg)
+  foreach ($c in $combos) {
+    $hist = @{}
+    for ($y = $c.Y; $y -lt [Math]::Min($c.Y + $c.H, $cBmp.Height); $y++) {
+      for ($x = $c.X; $x -lt [Math]::Min($c.X + $c.W, $cBmp.Width); $x++) {
+        $px = $cBmp.GetPixel($x, $y)
+        $k = ('{0:X2}{1:X2}{2:X2}' -f $px.R, $px.G, $px.B)
+        if ($hist.ContainsKey($k)) { $hist[$k] = $hist[$k] + 1 } else { $hist[$k] = 1 }
+      }
+    }
+    $bgKey = ($hist.GetEnumerator() | Sort-Object Value -Descending)[0].Key
+    $bgL = LumOfArgb ([Convert]::ToInt32($bgKey.Substring(0,2),16)) ([Convert]::ToInt32($bgKey.Substring(2,2),16)) ([Convert]::ToInt32($bgKey.Substring(4,2),16))
+    # 「字」＝與底色亮度差最多的那個顏色，但必須佔至少 0.5% 的像素：
+    # 一是免得一格反鋸齒雜點把對比撐高；二是不能只取「最亮的像素」——
+    # 那假設了深底淺字。冷瓷是淺底深字（#12161A 疊 #F3F5F6，實測 16.6:1），
+    # 用「最亮」去量會得到 1.0:1 的假失敗（2026-10-22 我自己就踩了這個）。
+    $minCount = [Math]::Max(8, [int](0.005 * $c.W * $c.H))
+    $bestD = -1.0; $fgKey = $bgKey; $fgL = $bgL
+    foreach ($e in $hist.GetEnumerator()) {
+      if ($e.Value -lt $minCount -or $e.Key -eq $bgKey) { continue }
+      $l = LumOfArgb ([Convert]::ToInt32($e.Key.Substring(0,2),16)) ([Convert]::ToInt32($e.Key.Substring(2,2),16)) ([Convert]::ToInt32($e.Key.Substring(4,2),16))
+      if ([Math]::Abs($l - $bgL) -gt $bestD) { $bestD = [Math]::Abs($l - $bgL); $fgKey = $e.Key; $fgL = $l }
+    }
+    $hiL = [Math]::Max($bgL, $fgL); $loL = [Math]::Min($bgL, $fgL)
+    $ratio = ($hiL + 0.05) / ($loL + 0.05)
+    $comboDetail += ("{0}=bg#{1}/fg#{2}/{3:0.0}:1" -f $c.Name, $bgKey, $fgKey, $ratio)
+    if ($ratio -lt 4.5) { $comboBad += ("{0}({1:0.0}:1 bg=#{2} fg=#{3})" -f $c.Name, $ratio, $bgKey, $fgKey) }
+  }
+  $cBmp.Dispose()
+}
+Check 'S14.38a every closed dropdown box is legible in the real pixels of the page' `
+  ($comboDone -and $comboRun.ExitCode -eq 0 -and $combos.Count -ge 6 -and $comboBad.Count -eq 0) `
+  ($(if ($comboBad.Count -gt 0) { 'BAD=' + ($comboBad -join ' ') } else { "boxes=$($combos.Count) all>=4.5:1 " }) + ($comboDetail -join ' '))
+
+# 展開的清單也不能有任何「白底」的列：列底最常見的顏色若是近白，就是白底。
+# 這比量「項目對比」更接近使用者看到的東西——上次就是項目一路 18.9:1 而面板其實是白的
+# （Border#DropDownBorder bg=#FFFFFF），列與列之間的縫全是白線。
+$popupWhite = @()
+foreach ($boxName in @('TriggerPresetBox','LanguageBox','PaletteBox','OutputPresetBox','CompressModeBox','CompressUnitBox')) {
+  $bp = Join-Path $uiWork ("whitecheck-" + $boxName + ".png")
+  $bl = Join-Path $uiWork ("whitecheck-" + $boxName + ".log")
+  Remove-Item -LiteralPath $bp -EA SilentlyContinue
+  $bpRun = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump-popup', $bp, '--settings-ui-popup-box', $boxName, '--settings-file', $comboCfg, '--log', $bl) -PassThru -WindowStyle Hidden
+  $bpDone = $bpRun.WaitForExit(25000)
+  if (-not $bpDone) { $bpRun.Kill(); $bpRun.WaitForExit(5000) | Out-Null }
+  if (-not (Test-Path -LiteralPath $bp)) { $popupWhite += "$boxName(no png)"; continue }
+  $pBmp = [System.Drawing.Bitmap]::FromFile($bp)
+  $whiteRows = 0; $firstWhite = @()
+  for ($y = 0; $y -lt $pBmp.Height; $y++) {
+    $hist2 = @{}
+    for ($x = 0; $x -lt $pBmp.Width; $x++) {
+      $px2 = $pBmp.GetPixel($x, $y)
+      $k2 = ('{0:X2}{1:X2}{2:X2}' -f $px2.R, $px2.G, $px2.B)
+      if ($hist2.ContainsKey($k2)) { $hist2[$k2] = $hist2[$k2] + 1 } else { $hist2[$k2] = 1 }
+    }
+    $top2 = ($hist2.GetEnumerator() | Sort-Object Value -Descending)[0].Key
+    if ([Convert]::ToInt32($top2.Substring(0,2),16) -ge 200 -and
+        [Convert]::ToInt32($top2.Substring(2,2),16) -ge 200 -and
+        [Convert]::ToInt32($top2.Substring(4,2),16) -ge 200) {
+      $whiteRows++
+      if ($firstWhite.Count -lt 4) { $firstWhite += $y }
+    }
+  }
+  $pBmp.Dispose()
+  if ($whiteRows -gt 0) { $popupWhite += ("{0}({1} white rows at y={2})" -f $boxName, $whiteRows, ($firstWhite -join ',')) }
+}
+Check 'S14.38b no open dropdown has a white background row under the text' `
+  ($popupWhite.Count -eq 0) `
+  $(if ($popupWhite.Count -gt 0) { 'BAD ' + ($popupWhite -join '; ') } else { 'six dropdowns: 0 white rows each (background is the card surface, not the theme white)' })
+Expect 2
+
 "=== S14.34-S14.35 diagnostics: OFF means essential events only, not silence ==="
 # The semantics were settled by the user on 2026-10-02: OFF = essential events only, ON = plus the
 # high-frequency detail lines. Both directions are asserted here, because a switch that is only ever

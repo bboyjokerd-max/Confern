@@ -810,6 +810,23 @@ internal static class SettingsUi
             // 每一次 dump 都印一行，任何語言的截字／溢出都留下證據。
             log($"settings ui layout: {LayoutReport(w)}");
 
+            // 下拉選單**收起來**的那個框（2026-10-22 第三次回報的真正病灶）。
+            //
+            // 這裡刻意只報「位置」與「現在顯示什麼字」，顏色一律交給驗收腳本從 PNG 上量。
+            // 這個 bug 存活兩輪，正是因為我量的都是「我宣告了什麼」而不是「畫面畫了什麼」：
+            // Aero2 的 ComboBox 樣板根本不會把我們的 Background 畫進框裡，框底還是主題的白
+            // （換樣板前在 y=150 實測 #EAF3FC），而我們的字是近白 ⇒ 白底白字；
+            // 但 `popup item` 那幾行（讀項目的屬性）一路都是漂亮的 18.9:1，看起來完全健康。
+            foreach (ComboBox cb in AllDescendants(w).OfType<ComboBox>())
+            {
+                string nm = string.IsNullOrEmpty(cb.Name) ? "-" : cb.Name;
+                System.Windows.Point origin = cb.TransformToAncestor(w).Transform(new System.Windows.Point(0, 0));
+                log($"settings ui combo: {nm} " +
+                    $"rect={(int)Math.Round(origin.X)},{(int)Math.Round(origin.Y)}," +
+                    $"{(int)Math.Round(cb.ActualWidth)}x{(int)Math.Round(cb.ActualHeight)} " +
+                    $"selected='{Shorten(cb.Text, 18)}'");
+            }
+
             DpiScale dpi = VisualTreeHelper.GetDpi(w);
             var rtb = new RenderTargetBitmap((int)Math.Ceiling(pw * dpi.DpiScaleX),
                                              (int)Math.Ceiling(ph * dpi.DpiScaleY),
@@ -1084,6 +1101,33 @@ internal static class SettingsUi
                 SolidColorBrush? panelBrush = panelBg as SolidColorBrush;
                 Log(log, $"popup backdrop: box={boxName} size={cw}x{ch} " +
                          $"type={panel.GetType().Name} bg={BrushText(panelBg)} border={BrushText(panelBorder)}");
+                // 面板內部誰在畫白？逐層印出來（2026-10-22：使用者回報「還是一樣白底白字」，
+                // 而 popup item 印的是**屬性值**不是**畫出來的像素**——列的縫隙其實是白的，
+                // 所以要看的是實際視覺樹裡每個元素自己的底色）。
+                int depth = 0;
+                var queue = new Queue<(DependencyObject Node, int Depth)>();
+                queue.Enqueue((panel, 0));
+                while (queue.Count > 0 && depth < 40)
+                {
+                    (DependencyObject node, int level) = queue.Dequeue();
+                    if (node is FrameworkElement fe && level <= 4)
+                    {
+                        string bgText = fe switch
+                        {
+                            Border b2 => BrushText(b2.Background),
+                            Control c3 => BrushText(c3.Background),
+                            System.Windows.Controls.Panel p3 => BrushText(p3.Background),
+                            _ => "-"
+                        };
+                        Log(log, $"popup tree {level}: {fe.GetType().Name}" +
+                                 $"{(string.IsNullOrEmpty(fe.Name) ? "" : "#" + fe.Name)} bg={bgText}" +
+                                 $" size={fe.ActualWidth:0.#}x{fe.ActualHeight:0.#}");
+                        depth++;
+                    }
+                    int n = VisualTreeHelper.GetChildrenCount(node);
+                    for (int k = 0; k < n; k++)
+                        queue.Enqueue((VisualTreeHelper.GetChild(node, k), level + 1));
+                }
                 for (int i = 0; i < box.Items.Count; i++)
                 {
                     if (box.ItemContainerGenerator.ContainerFromIndex(i) is not ComboBoxItem item)
@@ -1648,8 +1692,153 @@ internal static class SettingsUi
             box.Foreground = TextMain;
             box.BorderBrush = CardBorder;
             box.FontFamily = Font;
+            // 樣板也是我們的（2026-10-22：使用者第二次回報「還是一樣白底白字」）。
+            //
+            // 上一版只給了項目樣式，ComboBox 本身還是 Aero2 的預設樣板，而那個樣板把
+            // Popup 的內容包在一個 `Border#DropDownBorder`，底色是**純白**
+            // （實測：popup tree 1: Border#DropDownBorder bg=#FF:FF:FF 150x227）。
+            // 於是深色的列變成「白色面板上的深色小島」：列與列之間的縫隙、
+            // 面板的內距與圓角外緣全部是白的——11.9% 的 Popup 像素是純白。
+            // 這不是配色問題，是別人的樣板在畫白底；所以 Popup 面板必須自己畫。
+            box.Template = ComboTemplate;
             // 項目樣式給整個 ComboBox：Popup 裡那些列是它生出來的容器，會套用這一份。
             box.ItemContainerStyle = ComboItemStyle;
+        }
+
+        /// <summary>
+        /// ComboBox 的整副樣板：收起來的框、右邊的箭頭、以及**展開後那塊面板**。
+        ///
+        /// 展開面板（<c>DropDownPanel</c>）的底色跟著 <see cref="Control.BackgroundProperty"/>
+        /// 走——也就是 <see cref="SurfaceBg"/>，跟清單裡每一列的靜止色同一個值。這樣列與列之間
+        /// 就算有縫，透出來的也是同一個顏色，而不是主題的白。
+        /// </summary>
+        private static ControlTemplate? _comboTemplate;
+        private static string _comboTemplateFor = "";
+
+        private static ControlTemplate ComboTemplate
+        {
+            get
+            {
+                string id = Palettes.CurrentId;
+                if (_comboTemplate == null || !string.Equals(_comboTemplateFor, id, StringComparison.Ordinal))
+                {
+                    _comboTemplate = BuildComboTemplate();
+                    _comboTemplateFor = id;
+                }
+                return _comboTemplate;
+            }
+        }
+
+        private static ControlTemplate BuildComboTemplate()
+        {
+            var root = new FrameworkElementFactory(typeof(Grid));
+
+            // ---- 收起來的框：整塊都是可點區（ToggleButton 鋪滿），內容畫在它上面且不吃滑鼠 ----
+            var toggle = new FrameworkElementFactory(typeof(ToggleButton));
+            toggle.Name = "ToggleButton";
+            toggle.SetValue(FrameworkElement.CursorProperty, System.Windows.Input.Cursors.Hand);
+            toggle.SetValue(ToggleButton.FocusableProperty, false);
+            toggle.SetValue(ToggleButton.ClickModeProperty, ClickMode.Press);
+            toggle.SetValue(ToggleButton.IsCheckedProperty,
+                new System.Windows.Data.Binding("IsDropDownOpen") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent), Mode = System.Windows.Data.BindingMode.TwoWay });
+            toggle.SetValue(Control.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+            toggle.SetValue(Control.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+            toggle.SetValue(Control.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
+
+            var boxBorder = new FrameworkElementFactory(typeof(Border));
+            boxBorder.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+            boxBorder.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+            boxBorder.SetValue(Border.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
+            boxBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+            boxBorder.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
+            var toggleTemplate = new ControlTemplate(typeof(ToggleButton)) { VisualTree = boxBorder };
+            toggle.SetValue(Control.TemplateProperty, toggleTemplate);
+            root.AppendChild(toggle);
+
+            // ---- 現在選中的那個值 ----
+            var content = new FrameworkElementFactory(typeof(ContentPresenter));
+            content.Name = "ContentSite";
+            content.SetValue(FrameworkElement.MarginProperty, new Thickness(9, 0, 22, 0));
+            content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            content.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            content.SetValue(UIElement.IsHitTestVisibleProperty, false);
+            content.SetValue(System.Windows.Controls.ContentPresenter.ContentProperty,
+                new TemplateBindingExtension(ComboBox.SelectionBoxItemProperty));
+            content.SetValue(System.Windows.Controls.ContentPresenter.ContentTemplateProperty,
+                new TemplateBindingExtension(ComboBox.SelectionBoxItemTemplateProperty));
+            content.SetValue(System.Windows.Controls.ContentPresenter.ContentStringFormatProperty,
+                new TemplateBindingExtension(ComboBox.SelectionBoxItemStringFormatProperty));
+            root.AppendChild(content);
+
+            // ---- 右邊那顆箭頭 ----
+            var arrow = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path));
+            arrow.Name = "Arrow";
+            arrow.SetValue(System.Windows.Shapes.Path.DataProperty,
+                Geometry.Parse("M 0 0 L 7 0 L 3.5 4.5 Z"));
+            arrow.SetValue(System.Windows.Shapes.Shape.FillProperty,
+                new TemplateBindingExtension(Control.ForegroundProperty));
+            arrow.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+            arrow.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            arrow.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 1, 9, 0));
+            arrow.SetValue(UIElement.IsHitTestVisibleProperty, false);
+            root.AppendChild(arrow);
+
+            // ---- 展開的清單：面板自己畫底色（不再讓主題的白色 DropDownBorder 插手）----
+            var popup = new FrameworkElementFactory(typeof(Popup));
+            popup.Name = "PART_Popup";
+            popup.SetValue(Popup.PlacementProperty, PlacementMode.Bottom);
+            popup.SetValue(Popup.AllowsTransparencyProperty, true);
+            popup.SetValue(FrameworkElement.FocusableProperty, false);
+            popup.SetValue(Popup.PopupAnimationProperty, PopupAnimation.None);
+            popup.SetValue(Popup.IsOpenProperty,
+                new TemplateBindingExtension(ComboBox.IsDropDownOpenProperty));
+
+            var panel = new FrameworkElementFactory(typeof(Border));
+            panel.Name = "DropDownPanel";
+            panel.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+            panel.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+            panel.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+            panel.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+            panel.SetValue(Border.PaddingProperty, new Thickness(1));
+            panel.SetValue(FrameworkElement.MinWidthProperty,
+                new System.Windows.Data.Binding("ActualWidth") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
+
+            var scroll = new FrameworkElementFactory(typeof(ScrollViewer));
+            scroll.Name = "DropDownScrollViewer";
+            scroll.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
+            scroll.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
+            scroll.SetValue(FrameworkElement.MarginProperty, new Thickness(0));
+            scroll.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
+            scroll.SetValue(FrameworkElement.MaxHeightProperty,
+                new TemplateBindingExtension(ComboBox.MaxDropDownHeightProperty));
+
+            var items = new FrameworkElementFactory(typeof(ItemsPresenter));
+            scroll.AppendChild(items);
+            panel.AppendChild(scroll);
+            popup.AppendChild(panel);
+            root.AppendChild(popup);
+
+            var template = new ControlTemplate(typeof(ComboBox)) { VisualTree = root };
+
+            var over = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            over.Setters.Add(new Setter(Control.BorderBrushProperty, SecondaryBorder, "ToggleButton"));
+            template.Triggers.Add(over);
+
+            var open = new Trigger { Property = ComboBox.IsDropDownOpenProperty, Value = true };
+            open.Setters.Add(new Setter(Control.BorderBrushProperty, SecondaryBorder, "ToggleButton"));
+            template.Triggers.Add(open);
+
+            var off = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+            // 停用時淡掉，但**不能淡到看不見**：淺色配色（冷瓷）的底是 #F3F5F6，
+            // 字 #12161A 在 0.55 透明度下已經被洗成 3.8:1（我原本以為是 1.7:1，
+            // 那是「最亮像素」量法在淺底深字上的假數字）。0.7 實測：冷瓷 6.8:1、石墨 10.5:1，
+            // 既看得出是停用的，也還讀得到。
+            // 注意：這裡只能用 Opacity，不能用 Foreground——StyleCombo 把 Foreground 設成
+            // 「本地值」，而樣板觸發條件的優先序比本地值低，設了不會生效（2026-10-22 實測）。
+            off.Setters.Add(new Setter(UIElement.OpacityProperty, 0.7));
+            template.Triggers.Add(off);
+
+            return template;
         }
 
         /// <summary>共用一份：同一個 <see cref="Style"/> 可以套在任意數量的控制項上。</summary>
@@ -1703,7 +1892,10 @@ internal static class SettingsUi
             border.SetValue(Border.BorderThicknessProperty,
                             new TemplateBindingExtension(Control.BorderThicknessProperty));
             border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
-            border.SetValue(Border.MarginProperty, new Thickness(2, 1, 2, 1));
+            // 邊距 0：列與列要**齊平**。原本留 (2,1,2,1) 的縫，那 1-2px 透出來的是
+            // Popup 面板的底色——上一版面板還是主題的白，於是清單看起來像一條條白線
+            // （2026-10-22 實測：9 列就有 8 條純白橫線，y=25,26,50,51,…）。
+            border.SetValue(Border.MarginProperty, new Thickness(0));
             border.SetValue(Border.SnapsToDevicePixelsProperty, true);
 
             var content = new FrameworkElementFactory(typeof(ContentPresenter));
