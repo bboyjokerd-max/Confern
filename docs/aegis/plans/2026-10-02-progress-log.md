@@ -3434,3 +3434,38 @@ ActualWidth 寬」，但 TextBlock 的 `ClipToBounds` 預設 false——框比�
 
 **還沒做**：義／葡／荷等語言沒有表（系統語言是那些的一律顯示英文）。`labelColumn` 已到
 258-266px，再加語言（俄文／波蘭文這種長字）之前要先量，不要假設還有空間。
+### 2026-10-22 設定頁下拉選單白底白字：第三次回報，前兩次修錯了位置
+
+**使用者是對的，我前兩次改的是「展開的清單」，白的是「一直擺在畫面上的那個框」。**
+換樣板前用座標量頁面 PNG：`LanguageBox`／`PaletteBox`／`OutputPresetBox`／`CompressModeBox`
+底色 `#E7E7E7`、`TriggerPresetBox` 底色 `#7EB4EA`（Aero 的滑過淡藍），字都是 `#FFFFFF`
+⇒ **1.1–2.2:1**。原因是 Aero2 的 ComboBox 樣板**不會把我們的 Background 畫進框裡**，它自己
+畫主題的底色。而 `popup item` 那六行（讀的是項目屬性）一路 18.9:1，守衛因此是綠的。
+
+**展開的清單也不是全對**：把 Popup 的視覺樹印出來才看到 `Border#DropDownBorder bg=#FF:FF:FF`
+——面板是白的，我的深色列只是白色面板上的小島，列與列之間 1px 的縫全是白線
+（那張 PNG 有 11.9% 像素純白，集中在 y=25,26,50,51,…）。
+
+**修法**：`StyleKit.StyleCombo` 給每個下拉一份完整的 `ControlTemplate`——鋪滿的 ToggleButton
+（`IsChecked` 雙向綁 `IsDropDownOpen`）、`ContentPresenter` 綁 `SelectionBoxItem`、
+箭頭、以及 `AllowsTransparency=true` 的 Popup 裡一個底色＝`SurfaceBg` 的
+`Border#DropDownPanel`。項目列改成齊平（邊距 0）。結構上就不再有白色面板。
+
+**停用狀態重做過一次**：先試「字色換成 TextDim」，量出來完全沒變——`Foreground` 是
+`StyleCombo` 設的**本地值**，樣板觸發條件優先序比本地值低，那個 Setter 不會生效。
+改成 `Opacity=0.7`：停用的壓縮單位框冷瓷 6.4:1、石墨 9.4:1。
+
+**守衛**：`verify-m1f` S14.38a-b（44 → 46）。產品在每次頁面 dump 印出六個下拉的座標，
+驗收從 PNG 上量那一格：底色 vs「與它亮度差最多、且至少佔 0.5% 像素」的顏色。
+⚠ 這裡踩了兩次同類的坑：①「取最亮的像素」假設了深底淺字，冷瓷是淺底深字（`#12161A` 疊
+`#F3F5F6`），會量出 1.0:1 的假失敗；②把「亮度差」當成「亮度」代入算式也會算錯。
+敏感度不是假設的：同一組座標套在換樣板前的 dump 上，量到 1.1–2.2:1。
+
+**驗收**：六套真配色（midnight／graphite／porcelain／citrus／celadon／plum）× 六個下拉框，
+語言框 16.6–18.9:1、停用單位框 6.4–9.4:1，全部 ≥4.5:1；六個展開清單白底列 0 條；
+完整 12 套 **424 檢查：398 pass、0 fail、26 inconclusive**。
+
+⚠ 順手記一個陷阱：配色 id 打錯（我打了 `dusk`）**不會報錯**，會悄悄退回預設配色——
+第六套是 `plum`。量測腳本裡的配色清單要跟 `Palette.cs` 對齊。
+
+交付圖：`C:\Users\User\Desktop\Confern測試\下拉選單白底白字-修好-2026-10-22.png`
