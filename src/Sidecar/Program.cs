@@ -30,7 +30,21 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // 命令列的表面層：`confern convert a.png --to webp -o out` → 既有的長旗標。
+        // 見 CliArgs 的說明（為什麼要有這一層、以及它刻意不做的三件事）。
+        args = CliArgs.Normalize(args);
         Options opt = Options.Parse(args);
+
+        // 用法錯誤（缺檔、未知子命令、缺值）走 4，與 `--settings-set` 的「不合法」一致；
+        // 2 保留給「你要看說明」（--help）。
+        if (!string.IsNullOrEmpty(opt.CliError))
+        {
+            Native.AttachParentConsole();
+            Console.Error.WriteLine("confern: " + opt.CliError);
+            Console.Error.WriteLine("usage:  conforn convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o DIR]");
+            Console.Error.WriteLine("        conforn formats");
+            return 4;
+        }
 
         if (opt.ShowUsage)
         {
@@ -197,11 +211,23 @@ internal static class Program
             return 0;
         }
 
+        // 命令列的「能讀什麼／能寫什麼」（`confern formats`）：與 --codecs 的差別是，
+        // --codecs 是**這台機器現在**的能力探測（含往返編碼實驗，慢），這一個只讀宣告表、
+        // 立刻回來，適合放進腳本與 shell 補完。
+        if (opt.ListFormats)
+        {
+            Native.AttachParentConsole();
+            using var formatsEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
+                                                     opt.Quiet || opt.CliSubcommand);
+            return App.RunListFormats(opt, formatsEvidence);
+        }
+
         // M1d：無需滑鼠的整條轉檔管線（解碼 → 編碼 → 原子寫入）。驗證靠它，不靠人工拖曳。
         if (!string.IsNullOrEmpty(opt.ConvertPayload))
         {
             Native.AttachParentConsole();
-            using var convertEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            using var convertEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
+                                                      opt.Quiet || opt.CliSubcommand);
             return App.RunConvert(opt, convertEvidence);
         }
 
@@ -399,6 +425,14 @@ internal sealed class Options
     public const string Usage =
         """
         Confern (M1a)
+
+        Commands (no --flag needed; they are translated to the flags below by Cli/CliArgs.cs)
+          conforn convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o <dir>]
+                                    convert files from the command line, no window, no tray icon.
+                                    Exit 0 = every file converted, 9 = at least one failed,
+                                    4 = the command itself is wrong (unknown format, no files)
+          conforn formats           print what this build can read and write
+
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
           --raise                   raise the hit layer without hooks (diagnostic)
@@ -540,6 +574,12 @@ internal sealed class Options
           --convert <p1;p2>         convert these files (headless, no mouse needed) and report the outcome
           --target <FORMAT>         target format for --convert (default PNG)
           --quality <60-100>        JPG/WebP quality for --convert (default 85)
+          --out-dir <dir>           write the results into this folder (default: next to each source).
+                                    A folder that does not exist is NOT created; the output falls back to
+                                    the source folder and the log says so
+          --list-formats            print what this build can read and write, then exit (same as
+                                    `confern formats`; unlike --codecs it reads the declaration table
+                                    and returns at once instead of probing the machine)
           --worker <pipeName>       run as the conversion worker and connect back to this pipe (spec 9.1)
           --progress-dump <dir>     render the progress line to PNGs (verifies glyphs without a screen)
           --payload-expand <p1;p2>  expand folders exactly like a real drop does (same recursion limit,
@@ -935,6 +975,29 @@ internal sealed class Options
     public string ConvertPayload = "";
     public string ConvertTarget = "PNG";
     public int ConvertQuality = 85;
+    /// <summary>
+    /// `-o`／`--out-dir`：`--convert` 的輸出資料夾。空字串＝來源檔旁邊（產品的既有行為）。
+    /// 指定的資料夾不存在時**不建它**——<see cref="NamingPolicy.ResolveOutputPath"/> 會回退到
+    /// 來源旁邊並在日誌裡說出來（靜默回退會讓人以為設定生效了、然後找不到檔案，規格 §9.5）。
+    /// </summary>
+    public string OutDir = "";
+    /// <summary>
+    /// `--list-formats`（`confern formats` 的子命令）：把「能讀什麼、能寫什麼」印出來就結束。
+    /// 這是格式知識的**唯一來源** <see cref="CodecRegistry"/> 的對外視窗，所以清單不會說謊。
+    /// </summary>
+    public bool ListFormats;
+    /// <summary>
+    /// `--cli-error`：由 <see cref="CliArgs.Normalize"/> 產生的用法錯誤訊息。
+    /// 不是「旗標解析失敗就啟動常駐程式」——那會讓打錯字的使用者得到一個托盤圖示。
+    /// </summary>
+    public string CliError = "";
+    /// <summary>
+    /// `--cli-subcommand`：使用者用的是 `confern convert ...`／`confern formats` 這種子命令寫法，
+    /// 而不是舊的長旗標。唯一的差別是**日誌行不進 stderr**（改進日誌檔），
+    /// 這樣 `| tee` 與 `ForEach-Object` 拿到的是乾淨的結果；
+    /// 舊旗標寫法一個字都不變，因為已經有多支套件依賴那條路徑的既有輸出。
+    /// </summary>
+    public bool CliSubcommand;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
@@ -1232,6 +1295,14 @@ internal sealed class Options
                     break;
                 case "--quality":
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int q)) { o.ConvertQuality = q; i++; }
+                    break;
+                case "--out-dir":
+                    if (i + 1 < args.Length) { o.OutDir = args[i + 1]; i++; }
+                    break;
+                case "--list-formats": o.ListFormats = true; break;
+                case "--cli-subcommand": o.CliSubcommand = true; break;
+                case "--cli-error":
+                    if (i + 1 < args.Length) { o.CliError = args[i + 1]; i++; }
                     break;
                 case "--worker":
                     if (i + 1 < args.Length) { o.WorkerPipe = args[i + 1]; i++; }
@@ -4452,6 +4523,59 @@ internal static class App
         return 0;
     }
 
+    /// <summary>
+    /// `confern formats`（`--list-formats`）：這一支建置**能讀什麼、能寫什麼**。
+    ///
+    /// 與 `--codecs` 的分工（兩者都會回答「有哪些格式」，但問的問題不同）：
+    ///   • `--codecs`＝「**這台機器現在**真的能編／解嗎」——會做往返編碼實驗（實測 272.8 ms），
+    ///     用來診斷「這台缺 HEIF 擴充」這種事；
+    ///   • `--list-formats`＝「這一支 exe **宣告**了哪些」——只讀表，立刻回來，給腳本與人看。
+    ///
+    /// 兩者都必須出自 <see cref="CodecRegistry"/>（格式知識的唯一擁有者），
+    /// 所以這裡**不硬編任何清單**：印出來的東西不會跟產品實際行為不一致。
+    /// 解碼能力標成 `per-file` 的（HEIC／WebP）要說清楚「要看系統有沒有那個解碼器」，
+    /// 否則使用者會以為「清單上有＝一定轉得動」。
+    /// </summary>
+    internal static int RunListFormats(Options opt, Evidence evidence)
+    {
+        var registry = new CodecRegistry();
+        var output = new System.Text.StringBuilder();
+        void Say(string line) { output.AppendLine(line); Console.Out.WriteLine(line); }
+
+        Say($"Confern {Program.VersionText()}  —  formats this build knows");
+        Say("");
+        Say("IN  (what you can drag in, and what --convert accepts)");
+        foreach (string format in registry.InputFormats)
+        {
+            CodecCapability? cap = registry.Capability(format);
+            string extensions = string.Join(", ", registry.ExtensionsOf(format));
+            string note = cap?.Decode switch
+            {
+                DecodeSupport.Yes => "",
+                DecodeSupport.PerFile => "  (needs the system decoder; checked per file)",
+                _ => "  (no decoder on this machine)"
+            };
+            Say($"  {format,-5} .{extensions,-14}{note}");
+        }
+        Say("");
+        Say("OUT (what --to accepts)");
+        foreach (string format in registry.OfferedOutputs)
+            Say($"  {format,-5} .{registry.PrimaryExtension(format)}");
+        Say("");
+        Say("PDF in is tool-only: it has no image target, so it never gets a format ring —");
+        Say("use the tools instead (rotate90, strip-metadata, compress, crop, read-qr, merge-pdf, remove-bg).");
+        Say("");
+        Say("examples");
+        Say("  conforn convert photo.jpg --to webp");
+        Say("  conforn convert *.png --to jpg --quality 80 -o .\\out");
+        Say("  conforn --settings-ui");
+
+        evidence.Line($"list formats: in={registry.InputFormats.Count} out={registry.OfferedOutputs.Count} " +
+                      $"inFormats=[{string.Join(",", registry.InputFormats)}] " +
+                      $"outFormats=[{string.Join(",", registry.OfferedOutputs)}]");
+        return 0;
+    }
+
     internal static int RunToolsList(Options opt, Evidence evidence)
     {
         PayloadVerdict verdict;
@@ -6890,8 +7014,99 @@ internal static class App
     /// </summary>
     internal static int RunConvert(Options opt, Evidence evidence)
     {
+        // 目標格式先驗一次，而且**在轉檔之前**：使用者打錯格式名時要拿到「可用清單」，
+        // 不是「N 個檔案全部失敗」。這也讓 `confern convert` 的失敗碼可以分辨
+        // 「用法錯」（4）與「檔案本身轉不動」（9）。
+        var offered = new CodecRegistry().OfferedOutputs;
+        string target = opt.ConvertTarget.ToUpperInvariant();
+        if (!offered.Contains(target, StringComparer.Ordinal))
+        {
+            string msg = $"'{opt.ConvertTarget}' is not a format this build writes; " +
+                         $"offered=[{string.Join(", ", offered)}]";
+            Console.Error.WriteLine("confern: " + msg);
+            evidence.Line($"cli error: {msg}");
+            return 4;
+        }
+
+        // 品質被夾回時**要說出來**（規格 §8：範圍外的值夾回並說明，不得靜默）。
+        // 只有真的受品質控制的格式才值得提——對 PNG/BMP/TIF 講「你的 20 變成 60 了」
+        // 是誤導，那些編碼器根本沒有品質參數（CompressionPolicy.QualityControlsSize）。
+        if (CompressionPolicy.QualityControlsSize(target)
+            && (opt.ConvertQuality < CodecRegistry.MinEncodeQuality
+                || opt.ConvertQuality > CodecRegistry.MaxEncodeQuality))
+        {
+            int clamped = Math.Clamp(opt.ConvertQuality, CodecRegistry.MinEncodeQuality,
+                                     CodecRegistry.MaxEncodeQuality);
+            string note = $"note: quality {opt.ConvertQuality} is outside " +
+                          $"{CodecRegistry.MinEncodeQuality}-{CodecRegistry.MaxEncodeQuality} for {target}; " +
+                          $"using {clamped}";
+            Console.Error.WriteLine("confern: " + note);
+            evidence.Line(note);
+        }
+
         ConversionSummary summary = ConvertOnce(opt, evidence);
+        PrintConvertReport(opt, summary);
         return summary.AllOk ? 0 : 9;
+    }
+
+    /// <summary>
+    /// 命令列專用的一行一看：`ok   trip.jpg -> trip.webp  (24.1 KB)`。
+    ///
+    /// 為什麼要另印一份（日誌裡已經有 `convert result:` 了）：那一行是**證據**（欄位固定、給
+    /// 驗收腳本讀），這一種是**給人看的**。兩種分開，改一個不會弄壞另一個。
+    ///
+    /// 只寫 stdout（不是 <see cref="Evidence.Line"/>）——`--quiet` 的語意是「不要日誌」，
+    /// 不是「不要結果」，結果一律要出來；而 stdout 才能被 `| tee` 接管。
+    /// </summary>
+    private static void PrintConvertReport(Options opt, ConversionSummary summary)
+    {
+        foreach (ConversionResult r in summary.Results)
+        {
+            if (r.Ok)
+            {
+                long size = 0;
+                try { size = new FileInfo(r.OutputPath!).Length; } catch { /* 只為了顯示，失敗就算了 */ }
+                Console.Out.WriteLine($"ok    {Path.GetFileName(r.SourcePath)} -> {Path.GetFileName(r.OutputPath)}  ({FormatBytes(size)})");
+            }
+            else
+            {
+                Console.Out.WriteLine($"fail  {Path.GetFileName(r.SourcePath)}  {r.UserMessage}");
+            }
+        }
+
+        // 落地在哪裡：**從真實結果推導，不是從使用者給的 `-o` 推導**。
+        // 指定的資料夾不存在時引擎會回退到來源檔旁邊（規格 §9.5：不建它、但要說出來），
+        // 所以照著 `-o` 印會印出一個「檔案其實不在那裡」的路徑——2026-10-22 實測就是這樣。
+        var dirs = summary.Results.Where(r => r.Ok && r.OutputPath != null)
+                                  .Select(r => Path.GetDirectoryName(Path.GetFullPath(r.OutputPath!))!)
+                                  .Distinct(StringComparer.OrdinalIgnoreCase)
+                                  .ToList();
+
+        string where = "";
+        if (dirs.Count == 1) where = $"  -> {dirs[0]}";
+        else if (dirs.Count > 1) where = $"  -> {dirs.Count} folders";
+
+        bool requestedIgnored = opt.OutDir.Length > 0 && dirs.Count > 0
+            && !dirs.Any(d => string.Equals(d, SafeFullPath(opt.OutDir), StringComparison.OrdinalIgnoreCase));
+        if (requestedIgnored)
+            where += $"  (out-dir '{opt.OutDir}' was not usable, so the results went next to their sources)";
+
+        Console.Out.WriteLine(summary.Line + where);
+    }
+
+    /// <summary>`Path.GetFullPath` 的保護版：使用者給的路徑可能含無效字元，顯示用不該拋。</summary>
+    private static string SafeFullPath(string path)
+    {
+        try { return Path.GetFullPath(path).TrimEnd('\\'); }
+        catch { return path; }
+    }
+
+    /// <summary>1,234,567 → `1.2 MB`。只用在上面那一行顯示，不參與任何斷言。</summary>
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.0} KB";
+        return $"{bytes / (1024.0 * 1024.0):0.0} MB";
     }
 
     /// <summary>
@@ -6917,7 +7132,10 @@ internal static class App
         var results = new List<ConversionResult>();
         foreach (string path in paths)
         {
-            ConversionResult result = engine.Convert(path, target, opt.ConvertQuality, journal);
+            // 輸出資料夾：空字串＝來源檔旁邊（既有行為）。命名與碰撞規則完全不變——
+            // 我們沒有另開一條「CLI 專用」的寫檔路徑，所以「永不覆寫、永不詢問」對 CLI 同樣成立。
+            ConversionResult result = engine.Convert(path, target, opt.ConvertQuality, journal,
+                                                     opt.OutDir.Length > 0 ? opt.OutDir : null);
             results.Add(result);
             evidence.Line(result.Ok
                 ? $"convert result: Ok source={result.SourcePath} output={result.OutputPath} detail={result.Detail}"

@@ -43,13 +43,80 @@ internal sealed class Evidence : IDisposable
 
     public Evidence(string path, bool quiet)
     {
-        Path = path;
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        _writer = new StreamWriter(path, append: false) { AutoFlush = true };
         _quiet = quiet;
+        (StreamWriter writer, string actualPath, string? fallbackNote) = OpenLog(path);
+        _writer = writer;
+        Path = actualPath;
         Line($"=== {ProductInfo.Name} session {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={Environment.ProcessId} ===");
         // 先宣告預設模式：讀日誌的人必須能分辨「detail 行不在這裡」是**設定**，不是程式壞掉。
         Line("diagnostics=off (essential events only)");
+        // 退路要留痕：否則使用者照著錯誤訊息找不到日誌，或是以為「證據沒了」。
+        if (fallbackNote != null) Line(fallbackNote);
+    }
+
+    /// <summary>
+    /// 開日誌檔，**被獨占時退到每個行程自己的檔名**。
+    ///
+    /// <para>為什麼需要這條退路（2026-10-22 實測到的真崩潰）：預設日誌是
+    /// <c>%LOCALAPPDATA%\Confern\logs\confern.log</c>，<see cref="System.IO.StreamWriter(string, bool)"/>
+    /// 用的是 <c>FileShare.Read</c>——所以**只要常駐的 Confern 在跑**，第二個行程要開它就會得到
+    /// <see cref="IOException"/>。而這個例外是在 <see cref="Evidence"/> 的建構子裡、在任何
+    /// try 之外，於是整個行程以 <c>Unhandled exception</c> 死掉（exit code 0xE0434352）。
+    /// 對 GUI 常駐程式無害（它自己就是持有者），但對**命令列**是致命的：
+    /// `confern convert` 的重點正是「托盤程式開著的時候我也能用」。</para>
+    ///
+    /// <para>退路檔名帶 pid，所以多個 CLI 同時跑也互不干擾；沿用
+    /// <see cref="WorkerLog.PruneStale"/> 的同一條年齡規則清舊檔（不是「留最新 N 個」——
+    /// 那會刪到正在跑的那一個）。</para>
+    /// </summary>
+    private static (StreamWriter Writer, string Path, string? Note) OpenLog(string requested)
+    {
+        string dir = System.IO.Path.GetDirectoryName(requested)!;
+        Directory.CreateDirectory(dir);
+        try
+        {
+            return (new StreamWriter(requested, append: false) { AutoFlush = true }, requested, null);
+        }
+        catch (IOException)
+        {
+            string alt = System.IO.Path.Combine(
+                dir, $"{ProductInfo.Slug}.{Environment.ProcessId}.log");
+            try
+            {
+                PruneStaleCliLogs(dir);
+                return (new StreamWriter(alt, append: false) { AutoFlush = true }, alt,
+                        $"log: '{System.IO.Path.GetFileName(requested)}' is held by another Confern " +
+                        $"process (the resident one is running); this session writes " +
+                        $"'{System.IO.Path.GetFileName(alt)}' instead");
+            }
+            catch (IOException ex)
+            {
+                // 連退路都開不起來：**不再拋**。改成丟掉日誌、把原因印到 stderr，
+                // 讓命令本身（例如格式清單、轉檔）仍然能做事——證據少一份，
+                // 比整個指令死掉好。這一條只有在日誌資料夾本身有問題時才會走到。
+                Console.Error.WriteLine($"confern: cannot open any log file in '{dir}' ({ex.Message}); " +
+                                        "continuing without evidence");
+                return (new StreamWriter(Stream.Null) { AutoFlush = true }, alt,
+                        "log: unavailable (see stderr)");
+            }
+        }
+    }
+
+    /// <summary>清掉 7 天前的每個行程日誌（退路的殘留）。</summary>
+    private static void PruneStaleCliLogs(string dir)
+    {
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(
+                         dir, $"{ProductInfo.Slug}.*.log", SearchOption.TopDirectoryOnly))
+            {
+                if (File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-7))
+                {
+                    try { File.Delete(file); } catch { /* 別人的，算了 */ }
+                }
+            }
+        }
+        catch { /* 清舊檔失敗不影響寫日誌 */ }
     }
 
     /// <summary>逐行事件（可稽核的證據）。</summary>

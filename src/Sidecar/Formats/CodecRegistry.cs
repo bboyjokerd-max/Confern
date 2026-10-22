@@ -110,12 +110,22 @@ internal sealed class CodecRegistry
     public static BitmapEncoder? CreateEncoder(string format, int quality) => format switch
     {
         "PNG" => new PngBitmapEncoder(),
-        "JPG" => new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, 60, 100) },
+        "JPG" => new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, MinEncodeQuality, MaxEncodeQuality) },
         "BMP" => new BmpBitmapEncoder(),
         "TIF" => new TiffBitmapEncoder { Compression = TiffCompressOption.None },
         "GIF" => new GifBitmapEncoder(),
         _ => null,
     };
+
+    /// <summary>
+    /// 品質的合法範圍（規格 §6.2 的 60–100）。這兩個常數是**唯一**的定義處：
+    /// <see cref="CreateEncoder"/> 的夾回用它，命令列的「你把 20 夾成 60 了」那句提示也用它。
+    /// 之前是兩處各寫一次 <c>60</c>／<c>100</c>，而那種重複壞掉的表現是
+    /// 「安靜地換了一個品質」——使用者以為自己指定了 20。
+    /// </summary>
+    public const int MinEncodeQuality = 60;
+
+    public const int MaxEncodeQuality = 100;
 
     /// <summary>
     /// 這個格式有沒有「**不解碼**的容器層去 metadata」路徑（工具 `strip-metadata`，規格 §9.4）。
@@ -233,6 +243,21 @@ internal sealed class CodecRegistry
         foreach ((string f, string[] extensions, string _) in Table)
             if (string.Equals(f, format, StringComparison.OrdinalIgnoreCase)) return extensions[0];
         return null;
+    }
+
+    /// <summary>
+    /// 某個格式的**所有**副檔名（含別名，例如 JPG→jpg/jpeg）。
+    ///
+    /// 存在的理由：`confern formats` 要列「這個格式認哪些副檔名」，而那是
+    /// <see cref="Table"/> 已知的事。**不可以**在顯示那一層再抄一份 switch——
+    /// 抄一份就等于有兩個地方能說「jpeg 算 JPG」，總有一天只改到其中一個。
+    /// 判定方向仍然只有 <see cref="FormatOfPath"/> 一條。
+    /// </summary>
+    public IReadOnlyList<string> ExtensionsOf(string format)
+    {
+        foreach ((string f, string[] extensions, string _) in Table)
+            if (string.Equals(f, format, StringComparison.OrdinalIgnoreCase)) return extensions;
+        return Array.Empty<string>();
     }
 
     public CodecCapability? Capability(string format) =>
