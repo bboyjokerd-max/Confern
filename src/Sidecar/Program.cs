@@ -43,6 +43,8 @@ internal static class Program
             Console.Error.WriteLine("confern: " + opt.CliError);
             Console.Error.WriteLine("usage:  conforn convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o DIR]");
             Console.Error.WriteLine("        conforn formats");
+            Console.Error.WriteLine("        conforn watch <folder> --to <FORMAT> [--quality N] [-o DIR]");
+            Console.Error.WriteLine("        conforn watch --add <folder> --to <FORMAT> | --list | --remove <folder>");
             return 4;
         }
 
@@ -220,6 +222,16 @@ internal static class Program
             using var formatsEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
                                                      opt.Quiet || opt.CliSubcommand);
             return App.RunListFormats(opt, formatsEvidence);
+        }
+
+        // 監看資料夾（2026-10-22）：`confern watch ...` 的三種寫法都走同一條入口，
+        // 包含「寫回設定檔」（常駐程式啟動時會讀它）。
+        if (opt.WatchList || opt.WatchAdd.Length > 0 || opt.WatchRemove.Length > 0 || opt.WatchFolder.Length > 0)
+        {
+            Native.AttachParentConsole();
+            using var watchEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
+                                                   opt.Quiet || opt.CliSubcommand);
+            return App.RunWatchCli(opt, watchEvidence);
         }
 
         // M1d：無需滑鼠的整條轉檔管線（解碼 → 編碼 → 原子寫入）。驗證靠它，不靠人工拖曳。
@@ -976,6 +988,13 @@ internal sealed class Options
     public string ConvertTarget = "PNG";
     public int ConvertQuality = 85;
     /// <summary>
+    /// 夾回編碼器真的能接受的區間之後的品質。<see cref="CodecRegistry.MinEncodeQuality"/>／
+    /// <see cref="CodecRegistry.MaxEncodeQuality"/> 是唯一定義處——命令列把它們說出來，
+    /// 監看也用同一個值，不然「說明上寫 60–100，實際跑 85」這種事會各寫一次。
+    /// </summary>
+    public int ConvertQualitySane =>
+        Math.Clamp(ConvertQuality, CodecRegistry.MinEncodeQuality, CodecRegistry.MaxEncodeQuality);
+    /// <summary>
     /// `-o`／`--out-dir`：`--convert` 的輸出資料夾。空字串＝來源檔旁邊（產品的既有行為）。
     /// 指定的資料夾不存在時**不建它**——<see cref="NamingPolicy.ResolveOutputPath"/> 會回退到
     /// 來源旁邊並在日誌裡說出來（靜默回退會讓人以為設定生效了、然後找不到檔案，規格 §9.5）。
@@ -998,6 +1017,18 @@ internal sealed class Options
     /// 舊旗標寫法一個字都不變，因為已經有多支套件依賴那條路徑的既有輸出。
     /// </summary>
     public bool CliSubcommand;
+    /// <summary>`--watch <folder>`（`confern watch <folder>`）：前台監看一個資料夾，直到 Ctrl+C 或時間到。</summary>
+    public string WatchFolder = "";
+    /// <summary>`--watch-add <folder>`：把這個資料夾寫進設定檔的監看清單（給常駐程式用）。</summary>
+    public string WatchAdd = "";
+    /// <summary>`--watch-remove <folder>`：從設定檔的監看清單拿掉。</summary>
+    public string WatchRemove = "";
+    /// <summary>`--watch-list`：印出設定檔裡的監看清單。</summary>
+    public bool WatchList;
+    /// <summary>`--watch-settle-ms`：檔案要安靜多久才算寫完（預設 <see cref="WatchRules.DefaultSettleMs"/>）。</summary>
+    public int WatchSettleMs = WatchRules.DefaultSettleMs;
+    /// <summary>`--watch-duration-ms`：跑多久就自己停（0＝一直跑到 Ctrl+C）。自動驗收用它取代按鍵。</summary>
+    public int WatchDurationMs;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
@@ -1304,6 +1335,22 @@ internal sealed class Options
                 case "--cli-error":
                     if (i + 1 < args.Length) { o.CliError = args[i + 1]; i++; }
                     break;
+                case "--watch":
+                    if (i + 1 < args.Length) { o.WatchFolder = args[i + 1]; i++; }
+                    break;
+                case "--watch-add":
+                    if (i + 1 < args.Length) { o.WatchAdd = args[i + 1]; i++; }
+                    break;
+                case "--watch-remove":
+                    if (i + 1 < args.Length) { o.WatchRemove = args[i + 1]; i++; }
+                    break;
+                case "--watch-list": o.WatchList = true; break;
+                case "--watch-settle-ms":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int settle)) { o.WatchSettleMs = settle; i++; }
+                    break;
+                case "--watch-duration-ms":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int watchMs)) { o.WatchDurationMs = watchMs; i++; }
+                    break;
                 case "--worker":
                     if (i + 1 < args.Length) { o.WorkerPipe = args[i + 1]; i++; }
                     break;
@@ -1545,6 +1592,8 @@ internal static class App
         using var hit = new HitLayer(evidence, monitors, Native.OverlayAlpha);
         using var guard = new ReleaseGuard(evidence, hit, watchdogMs);
         var detector = new DragDetector(evidence, triggerVk, opt.AssumeExplorerForeground);
+        // 監看資料夾（2026-10-22）的持有者：只有真正的常駐路徑會填它，所以宣告在這裡、填在最下面。
+        List<FolderWatcher> watchers = new();
 
         // OLE 拖放必須先初始化，否則 RegisterDragDrop 會回 CO_E_NOTINITIALIZED。
         // 主執行緒有 [STAThread]，所以不會撞 RPC_E_CHANGED_MODE。結果一律寫進證據——失敗時
@@ -2019,10 +2068,68 @@ internal static class App
         {
             WireHooks(hooks, detector, presenter, guard, evidence, runner);
             hooks.Install(evidence);
+
+            // 監看資料夾（2026-10-22）：設定檔裡有幾條就啟動幾條。放在這一支（真正的常駐路徑）
+            // 而不是上面兩支診斷模式——`--raise-with-hooks` 是探針，探針不該在使用者的資料夾裡轉檔。
+            // `_settings` 是欄位（可為 null）；真的沒有設定檔時給一份空的＝監看清單是空的，
+            // 與「設定了 0 個資料夾」同義。
+            watchers = StartWatchFolders(_settings ?? new Settings(), evidence);
         }
 
         evidence.Line("message loop starting");
-        return RunMessageLoop(evidence);
+        int loopExit = RunMessageLoop(evidence);
+        StopWatchFolders(watchers, evidence);
+        return loopExit;
+    }
+
+    /// <summary>
+    /// 啟動設定檔裡的監看資料夾。**每一條各自一個引擎與 journal**：兩個資料夾同時有檔案進來時，
+    /// 共用一個 <see cref="ConversionEngine"/> 等於兩個執行緒同時呼叫它，而它從來沒有被設計成
+    /// 可重入（它的每一次呼叫都是「一個完整的轉檔」）。
+    ///
+    /// <para>拒絕的條目**不會無聲消失**：寫一行「refused」到日誌，`confern watch --list` 也會標記它。
+    /// 一個存得下卻啟動不了的設定，比沒有設定更糟。</para>
+    /// </summary>
+    private static List<FolderWatcher> StartWatchFolders(Settings settings, Evidence evidence)
+    {
+        var started = new List<FolderWatcher>();
+        if (settings.WatchFolders.Count == 0) return started;
+
+        var registry = new CodecRegistry();
+        foreach (WatchFolderSpec spec in settings.WatchFolders)
+        {
+            string? refusal = WatchRules.Reject(spec, registry.OfferedOutputs);
+            if (refusal != null)
+            {
+                evidence.Line($"watch: NOT watching '{spec.Path}': {refusal}");
+                continue;
+            }
+
+            int quality = spec.Quality > 0 ? spec.Quality : settings.QualityFor(spec.Target);
+            var journal = new TempJournal(TempJournal.DefaultPath());
+            var engine = new ConversionEngine(registry, evidence.Line);
+            var watcher = new FolderWatcher(spec, engine, journal, quality, evidence.Line,
+                result => evidence.Line(result.Ok
+                    ? $"watch result: Ok source={result.SourcePath} output={result.OutputPath}"
+                    : $"watch result: Fail source={result.SourcePath} message={result.UserMessage}"));
+            watcher.Start();
+            started.Add(watcher);
+            evidence.Line($"watch: active '{spec.Path}' -> {spec.Target} quality={quality} " +
+                          $"out={(spec.OutFolder.Length > 0 ? spec.OutFolder : "(same folder)")}");
+        }
+
+        evidence.Line($"watch: {started.Count} of {settings.WatchFolders.Count} configured folder(s) active");
+        return started;
+    }
+
+    /// <summary>收尾：等每一條手上的轉檔結束，並把總數寫進日誌。</summary>
+    private static void StopWatchFolders(List<FolderWatcher> watchers, Evidence evidence)
+    {
+        foreach (FolderWatcher watcher in watchers)
+        {
+            watcher.Dispose();
+            evidence.Line($"watch: stopped (converted={watcher.Converted} failed={watcher.Failed})");
+        }
     }
 
     /// <summary>
@@ -4576,6 +4683,159 @@ internal static class App
         return 0;
     }
 
+    /// <summary>
+    /// 監看資料夾的命令列入口（2026-10-22）：`confern watch &lt;folder&gt;` 前台跑、
+    /// `--watch-add`／`--watch-remove`／`--watch-list` 管理**設定檔**裡的那份清單。
+    ///
+    /// <para>前台跑與常駐程式跑的是**同一個 <see cref="FolderWatcher"/>**（差別只在誰按下停止），
+    /// 所以「命令列驗過的」就是「托盤程式會做的」。三種寫法都先過 <see cref="WatchRules.Reject"/>，
+    /// 因此不可能出現「命令列拒絕、設定檔卻能啟動」的組合。</para>
+    /// </summary>
+    internal static int RunWatchCli(Options opt, Evidence evidence)
+    {
+        var registry = new CodecRegistry();
+        string settingsPath = string.IsNullOrEmpty(opt.SettingsFile) ? SettingsStore.DefaultPath() : opt.SettingsFile;
+        Settings settings = SettingsStore.Load(File.Exists(settingsPath) ? settingsPath : null, evidence.Line);
+
+        // ① --watch-list：把設定檔裡「真正會被常駐程式啟動」的清單印出來。
+        if (opt.WatchList)
+        {
+            Console.Out.WriteLine($"watched folders (from {settingsPath})");
+            if (settings.WatchFolders.Count == 0)
+            {
+                Console.Out.WriteLine("  (none) — add one with: conforn watch --add <folder> --to <FORMAT>");
+            }
+            else
+            {
+                foreach (WatchFolderSpec spec in settings.WatchFolders)
+                {
+                    // 「存在」與「合法」是兩件事，而這兩件事都會讓監看悄悄不做事，所以都印出來。
+                    string? reject = WatchRules.Reject(spec, registry.OfferedOutputs);
+                    Console.Out.WriteLine($"  {spec.Describe()}" + (reject == null ? "" : $"   [would not start: {reject}]"));
+                }
+            }
+            Console.Out.WriteLine($"total={settings.WatchFolders.Count}");
+            evidence.Line($"watch list: total={settings.WatchFolders.Count} settings={settingsPath}");
+            return 0;
+        }
+
+        // ② --watch-add／--watch-remove：寫回設定檔。**先驗證再寫**——一份存得下卻啟動不了的
+        //    設定比沒有設定更糟，因為使用者會以為他做完了。
+        if (opt.WatchAdd.Length > 0 || opt.WatchRemove.Length > 0)
+        {
+            var list = new List<WatchFolderSpec>(settings.WatchFolders);
+            string folder = opt.WatchAdd.Length > 0 ? opt.WatchAdd : opt.WatchRemove;
+
+            if (opt.WatchRemove.Length > 0)
+            {
+                int removed = list.RemoveAll(s => string.Equals(s.Key, WatchFolderSpec.Normalize(folder),
+                                                                 StringComparison.OrdinalIgnoreCase));
+                if (removed == 0)
+                {
+                    Console.Error.WriteLine($"confern: '{folder}' is not in the watched list " +
+                                            $"(see: conforn watch --list)");
+                    return 4;
+                }
+                SettingsStore.Save(settings with { WatchFolders = list }, settingsPath, evidence.Line);
+                Console.Out.WriteLine($"removed {folder}  (remaining {list.Count})");
+                evidence.Line($"watch remove: '{folder}' removed, remaining={list.Count}");
+                return 0;
+            }
+
+            var spec = new WatchFolderSpec
+            {
+                Path = folder,
+                Target = opt.ConvertTarget,
+                Quality = opt.ConvertQualitySane,
+                OutFolder = opt.OutDir,
+            };
+            string? reject = WatchRules.Reject(spec, registry.OfferedOutputs);
+            if (reject != null)
+            {
+                Console.Error.WriteLine($"confern: {reject}");
+                return 4;
+            }
+            spec = WatchRules.Canonical(spec);
+            int replaced = list.RemoveAll(s => string.Equals(s.Key, spec.Key, StringComparison.OrdinalIgnoreCase));
+            list.Add(spec);
+            SettingsStore.Save(settings with { WatchFolders = list }, settingsPath, evidence.Line);
+            Console.Out.WriteLine($"{(replaced > 0 ? "replaced" : "added")} {spec.Describe()}");
+            Console.Out.WriteLine($"settings: {settingsPath}");
+            Console.Out.WriteLine("the tray app reads this list when it starts — restart it to pick up the change");
+            evidence.Line($"watch add: '{spec.Path}' target={spec.Target} quality={spec.Quality} " +
+                          $"out={(spec.OutFolder.Length > 0 ? spec.OutFolder : "(same folder)")} total={list.Count}");
+            return 0;
+        }
+
+        // ③ 前台跑。
+        var runSpec = new WatchFolderSpec
+        {
+            Path = opt.WatchFolder,
+            Target = opt.ConvertTarget,
+            Quality = opt.ConvertQualitySane,
+            OutFolder = opt.OutDir,
+        };
+        string? refusal = WatchRules.Reject(runSpec, registry.OfferedOutputs);
+        if (refusal != null)
+        {
+            Console.Error.WriteLine($"confern: {refusal}");
+            evidence.Line($"watch: refused --watch '{opt.WatchFolder}': {refusal}");
+            return 4;
+        }
+        runSpec = WatchRules.Canonical(runSpec);
+
+        var journal = new TempJournal(TempJournal.DefaultPath());
+        int recovered = journal.RecoverStale();
+        if (recovered > 0) evidence.Line($"temp journal: recovered {recovered} stale temp file(s)");
+
+        var engine = new ConversionEngine(registry, evidence.Line);
+        int quality = runSpec.Quality > 0 ? runSpec.Quality : settings.QualityFor(runSpec.Target);
+        string lastLine = "";
+        using var watcher = new FolderWatcher(runSpec, engine, journal, quality, evidence.Line,
+            result =>
+            {
+                // 每一張轉完印一行（**只有事件才印**——監看不是進度條，重複印同一行會把有用的
+                // 那一行淹掉）。stdout 的那一行是「人看的」，日誌那一行帶 detail。
+                lastLine = result.Ok
+                    ? $"ok    {Path.GetFileName(result.SourcePath)} -> {Path.GetFileName(result.OutputPath)}  " +
+                      $"({FormatBytes(new FileInfo(result.OutputPath!).Length)})"
+                    : $"FAIL  {Path.GetFileName(result.SourcePath)}  {result.UserMessage}";
+                Console.Out.WriteLine(lastLine);
+            },
+            opt.WatchSettleMs);
+
+        Console.Out.WriteLine($"watching {runSpec.Path} -> {runSpec.Target} " +
+                              $"(settle {Math.Clamp(opt.WatchSettleMs, WatchRules.MinSettleMs, WatchRules.MaxSettleMs)} ms, " +
+                              $"quality {quality}, " +
+                              $"out={(runSpec.OutFolder.Length > 0 ? runSpec.OutFolder : "(same folder)")})");
+        Console.Out.WriteLine("drop a file in (Ctrl+C to stop)");
+        evidence.Line($"watch start: folder={runSpec.Path} target={runSpec.Target} quality={quality} " +
+                      $"settle={opt.WatchSettleMs} duration={opt.WatchDurationMs} " +
+                      $"out={(runSpec.OutFolder.Length > 0 ? runSpec.OutFolder : "(same folder)")}");
+
+        watcher.Start();
+
+        // 結束條件：--watch-duration-ms（自動驗收用）或 Ctrl+C。兩條都走同一個收尾，
+        // 所以「有跑過」與「被中斷」印出來的總結長得一樣——驗收才不用為兩種情況寫兩套。
+        var stop = new ManualResetEventSlim(false);
+        ConsoleCancelEventHandler onCancel = (_, e) => { e.Cancel = true; stop.Set(); };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            if (opt.WatchDurationMs > 0) stop.Wait(opt.WatchDurationMs);
+            else { while (!stop.Wait(250)) { } }
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+            watcher.Dispose();
+        }
+
+        Console.Out.WriteLine($"watch summary: converted={watcher.Converted} failed={watcher.Failed}");
+        evidence.Line($"watch summary: converted={watcher.Converted} failed={watcher.Failed} " +
+                      $"last={lastLine}");
+        return 0;
+    }
     internal static int RunToolsList(Options opt, Evidence evidence)
     {
         PayloadVerdict verdict;

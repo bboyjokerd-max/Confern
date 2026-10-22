@@ -73,6 +73,20 @@ internal sealed record Settings
     /// </summary>
     public string RemoveBgRefine { get; init; } = EdgeRefine.DefaultMode;
 
+    /// <summary>
+    /// 監看資料夾（2026-10-22）：新進來的圖片自動轉檔。空清單＝不監看任何資料夾，
+    /// 也就是**一份沒有這個欄位的舊設定檔載入後行為逐位元不變**。
+    ///
+    /// <para>為什麼是一個清單而不是單一資料夾：使用者說的「監看資料夾」在他的心裡是多個
+    /// （相機的、截圖的、下載的），而單一資料夾會逼他每天改設定。每一條的型別是
+    /// <see cref="WatchFolderSpec"/>，與命令列用的是同一個。</para>
+    ///
+    /// <para>⚠ 這個欄位**沒有**對應的設定頁那一列（2026-10-22 刻意）：UI 目前是凍結的，
+    /// 而它的入口在命令列（`confern watch --add ...`）與這個檔案本身。設定頁要不要多一列，
+    /// 等使用者看過實際用法再說——先加一列進去等於替他決定版面。</para>
+    /// </summary>
+    public List<WatchFolderSpec> WatchFolders { get; init; } = new();
+
     /// <summary>把超出範圍的值夾回規格允許的區間，並回報改了什麼（不靜默）。</summary>
     public Settings Normalized(out List<string> notes)
     {
@@ -122,6 +136,31 @@ internal sealed record Settings
             refine = EdgeRefine.DefaultMode;
         }
 
+        // 監看資料夾（2026-10-22）。與上面幾條同一條規矩：**一個例外都不准丟**。
+        // 每一條都整理成絕對路徑／大寫格式／夾回的品質，重複的路徑只留第一條。
+        //
+        // ⚠ 這裡**不檢查資料夾存不存在**（那是啟動時的事，見 WatchRules.Reject）：
+        // 設定檔裡的一條路徑可能指向還沒接上的外接硬碟，而那不該讓整份設定的其他部分失效。
+        // 但「兩條規則盯著同一個資料夾」在這裡就去重，因為那一定是複製貼上造成的。
+        var watchFolders = new List<WatchFolderSpec>();
+        var watchKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (WatchFolderSpec raw in WatchFolders ?? new List<WatchFolderSpec>())
+        {
+            if (raw == null) continue;
+            WatchFolderSpec spec = WatchRules.Canonical(raw);
+            if (spec.Path.Length == 0)
+            {
+                notes.Add($"WatchFolders: an entry without a path was dropped (target={raw.Target})");
+                continue;
+            }
+            if (!watchKeys.Add(spec.Key))
+            {
+                notes.Add($"WatchFolders: '{spec.Path}' was listed more than once; the later copy was dropped");
+                continue;
+            }
+            watchFolders.Add(spec);
+        }
+
         return this with
         {
             JpgQuality = jpg,
@@ -129,7 +168,8 @@ internal sealed record Settings
             CaptureTimeoutSeconds = capture,
             CompressionMode = mode,
             CompressionTargetKb = targetKb,
-            RemoveBgRefine = refine
+            RemoveBgRefine = refine,
+            WatchFolders = watchFolders
         };
     }
 
@@ -196,7 +236,8 @@ internal static class SettingsStore
         nameof(Settings.OutputFolder),
         nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb),
         nameof(Settings.RemoveBgRefine),
-        nameof(Settings.Palette)
+        nameof(Settings.Palette),
+        nameof(Settings.WatchFolders)
     };
 
     public static string DefaultPath() => Path.Combine(
@@ -219,7 +260,9 @@ internal static class SettingsStore
         $"{(s.CompressionTargetKb > 0 ? $"/{s.CompressionTargetKb}KB" : "")}" +
         $" refine={EdgeRefine.CanonicalMode(s.RemoveBgRefine)}" +
         // 2026-10-16 的 `palette=` 沿用同一條規矩：**只追加在行尾**（既有腳本比對前綴與各欄位）。
-        $" palette={s.Palette}";
+        $" palette={s.Palette}" +
+        // 2026-10-22 的 `watch=` 是第四個行尾欄位，同一條規矩：**只准追加**。
+        $" watch={(s.WatchFolders?.Count ?? 0)}";
 
     /// <summary>
     /// <see cref="Settings.OutputFolder"/> 的顯示寫法（日誌與探針共用）。空字串＝**來源檔旁邊**，

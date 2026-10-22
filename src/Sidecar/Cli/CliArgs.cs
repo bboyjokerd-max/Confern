@@ -8,6 +8,10 @@ namespace Sidecar;
 ///   → --convert "a.png;b.jpg" --target webp --quality 80 --out-dir C:\出圖
 /// conforn formats
 ///   → --list-formats
+/// conforn watch C:\in --to JPG
+///   → --watch C:\in --target JPG
+/// conforn watch --add C:\in --to PNG -o D:\out
+///   → --watch-add C:\in --target PNG --out-dir D:\out
 /// </code>
 ///
 /// **為什麼要這一層，而不是在 <see cref="Options.Parse"/> 裡多加幾個 case**：
@@ -42,16 +46,22 @@ internal static class CliArgs
 
         // ② 第一個字是裸字卻不是子命令 → 不要默默變成「啟動常駐程式」。
         //    這條是刻意加的安全網：以前 `confern typo` 會安靜地開一個托盤圖示。
-        if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert"))
-            return Error($"unknown command '{args[0]}' (try: conforn formats, or conforn --help)");
+        if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert") && !Is(args[0], "watch"))
+            return Error($"unknown command '{args[0]}' (try: conforn formats, conforn convert, conforn watch, or conforn --help)");
 
         bool isConvert = Is(args[0], "convert");
+        // `watch` 是第二個位置參數型子命令（2026-10-22）：`confern watch <folder>` 直接監看，
+        // 而 `watch --add`／`--remove`／`--list` 是管理設定檔裡的那份清單。
+        bool isWatch = Is(args[0], "watch");
+        string? watchFolder = null;
 
         var rest = new List<string>();
         var files = new List<string>();
         bool stopOptions = false;
 
-        for (int i = isConvert ? 1 : 0; i < args.Length; i++)
+        // 子命令自己（`convert`／`watch`）要跳過，它是動詞不是參數。第一版的 watch 忘了這件事，
+        // 於是 `confern watch --list` 被讀成「監看一個叫 watch 的資料夾」（實測 exit 4）。
+        for (int i = (isConvert || isWatch) ? 1 : 0; i < args.Length; i++)
         {
             string a = args[i];
 
@@ -62,6 +72,19 @@ internal static class CliArgs
             {
                 if (i + 1 >= args.Length) return Error($"{a} needs a folder path");
                 rest.Add("--out-dir");
+                rest.Add(args[++i]);
+                continue;
+            }
+
+            // `watch --add` / `--remove` / `--list` 是 watch 的短寫法，翻成長旗標。
+            // ⚠ 第一版漏了這段：`watch --add C:\dir` 的 `--add` 被當成普通旗標丟進 rest、
+            // 而 `C:\dir` 變成位置參數 ⇒ **它其實開了一個前台監看**，不是「加進設定檔」。
+            // 使用者打的是「記下來」，跑出來的卻是「現在就盯著」——這種錯最難發現，因為兩者都活著。
+            if (!stopOptions && isWatch && (a == "--add" || a == "--remove" || a == "--list"))
+            {
+                if (a == "--list") { rest.Add("--watch-list"); continue; }
+                if (i + 1 >= args.Length) return Error($"{a} needs a folder path");
+                rest.Add(a == "--add" ? "--watch-add" : "--watch-remove");
                 rest.Add(args[++i]);
                 continue;
             }
@@ -93,7 +116,41 @@ internal static class CliArgs
                 continue;
             }
 
+            if (isWatch && (stopOptions || !a.StartsWith("-", StringComparison.Ordinal)))
+            {
+                // 只收一個資料夾：`confern watch a b` 看起來像「監看兩個」但我們的旗標只有一個位置，
+                // 与其猜，不如說清楚。
+                if (watchFolder != null)
+                    return Error($"watch takes ONE folder (got '{watchFolder}' and '{a}'); " +
+                                 "run it once per folder");
+                watchFolder = a;
+                continue;
+            }
+
             rest.Add(a);
+        }
+
+        if (isWatch)
+        {
+            bool add = rest.Contains("--watch-add");
+            bool remove = rest.Contains("--watch-remove");
+            bool list = rest.Contains("--watch-list");
+            int modes = (add ? 1 : 0) + (remove ? 1 : 0) + (list ? 1 : 0);
+            if (modes > 1) return Error("watch --add / --remove / --list are alternatives; pick one");
+            if (list && watchFolder != null)
+                return Error("watch --list takes no folder (it lists every watched folder)");
+            if ((add || remove || list) && watchFolder != null)
+                return Error($"watch --{(add ? "add" : remove ? "remove" : "list")} takes its folder from the flag, " +
+                             $"not as a bare word (got '{watchFolder}')");
+            if (modes == 0 && watchFolder == null)
+                return Error("watch needs a folder: conforn watch <folder> --to <FORMAT>, " +
+                             "or conforn watch --list");
+
+            var w = new List<string>();
+            if (modes == 0) { w.Add("--watch"); w.Add(watchFolder!); }
+            w.AddRange(rest);
+            w.Add("--cli-subcommand");
+            return w.ToArray();
         }
 
         if (!isConvert) return rest.ToArray();
@@ -158,6 +215,11 @@ internal static class CliArgs
         "--target",
         "--tray-exit-after",
         "--trigger-key",
+        "--watch",
+        "--watch-add",
+        "--watch-duration-ms",
+        "--watch-remove",
+        "--watch-settle-ms",
         "--watchdog-seconds",
         "--wheel-backdrop",
         "--wheel-demo",

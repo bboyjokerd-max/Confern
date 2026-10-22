@@ -45,6 +45,7 @@ $Skip = @($Skip | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim().Le
 # still-green total (that is exactly how a false green was produced on 2026-10-22).
 $suites = @(
     [pscustomobject]@{ Name = 'cli';        Script = 'verify-cli.ps1';             Extra = @() }
+    [pscustomobject]@{ Name = 'watch';      Script = 'verify-watch.ps1';           Extra = @() }
     [pscustomobject]@{ Name = 'm1a';        Script = 'verify-m1a.ps1';             Extra = @() }
     [pscustomobject]@{ Name = 'm1b';        Script = 'verify-m1b.ps1';             Extra = @('-Section', 'All') }
     [pscustomobject]@{ Name = 'm1c';        Script = 'verify-m1c.ps1';             Extra = @() }

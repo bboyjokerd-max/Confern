@@ -37,6 +37,11 @@
    現在有 `CliArgs.ValueFlags` 表 + `verify-cli` S8 這條原始碼級斷言盯著它）。
    另新增 `tools/verify-all.ps1`：一次跑完所有套件並印總表，**固定給 `m1b` 帶 `-Section All`**
    （2026-10-22 那顆「13/13 全綠」的假綠燈就是漏了它），且先殺 Confern、先印 exe 時間戳。
+5. **監看資料夾**（`tools/verify-watch.ps1` 39/39）：`confern watch <folder> --to FMT` 前台轉檔、
+   `watch --add／--list／--remove` 寫 `settings.json` 的 `WatchFolders`，常駐程式啟動時自動開始。
+   引擎在 `src\Sidecar\Watch\`（`FolderWatcher` 輪詢 250 ms、安靜 400 ms 才算寫完）；
+   **沒有動任何視覺設計**（設定頁沒多一列）。三個實測抓到的問題寫在進度記錄那一節：`--add` 其實
+   開了前台監看、`--list` 被子命令名吃掉、半寫入檔案需要「失敗可重試」而不是調門檻。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 
