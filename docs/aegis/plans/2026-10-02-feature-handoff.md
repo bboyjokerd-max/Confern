@@ -28,6 +28,15 @@
 3. **設定頁下拉選單白底白字**（`m1f` S14.38）：前兩次只修「展開的清單」，真正的白是**收起來的框**
    ——Aero2 的樣板根本不畫我們的底色。現在接管 ComboBox 自己的樣板，展開面板同底色。
    `a5f1d33`
+4. **命令列表面**（`1b38bfc`，`tools/verify-cli.ps1` 46/46）：`confern convert <file>... --to FMT
+   [-o DIR]`、`confern formats`。失敗碼 0／9（有檔轉不動）／4（命令本身錯）。轉檔仍走同一條
+   `ConversionEngine`→`NamingPolicy`，所以「永不覆寫」對 CLI 一樣成立；舊的 `--convert` 旗標
+   行為一字未改。順手修掉兩個實測抓到的真缺陷：①**常駐程式在跑時，任何診斷／CLI 命令都會
+   崩潰**（預設日誌被獨占 ⇒ `Unhandled exception`，已改成退到 `confern.<pid>.log`）；
+   ②**`--quality` 從來沒生效過**（`--quality 20` 的 `20` 被當成輸入檔 ⇒ 每次都跑預設 85；
+   現在有 `CliArgs.ValueFlags` 表 + `verify-cli` S8 這條原始碼級斷言盯著它）。
+   另新增 `tools/verify-all.ps1`：一次跑完所有套件並印總表，**固定給 `m1b` 帶 `-Section All`**
+   （2026-10-22 那顆「13/13 全綠」的假綠燈就是漏了它），且先殺 Confern、先印 exe 時間戳。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 

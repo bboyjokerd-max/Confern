@@ -222,7 +222,14 @@ function Invoke-Capture([string[]]$Argv) {
 function Invoke-S0 {
   Write-Host ""
   Write-Host "=== S0 no elevation (A14) ==="
-  $groups = (& whoami /groups) -join "`n"
+  # Call the Windows tool by ABSOLUTE path. A bare `whoami` is whatever PATH resolves first, and
+  # on this machine (2026-10-22) that is Git's Unix whoami in `C:\Program Files\Git\usr\bin`,
+  # which answers "extra operand '/groups'" -- so $groups was empty, the regex never matched and
+  # this check reported the session as elevated when it was not. The suite must not depend on
+  # PATH order to ask Windows a Windows question.
+  $whoami = Join-Path $env:SystemRoot 'System32\whoami.exe'
+  $groups = ''
+  if (Test-Path -LiteralPath $whoami) { $groups = (& $whoami /groups) -join "`n" }
   Check "S0.1 this session is NOT elevated (medium integrity, S-1-16-8192)" ($groups -match 'S-1-16-8192')
 
   Stop-AllSidecar

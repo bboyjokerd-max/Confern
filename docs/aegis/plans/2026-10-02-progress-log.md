@@ -17,14 +17,16 @@
 | ⑦ | 第六套配色「冷瓷」＋換配色當場重繪 | ✅ **完成並驗收**（2026-10-21）：改 `Palettes.CurrentId` 就重畫整頁，不必重開；`m1f` S14.32f/g 把下拉的可讀性守衛擴到**每一套配色**。提交 `761eb52`、`0c4cd2c` |
 | ⑧ | 設定頁下拉選單白底白字（你回報第三次） | ✅ **修好並驗收**（2026-10-22）：前兩次修的是「展開的清單」，白的是**一直擺在畫面上的框**——Aero2 的樣板不畫我們的底色，它自己畫主題色（`#E7E7E7`，滑過是淡藍 `#7EB4EA`）疊上我們的近白字＝**1.1–2.2:1**；改成接管 ComboBox 自己的樣板，展開面板也同一個底色（原本面板是純白，有 11.9% 像素是白線）。`m1f` S14.38 兩條守衛量的是**畫面像素**，不是屬性。提交 `a5f1d33` |
 | ⑨ | 假故障稽核的欠債（哪些斷言其實不會紅） | 🔴 **未做**：`docs/aegis/work/2026-10-02-falsifiability/fix-plan.md` 的 P1 第 3–11 項、P2 第 1–6 項。這是目前唯一還欠的技術債 |
+| ⑩ | 命令列表面（跟 Filee 比較後選的四樣便宜東西的第 1 樣） | ✅ **完成並驗收**（2026-10-22）：`confern convert <file>... --to FMT [-o DIR]`、`confern formats`；失敗碼 0／9／4。新套件 `verify-cli` **46/46**，另修掉兩個**實測抓到的真缺陷**（常駐在跑時任何診斷命令都崩潰、`--quality` 從來沒生效過）。提交 `1b38bfc` |
 
 
-## 驗收數字（2026-10-22 實測，exe 時間戳 `10:10:53`）
+## 驗收數字（2026-10-22 實測，exe 時間戳 `14:50:32`）
 
 | 套件 | 範圍 | 實測 | 備註 |
 |------|------|------|------|
+| `tools/verify-cli.ps1` | 命令列表面（子命令、失敗碼、`-o`、品質、與常駐共存、無副作用） | **46/46** | 新套件；S8 是**原始碼級**斷言（值旗標表 vs 解析器） |
 | `tools/verify-m1a.ps1` | 生命週期、接收層、OLE 拖放 | **28/28** | 另有 **20 條需真實輸入**（S3.1–S3.11、S4.1–S4.8／S4.3b）一律 skip |
-| `tools/verify-m1b.ps1` | 輪盤渲染與互動 | **52/52** | ⚠ **必須加 `-Section All`**；不加只跑 13 項 |
+| `tools/verify-m1b.ps1` | 輪盤渲染與互動 | **52/52** | ⚠ **必須加 `-Section All`**；不加只跑 13 項（`verify-all.ps1` 已固定帶上） |
 | `tools/verify-m1c.ps1` | 格式與編解碼 | **20/20** | |
 | `tools/verify-m1d.ps1` | 轉檔契約、Worker、進度 | **74/74** | |
 | `tools/verify-m1f.ps1` | 設定檔、設定頁本體、下拉選單、八語言版面、診斷記錄 | **46/46** | 含 S14.37（八語言）＋ S14.38（下拉框像素） |
@@ -35,10 +37,13 @@
 | `tools/verify-orientation-matrix.ps1` | 八種方向矩陣 | **8/8** | |
 | `tools/verify-merge-images.ps1` | 合併圖片 | **26/26** | |
 | `tools/verify-folder-drop.ps1` | 資料夾拖曳 | **42/42** | |
-| **合計** | 12 支 | **462 條：436 pass、0 fail、26 inconclusive** | 26 條全部是「需要真實滑鼠／鍵盤」 |
+| **合計** | 13 支 | **508 條：482 pass、0 fail、26 inconclusive** | 26 條全部是「需要真實滑鼠／鍵盤」 |
 
-> 每一支都要 `-Exe <Confern.exe 的完整路徑>`。這張表是 2026-10-22 在**同一支 exe**（時間戳
-> `10:10:53`）上逐支跑出來的，`src\` 底下沒有檔案比它新、跑完沒有殘留 Confern 行程。
+> 一次跑完全部：`powershell -File tools\verify-all.ps1 -Exe <Confern.exe>`。它會先殺 Confern、
+> 先印 exe 時間戳、**固定給 `m1b` 帶 `-Section All`**，最後印總表；任何一支沒有摘要行或
+> `fail>0` 都判非綠（exit 3＝該支自己有 N 條 inconclusive，只要 `fail=0` 就算綠）。
+> 這張表是 2026-10-22 在**同一支 exe**（時間戳 `14:50:32`）上跑出來的，`src\` 底下沒有檔案
+> 比它新、跑完沒有殘留 Confern 行程。
 > **`Confern.exe` 的 sha256 不是 build 的身分證**（它是 .NET apphost，程式在 `Confern.dll`）——
 > 有效的儀器是時間戳加上「沒有來源檔比 exe 新」。
 > `verify-m1b.ps1` 不加 `-Section All` 只跑 13 項，「13/13 全綠」是誤判——這個坑踩過兩次，
@@ -58,6 +63,17 @@
 - **八種語言**全翻完並量過版面：繁中、簡中、日、韓、法、德、西、英。
 - 想自己看語言表對不對：`Confern.exe --strings-selftest`（一行看完八張表，
   `aligned=True missing=0 extra=0 badPlaceholders=0`）。
+- **命令列轉檔**（2026-10-22 新增，托盤程式開著也能用）：
+
+  ```powershell
+  $exe = "$PWD\src\Sidecar\bin\Release\net8.0-windows\Confern.exe"
+  & $exe formats                                   # 這一支能讀什麼、能寫什麼
+  & $exe convert 照片.jpg --to png                 # 輸出在來源檔旁邊
+  & $exe convert *.png --to jpg --quality 80 -o D:\out
+  ```
+
+  `--to` 只收 `formats` 印出來的 OUT 那五個（這台機器沒有 WebP 編碼器，所以 `webp` 會被拒並
+  列出可用清單）；`-o` 指到不存在的資料夾**不會**幫你建，會退回來源檔旁邊並在結果那行說出來。
 
 **每一支現在都會在最後斷言「已註冊的檢查數」**，所以任何一段檢查在未來重構裡靜默消失，都會讓該支變紅而不是印出 N/N。這條斷言當場證明過自己：把 `m1d` 的一條 `Check` 註解掉，同一支執行從「印 53/53、exit 0」變成「`checks=53 … FATAL: must register exactly 54`、exit 1」。
 ## 托盤與開機自動啟動（待辦 ④）做了什麼
@@ -3495,3 +3511,63 @@ ActualWidth 寬」，但 TextBlock 的 `ClipToBounds` 預設 false——框比�
 第六套是 `plum`。量測腳本裡的配色清單要跟 `Palette.cs` 對齊。
 
 交付圖：`C:\Users\User\Desktop\Confern測試\下拉選單白底白字-修好-2026-10-22.png`
+## 2026-10-22 · 命令列表面：`confern convert` / `confern formats`（提交 `1b38bfc`）
+
+這是「跟 Filee 比完之後抄四樣便宜東西」的第一樣：它不動任何視覺設計，而且是**拖曳
+做不到的事**（腳本、排程、批次），所以不是重複功能。
+
+### 現在打得出什麼
+
+```
+confern formats                                  印出這一支 exe 能讀什麼、能寫什麼
+confern convert a.png --to jpg                   輸出在來源檔旁邊
+confern convert *.png --to jpg --quality 80 -o out
+```
+
+失敗碼三種，腳本可以直接判：**0** 全部成功、**9** 至少一個檔轉不動、**4** 命令本身錯
+（未知格式、沒給檔、缺值）。子命令寫法把日誌行收進日誌檔，結果只走 stdout，`| tee` 乾乾淨淨；
+舊的 `--convert --target --quiet` 一個字都沒改（多支套件依賴它）。
+
+### 過程中抓到兩個**真的**缺陷（都不是新功能帶進來的）
+
+**① 常駐程式開著的時候，任何 CLI／診斷命令都會直接崩潰。** 預設日誌 `confern.log` 是用
+`FileShare.Read` 開的，所以常駐的那個行程握著它時，第二個行程在 `Evidence` 建構子裡吃到
+`IOException`，而那裡沒有任何 try ⇒ 整個行程 `Unhandled exception`，exit code `0xE0434352`。
+修法：被獨占時退到 `confern.<pid>.log`，並在日誌裡寫明「為什麼這不是預設那個檔」。
+**這條對 `--codecs`、`--settings-probe` 等所有診斷路徑都成立，不只 CLI。**
+守衛：`verify-cli` S5.2–S5.5（先真的把常駐跑起來，再跑 CLI）。
+
+**② `--quality` 從來沒有生效過。** 症狀：q20／q50／q85／q95 四次的輸出**位元組完全相同**。
+真相在新日誌裡：`convert result: Fail error=Unsupported source=20`——`--quality 20` 的 `20`
+被我的正規化器當成**輸入檔**，所以每次都用了預設 85。根因是正規化器不知道「哪些旗標吃值」。
+修法：`CliArgs.ValueFlags`（39 個，解析器的兩種寫法 `args[i + 1]` 與 `++i < args.Length` 都算）。
+修好後同一張雜訊圖：**q60 = 58,898B / q85 = 93,446B / q100 = 243,029B**，三個 sha256 互異。
+超出 60–100 時夾回**並說出來**（`MinEncodeQuality`／`MaxEncodeQuality` 是唯一定義處，
+不再有第二個 60 寫在說明文字裡）。
+
+### 驗收
+
+- 新套件 `tools/verify-cli.ps1`：**46/46**（S1 子命令面、S2 formats 誠實、
+  S3 convert 契約、S4 品質真的到達編碼器、S5 與常駐共存、S6 無副作用、
+  S7 舊旗標不變、S8 值旗標表與解析器一致）。
+  ★ S8 是**原始碼級的斷言**：它掃描解析器、把「會往下讀一個參數」的旗標抽出來跟
+  `ValueFlags` 比對，所以下次新增吃值的旗標卻忘了登記，會是一條紅燈。
+- 新增 `tools/verify-all.ps1`：一次跑完所有套件、印總表。它接管兩件以前靠記憶的儀式
+  （先殺 Confern、先印 exe 時間戳），並且**固定給 `m1b` 帶 `-Section All`**——
+  2026-10-22 那顆「13/13 全綠」的假綠燈就是漏了這個參數。
+- 回歸：**13 支 508 檢查：482 pass、0 fail、26 inconclusive**（同一支 exe，時間戳 `14:50:32`）。
+  `--strings-selftest` 不變（`tables=8 baseKeys=206 aligned=True missing=0 extra=0`）。
+
+### 同一輪順手修掉的**儀器**問題（不是產品）
+
+1. `verify-m1a` S0.1 用裸叫的 `whoami /groups`，而這台機器的 PATH 先是 Git 的 Unix `whoami`
+   （回 `extra operand '/groups'`）⇒ 群組清單是空的，把「沒提權」報成「提權了」。
+   改成絕對路徑 `$env:SystemRoot\System32\whoami.exe`。
+2. `verify-orientation-matrix` 的摘要是 `8/8 correct` 而不是 `checks=`，新的執行器一開始把它
+   讀成「0 檢查卻 exit 0」⇒ 執行器改成兩種摘要格式都認。
+3. `verify-m3c`／`verify-m3d` 的 S17.01／S18.01 斷言「exe 比每個來源檔新」：我改完 `CliArgs.cs`
+   沒重建就掃，它們**正確地**紅了——那不是假紅燈，是它抓到我的錯（重建後綠）。
+
+### 還沒做（這一系列剩下的三樣）
+
+資料夾監看、每種檔案型別各自的預設、最近轉檔（預計放托盤選單，不改版面）。
