@@ -3642,3 +3642,81 @@ S2 設定檔往返（10 條，含「同一個資料夾再 add 一次是 replaced
 ### 還沒做（這一系列剩下的兩樣）
 
 每種檔案型別各自的預設、最近轉檔（計畫放托盤選單，不動版面）。
+
+## 2026-10-23 · 桌面收乾淨了，安裝包是一個獨立資料夾
+
+### 一、桌面上跟 Confern 有關的東西全部收進專案（內容一個位元組沒改）
+
+| 桌面原本 | 檔案數／大小 | 現在 |
+|---|---|---|
+| `Confern測試\` | 152 檔／22.4 MB | `testdata\Confern測試\` |
+| `轉檔素材\` | 20 檔／42.5 MB | `testdata\轉檔素材\` |
+| `ROTATE測試\` | 8 檔／3.0 MB | `testdata\ROTATE測試\` |
+| `_S4m_test\` | 10 檔／0.0 MB | `testdata\_S4m_test\` |
+| `白\` | 20 檔／9.6 MB | `testdata\unfiled\白\`（用途未確認）|
+| `新增資料夾\` | 10 檔／4.6 MB | `testdata\unfiled\新增資料夾\`（用途未確認）|
+| `Program.cs` | 0 byte | `testdata\_strays\Program.cs` |
+
+- 七組搬移都逐一比對過「檔數 ＋ 總位元組」，全部一致（不是「看起來搬完了」）。
+- **`testdata/` 不進版控**：68 MB 的圖檔／截圖／log。`.gitignore` 寫 `testdata/*` ＋
+  `!testdata/README.md`——跟 `models/*` 同一個寫法（只排除內容、說明留著），已用
+  `git check-ignore -v` 逐條證明規則真的命中。
+- `unfiled\` 那兩個是我在桌面上找到、但**專案文件 0 處引用**的資料夾。看起來像測試素材，但不敢
+  斷言，所以標成 unfiled，不塞進 `轉檔素材\`——放錯位置比放著更難查。
+- 桌面**沒有搬**的兩樣：`Confern.lnk`（那是你在用的捷徑）與 `config.ini.example`（**不是** Confern
+  的東西，是另一套系統的 API 憑證範例，裡面有明文金鑰；搬進有 git 的資料夾才是危險）。
+
+### 二、專案根目錄那兩個意外資料夾
+
+`0\` 與 `97\` 是 2026-10-21 量八種語言扇形標籤寬度時，腳本把「第 N 個語言」與「圖寬 97px」當成
+目錄名的產物。用 `git mv` 搬進 `archive\caption-captures\`（git 顯示 rename、歷史可追），
+`archive/README.md` 補上它們的來歷與「為什麼是留著而不是刪掉」。搬之前 grep 過 `docs`／`tools`／
+`src` 三處、三種寫法：**0 處引用**。
+
+### 三、安裝包：`C:\Users\User\Desktop\專案\Confern-安裝包\`
+
+用專案自己的 `tools\publish-confern.ps1` 產的（不是我自己複製 bin 出來的），它自己的斷言全部通過：
+
+```
+publish: exit=0 warnings=0 errors=0 (Build succeeded)
+package: model=app\models\model_fp16.onnx length=12984781 sha256=25F165DA…FE5CF6
+package: notice=app\models\MODEL-LICENSE.txt（apache-2.0 全文，隨產品走）
+package: Confern.dll sha256=792E2326…B4AB6F（等於剛建出來的那顆）
+package: exe=152064 bytes; released folder files=24 bytes=20,969,769
+out of the box: exit=0 defaultPath='…\app\models\model_fp16.onnx' wrote count=1
+out of the box: alpha min=0 max=1 clear=0.459（用產品自己的 --remove-bg-inspect 量產物）
+out of the box: source untouched=True
+negative: 把模型拿掉的那份副本 → exit=3 error=ModelUnavailable、寫 0 個檔（不是崩潰）
+```
+
+資料夾長這樣（總計 **35 檔／499.9 MB**，其中 467 MB 是可選模型）：
+
+```
+Confern-安裝包\
+  app\                        主程式 27 檔／32.4 MB（含 models\model_fp16.onnx ＋ 授權全文）
+  可選-高品質去背模型\          BiRefNet 467 MB（MIT）＋授權；複製進 app\models\ 就生效
+  sample.png                   給自檢現轉一張用的
+  驗證安裝.cmd → verify-package.ps1   一鍵自檢（formats ＋ 真的轉一張，印 PASS/FAIL）
+  建立桌面捷徑.cmd             想放捷徑時雙擊（不動你原本那一個）
+  使用說明.txt / 版本資訊.txt  怎麼用／這是哪個版本（sha256、建置時間、驗證狀態）
+```
+
+**這是「框架相依」版**：需要 .NET 8 桌面執行階段（這台已經有；換到沒裝的電腦要自包含版，+180 MB）。
+`Confern.exe` 沒有數位簽章，第一次啟動 SmartScreen 會擋一下——使用說明裡寫了怎麼過。
+
+### 四、順手抓到的一個真陷阱
+
+**Confern 是 GUI 子系統的 exe，cmd 不會等待它**，所以從 `.cmd` 跑
+`Confern.exe formats > file` 得到的是 **0 bytes**（dev 與發佈版都一樣，`2>&1` 也一樣）；
+同樣的指令走 `Start-Process`／`System.Diagnostics.Process` 可以完整抓到 17,754 字元。
+第一版的「驗證安裝.cmd」因此雙擊後**一片空白**——檔案轉出來了、但使用者什麼都看不到。
+修法：真正的自檢寫在 `verify-package.ps1`（.cmd 只負責叫 PowerShell）。這個陷阱值得記住：
+**任何要讓人雙擊就看到產品輸出的 .cmd，都必須經過 PowerShell 轉一手。**
+（順帶：`Get-Content -Raw` 對空的轉向串流會回 `$null`，`$null.TrimEnd()` 會炸——改成
+`File.ReadAllText`。）
+
+### 現在桌面剩什麼
+
+Confern 相關只剩 `Confern.lnk`（指向 `src\...\bin\Release\Confern.exe`，仍是有效建置）。
+要改指到安裝包：雙擊 `Confern-安裝包\建立桌面捷徑.cmd`，它會建一個新的
+`Confern (package).lnk`，不會動到原本那一個。
