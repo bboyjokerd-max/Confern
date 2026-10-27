@@ -34,3 +34,8 @@ secrets.json
 #    模型二進位檔仍然被排除（已實測 `git check-ignore -v models/model_fp16.onnx` 命中）。
 models/*
 !models/MODEL-LICENSE.txt
+# 使用者實測素材（2026-10-23 從桌面收進來的 68 MB 圖檔／截圖／log）：**刻意不進版控**。
+# 與上面 `models/*` 同一個理由、同一個寫法——只排除內容，把說明 `testdata/README.md` 留下。
+# 驗收套件不會讀這裡（它們用自己的暫時目錄現做），要進版控的輸入在 `fixtures/`。
+testdata/*
+!testdata/README.md
