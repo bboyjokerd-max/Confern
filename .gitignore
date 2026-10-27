@@ -39,3 +39,5 @@ models/*
 # 驗收套件不會讀這裡（它們用自己的暫時目錄現做），要進版控的輸入在 `fixtures/`。
 testdata/*
 !testdata/README.md
+# 安裝檔產物（tools\build-installer.ps1 的輸出）: 一個 setup exe 與它的 staging 暫存
+dist/

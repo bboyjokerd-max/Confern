@@ -3720,3 +3720,90 @@ Confern-安裝包\
 Confern 相關只剩 `Confern.lnk`（指向 `src\...\bin\Release\Confern.exe`，仍是有效建置）。
 要改指到安裝包：雙擊 `Confern-安裝包\建立桌面捷徑.cmd`，它會建一個新的
 `Confern (package).lnk`，不會動到原本那一個。
+
+## 2026-10-23 · 安裝檔：一個 18.44 MB 的 Confern-Setup-0.1.0.exe
+
+使用者要求「最精簡的檔案、安裝時自動提示要裝 .NET 8、用市面上最通用的方式」。做成一個 Inno Setup
+安裝檔，並用腳本把「它能安裝」這件事量出來。
+
+### 為什麼是 Inno Setup（比較的是能不能做到那三件事，不是喜好）
+
+| 選項 | 判斷 |
+|---|---|
+| **Inno Setup 6** | 單一 .exe、繁體中文精靈、免 UAC 的每位使用者安裝、寫入「應用程式與功能」可解除安裝、內建前置檢查與下載、支援 `/VERYSILENT` → **採用** |
+| MSI／WiX | 企業最標準，但 .NET 前置條件要用 launch condition ＋ 自訂動作，而且不是單一 exe |
+| NSIS | 能力同級，但每個頁面都要自己刻、腳本難讀 |
+| IExpress（Windows 內建） | 零工具、能產 exe，但沒有捷徑／卸載／前置檢查 |
+| MSIX | 要簽章憑證與 sideload 設定，不通用 |
+
+工具用 `winget install --id JRSoftware.InnoSetup -e` 裝（6.7.3，**per-user 裝在
+`%LOCALAPPDATA%\Programs\Inno Setup 6`**，所以之後編譯不需要管理員）。繁中語言檔
+`ChineseTraditional.isl` 不在安裝包裡（官方 6.5.0+ 才列入），從官方 repo 取回放在
+`tools\installer\langs\`。
+
+### 體積（實測，不是估的）
+
+```
+發佈內容（去掉 *.pdb *.lib 之後）  27 檔 / 32.75 MB
+  其中 onnxruntime.dll             16,462,648 B
+       model_fp16.onnx             12,984,781 B   ← 兩個加起來 91%
+安裝檔 Confern-Setup-0.1.0.exe     18.44 MB（LZMA2/max，固實壓縮）
+  sha256 D6FA74DB4F2291042A4E0577CB4D92E335B21150CB41777538C2527DFDC18C8D
+缺 .NET 8 時提示下載的官方檔        55.7 MB（aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe，問 HTTP header 量的）
+```
+
+可選的 BiRefNet（467 MB）**不進安裝檔**，維持獨立資料夾。
+
+### 安裝行為（每一條都是決定）
+
+- 檢查 `Microsoft.WindowsDesktop.App 8.x`：讀 **`C:\Program Files\dotnet\shared\…` 的資料夾名**，
+  **不是**讀註冊表——這台機器上官方文件寫的
+  `HKLM\SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx` 這個鍵**根本不存在**，而 8.0.6／8.0.31
+  都裝得好好的。註冊表那條路會讓「有裝卻說沒裝」。
+- 缺 8.x → 對話框問「要現在自動下載並安裝嗎」：是＝下載後 `/install /quiet /norestart`
+  （1638＝已裝新版、3010＝待重開機，都算成功）；否＝開官方頁面並**結束安裝**（不留半成品）。
+- 每位使用者安裝到 `%LOCALAPPDATA%\Programs\Confern`（免 UAC）；管理員可在精靈裡改選全機器。
+- 開始功能表捷徑＋桌面捷徑（可勾）；**不**寫開機自動啟動——產品設定頁自己有一條，兩個主人會出事。
+- 解除安裝會**問**要不要刪 `%LOCALAPPDATA%\Confern`（那是使用者的資料），靜默模式不問也不刪。
+- 同一個 AppId ⇒ 新版直接覆蓋，不會裝兩份。`CloseApplications=yes` 讓升級時自動關掉正在跑的
+  Confern（它有單一實例守衛，不關會鎖住檔案）。
+
+### 驗收：`tools\build-installer.ps1`（不是「編譯成功就好」）
+
+一次跑完 publish → 編譯 → **靜默安裝到臨時資料夾 → 用安裝起來的 exe 真的跑 `formats`
+→ 靜默解除安裝 → 確認 exe 真的不見了**。實測輸出：
+
+```
+staging: removed 2 file(s) … (*.pdb, *.lib)
+staging: model=12984781 bytes sha256=25F165DA…FE5CF6
+setup:   Confern-Setup-0.1.0.exe  18.44 MB
+drill: every staged file arrived, and the two documents kept their content
+drill: the .NET 8 check ran and found the runtime (dotnet8: present=True)
+drill: the installed exe answered "formats" correctly
+drill: uninstalled cleanly (the executable is gone)
+elapsed=14.1 s
+```
+
+`dotnet8: present=True` 那行是安裝程式自己寫進 `/LOG=` 的，所以「它有檢查前置條件」是日誌裡的
+證據，不是我說了算。
+
+### 編譯時踩到的三個坑（都修好了，記下來）
+
+1. **`-Include '*.pdb','*.lib'` 把整個 staging 刪光**（26 個檔，連 `Confern.exe`）：在
+   `Get-ChildItem -LiteralPath <dir> -Recurse -File -Include …` 這個組合下它匹配了全部檔案。
+   改成 `Where-Object { $_.Extension -eq '.pdb' … }`。
+2. **`TOnDownloadProgress` 是 function 不是 procedure**，而且 `DownloadTemporaryFile` 回傳的是
+   **位元數**（檔案在 `{tmp}\<BaseName>`），不是路徑。編譯器只說「line 166 Type mismatch」。
+3. **Inno 的 `{ … }` 註解不能包住 `{tmp}`**：內層大括號會提前關掉註解，後面的英文字變成程式碼
+   （`Unknown identifier 'using'`）。含大括號的說明一律用 `//`。另外 Inno 的 Pascal 沒有
+   `BoolToStr`，要自己寫。
+
+還有一個與產品有關的:**Confern 是 GUI 子系統 exe，cmd 不等待它**，所以 `.cmd` 裡用 `>` 抓不到任何
+輸出（0 bytes）。安裝檔本身不受影響，但這代表「用 cmd 包一層去跑 Confern」是行不通的路。
+
+### 還沒被量到的一件事（誠實留著）
+
+「**這台沒有 .NET 8** 時那個對話框長什麼樣」沒有實測——要測得先移除 .NET 8（需要管理員、而且會
+影響其他程式），或在沒裝 .NET 的機器上跑。目前有的是：偵測函式本身在日誌裡留了 `present=True`、
+兩條搜尋路徑都印出來，以及缺模型/缺檔那類失敗路徑的既有斷言。要真驗這條，下次找一台乾淨的
+Windows 或在 VM 裡跑一次。

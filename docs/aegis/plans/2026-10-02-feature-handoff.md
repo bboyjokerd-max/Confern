@@ -42,6 +42,14 @@
    引擎在 `src\Sidecar\Watch\`（`FolderWatcher` 輪詢 250 ms、安靜 400 ms 才算寫完）；
    **沒有動任何視覺設計**（設定頁沒多一列）。三個實測抓到的問題寫在進度記錄那一節：`--add` 其實
    開了前台監看、`--list` 被子命令名吃掉、半寫入檔案需要「失敗可重試」而不是調門檻。
+6. **安裝檔**（2026-10-23，`tools/build-installer.ps1` ＋ `tools/installer/confern.iss`）：一個
+   **18.44 MB** 的 `Confern-Setup-0.1.0.exe`（Inno Setup 6.7.3）。缺 .NET 8 桌面執行階段時會先問
+   使用者要不要自動下載安裝，選否則結束安裝；每位使用者裝到
+   `%LOCALAPPDATA%\Programs\Confern`，免 UAC、有捷徑、可正常解除安裝、同 AppId 可覆蓋升級。
+   腳本自己會**靜默安裝到臨時資料夾→用裝起來的 exe 跑 `formats`→靜默解除安裝→確認 exe 不見**，
+   並斷言安裝日誌裡的 `dotnet8: present=True`。細節與三個編譯坑在進度記錄
+   「2026-10-23 · 安裝檔」那一節。**沒驗到的**：這台有 .NET 8，所以「缺 .NET」那個對話框本人
+   沒有實測（要有乾淨機器或 VM）。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 
@@ -109,6 +117,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1d.ps1 -Exe <e
 # 輪盤畫面檢查（-Glow 0 因為光暈目前關閉）
 $wd = "docs\aegis\work\2026-10-01-wheel-impl"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $wd -Glow 0
+
+# 安裝檔（publish → ISCC → 靜默安裝 → 用裝起來的 exe 跑 formats → 解除安裝）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-installer.ps1
+# 產物: dist\Confern-Setup-<version>.exe（版本讀 Sidecar.csproj 的 <Version>）
 ```
 
 ## 環境鐵律（踩過，別再踩）
