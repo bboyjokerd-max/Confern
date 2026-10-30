@@ -603,6 +603,9 @@ internal sealed class Options
                                     `confern recent`); it is the same list the tray submenu shows
           --recent-limit <N>        with --recent-list: only the newest N entries (0 = all)
           --recent-clear            empty that list and exit (same as `confern recent --clear`)
+                                    (the store path can be overridden with the CONFERN_RECENT
+                                    environment variable; acceptance runs use that so their temp
+                                    conversions never enter your own list)
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)

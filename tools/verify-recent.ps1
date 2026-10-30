@@ -37,7 +37,7 @@ $script:fail = 0
 # A check that fails to REGISTER is invisible: a helper stops matching, the block never runs, the
 # total just gets smaller and the suite still exits 0. Pinning the count turns that into a loud FATAL.
 # Adding or removing a check means updating this number ON PURPOSE.
-$script:ExpectedChecks = 40
+$script:ExpectedChecks = 43
 
 Add-Type -AssemblyName System.Drawing
 
@@ -47,7 +47,14 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
     else { $script:fail++; "  FAIL  $name  [$detail]" }
 }
 
-$store = Join-Path $env:LOCALAPPDATA 'Confern\recent.json'
+# The store path follows the same override the product itself honours (tools\verify-all.ps1 sets it
+# for every suite). When it is set there is nothing of the user's to protect, so no backup is needed.
+$storeOverride = $env:CONFERN_RECENT
+if ([string]::IsNullOrWhiteSpace($storeOverride)) {
+    $store = Join-Path $env:LOCALAPPDATA 'Confern\recent.json'
+} else {
+    $store = $storeOverride
+}
 $backup = Join-Path $Work 'recent.json.backup'
 $hadStore = Test-Path $store
 
@@ -272,9 +279,40 @@ Check 'S6.9 the store writes atomically and overwrites on purpose' (
     $storeText -match 'AtomicWriter\.Write\(_path' -and $storeText -match 'overwrite: true') ''
 
 # --------------------------------------------------------------------------------------------
-# Put the user's list back exactly as it was.
+"=== S7 the store path can be redirected (so acceptance never fills the user's list) ==="
+# 2026-10-23: a full sweep used to leave ELEVEN %TEMP% paths in the real recent.json -- the suites
+# really do convert files. The product now honours CONFERN_RECENT, and this is the assertion that the
+# override actually redirects the writes AND is visible in the output.
+$overrideStore = Join-Path $Work 'override\recent.json'
+Remove-Item (Split-Path -Parent $overrideStore) -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path (Split-Path -Parent $overrideStore) -Force | Out-Null
+$savedBefore = Get-StoreText
+$prevOverride = $env:CONFERN_RECENT
+$env:CONFERN_RECENT = $overrideStore
+try {
+    $ovSrc = Join-Path $Work 'override.png'
+    New-Png $ovSrc 40 ([int]0xFF8844AA)
+    $c = Invoke-Cli @('convert', $ovSrc, '--to', 'JPG') 'S7-convert'
+    Check 'S7.1 a conversion under the override writes to the redirected file' (
+        $c.Exit -eq 0 -and (Test-Path $overrideStore) -and
+        ((Get-Content $overrideStore -Raw -Encoding UTF8) -match 'override')) "exit=$($c.Exit) store=$(Test-Path $overrideStore)"
+    Check 'S7.2 the real list is untouched by that conversion' (
+        (Get-StoreText) -eq $savedBefore) "before=$($savedBefore.Length) after=$((Get-StoreText).Length)"
+    $r = Invoke-Cli @('recent') 'S7-list'
+    Check 'S7.3 the CLI says which file it is reading, so the override is never invisible' (
+        $r.Out -match 'file: .*override\\recent\.json' -and $r.Out -match 'total=1') $r.Out
+} finally {
+    if ($null -eq $prevOverride) { Remove-Item Env:CONFERN_RECENT -ErrorAction SilentlyContinue }
+    else { $env:CONFERN_RECENT = $prevOverride }
+}
+
+# --------------------------------------------------------------------------------------------
+# Put the user's list back exactly as it was (or leave the throwaway one behind when an override was
+# in effect -- that file is not the user's).
 Remove-Item $store -Force -ErrorAction SilentlyContinue
-if ($hadStore -and (Test-Path $backup)) {
+if (-not [string]::IsNullOrWhiteSpace($storeOverride)) {
+    "### store was the throwaway file from CONFERN_RECENT (nothing of the user's was touched)"
+} elseif ($hadStore -and (Test-Path $backup)) {
     Copy-Item $backup $store -Force
     Remove-Item $backup -Force -ErrorAction SilentlyContinue
     "### restored the pre-existing recent.json"

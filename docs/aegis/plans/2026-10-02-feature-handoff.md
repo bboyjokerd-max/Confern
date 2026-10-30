@@ -50,13 +50,15 @@
    並斷言安裝日誌裡的 `dotnet8: present=True`。細節與三個編譯坑在進度記錄
    「2026-10-23 · 安裝檔」那一節。**沒驗到的**：這台有 .NET 8，所以「缺 .NET」那個對話框本人
    沒有實測（要有乾淨機器或 VM）。
-7. **最近轉檔**（2026-10-23，`tools/verify-recent.ps1` 40/40）：托盤右鍵多一個「最近轉檔」子選單
+7. **最近轉檔**（2026-10-23，`tools/verify-recent.ps1` 43/43）：托盤右鍵多一個「最近轉檔」子選單
    （最多 8 筆檔名 ＋ 清除紀錄），命令列多了 `confern recent [--limit N] [--clear]`。資料在
    `%LOCALAPPDATA%\Confern\recent.json`（上限 12 筆、原子寫入、輸出檔不見就移除、壞檔退回空清單
    並說原因、被別的行程改過會重讀）。三條登記路徑：`ConvertOnce`（CLI）、`ConversionClient`
    （worker 結果那一側，才知道是哪顆扇形）、`FolderWatcher`；**worker 不寫**。
    **沒有動任何視覺設計**。驗收抓到的兩個真缺陷（`StreamWriter` 沒 `leaveOpen` 導致紀錄永遠寫不
    進去；`--recent-limit` 單獨出現會掉到常駐分支而卡死驗收十分鐘）寫在進度記錄那一節。
+   **驗收會寫進使用者的清單**這件事也修了：`CONFERN_RECENT` 環境變數（`verify-all` 自己設），
+   所以套件真的轉檔時紀錄只會落在 `%TEMP%`。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 

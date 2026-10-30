@@ -3883,17 +3883,26 @@ confern recent --clear         # 清空
    （日誌 `recent: reloaded '…' (another process changed it) count=2`）。這一條有自動斷言：
    `--tray-selftest` 用**兩個獨立的 store 實例**（＝兩個行程，沒有共用狀態）證明第二個寫的
    第一看得到。
+5. **驗收自己污染了使用者的清單**：第一輪全綠之後重啟托盤，子選單上有 **11 筆**
+   `%TEMP%\confern-folder-drop\…`——不是程式的錯，是**驗收真的在轉檔**，而那些紀錄寫進了使用者
+   真正的 `recent.json`。修法：`RecentStore.DefaultPath()` 認環境變數 **`CONFERN_RECENT`**，而
+   `tools\verify-all.ps1` 在啟動任何套件之前設一次（環境變數是**繼承**的，所以 15 支腳本裡幾十個
+   `Confern` 呼叫點都不必各自加參數——漏一個就污染一次，而那種漏永遠不會有人發現）。用了覆寫會
+   留一行日誌，命令列也會印 `file:` 那個路徑，所以「我的清單怎麼不見了」五秒內有答案。實測：
+   覆寫存在時使用者的檔案一字不動，掃描完仍然是 `[]`。
+   （順帶清掉那 11 筆：`confern recent --clear`，內容回到 `[]`。）
 
-### 驗收：`tools\verify-recent.ps1`（40 項）
+### 驗收：`tools\verify-recent.ps1`（43 項）
 
-它會把使用者真正的 `recent.json` **先搬開、跑完再放回去**（驗收不該花掉使用者的歷史）。斷言全部
-是位元組、exit code 或真的檔案：清單順序（新的在前）、`[convert]`／`[watch]` 標記、列出的路徑
-真的存在、刪掉輸出檔後那一筆消失且**檔案也改寫了**、13 個檔之後只剩 12 筆且掉的是最舊那一個、
-壞檔退回空清單並在 stderr 說原因、`--clear` 之後檔案內容是 `[]`。托盤那一半靠 `--tray-selftest`
-的 Shared Dispatch（與真實點擊同一條路徑），加上兩條原始碼守衛（`MF_POPUP` 真的把子選單掛上去、
-跳選單前一定先重建）。
+它會把使用者真正的 `recent.json` **先搬開、跑完再放回去**（驗收不該花掉使用者的歷史；有
+`CONFERN_RECENT` 覆寫時則是直接寫那個拋棄式檔案）。斷言全部是位元組、exit code 或真的檔案：
+清單順序（新的在前）、`[convert]`／`[watch]` 標記、列出的路徑真的存在、刪掉輸出檔後那一筆消失且
+**檔案也改寫了**、13 個檔之後只剩 12 筆且掉的是最舊那一個、壞檔退回空清單並在 stderr 說原因、
+`--clear` 之後檔案內容是 `[]`、覆寫真的把寫入導到別處而使用者的檔案一字不動。托盤那一半靠
+`--tray-selftest` 的 Shared Dispatch（與真實點擊同一條路徑），加上兩條原始碼守衛（`MF_POPUP` 真的
+把子選單掛上去、跳選單前一定先重建）與一條跨實例重讀斷言。
 
-全套 15 支：**587 項，561 pass、0 fail、26 inconclusive**（inconclusive 全是需要真滑鼠／鍵盤的
+全套 15 支：**590 項，564 pass、0 fail、26 inconclusive**（inconclusive 全是需要真滑鼠／鍵盤的
 m1a 20 項與 m1h 6 項）。
 
 ### 誠實缺口

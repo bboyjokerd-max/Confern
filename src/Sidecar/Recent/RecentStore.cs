@@ -123,9 +123,21 @@ internal sealed class RecentStore
         }
     }
 
-    /// <summary>`%LOCALAPPDATA%\Confern\recent.json`——與 settings.json／temps.json 同一個資料夾。</summary>
-    public static string DefaultPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductInfo.Name, "recent.json");
+    /// <summary>
+    /// `%LOCALAPPDATA%\Confern\recent.json`——與 settings.json／temps.json 同一個資料夾。
+    ///
+    /// <para><b>環境變數 <c>CONFERN_RECENT</c> 會蓋掉它</b>：驗收套件會真的轉檔（每個套件幾十次），
+    /// 那些暫存路徑不該進入使用者的「最近轉檔」。變數是**繼承**的，所以 `tools\verify-all.ps1`
+    /// 只要在啟動套件前設一次，之後每一支、每一層子行程都自動寫到暫存檔——不必在 15 支腳本裡的
+    /// 幾十個呼叫點各加一個參數（漏一個就污染一次，而那種漏永遠不會有人發現）。</para>
+    /// </summary>
+    public static string DefaultPath()
+    {
+        string? overridden = Environment.GetEnvironmentVariable("CONFERN_RECENT");
+        if (!string.IsNullOrWhiteSpace(overridden)) return overridden;
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                            ProductInfo.Name, "recent.json");
+    }
 
     /// <summary>行程共用的那一個（托盤、worker 結果、監看資料夾都寫這一個）。</summary>
     public static RecentStore Shared(Action<string>? log = null)
@@ -134,6 +146,9 @@ internal sealed class RecentStore
         lock (typeof(RecentStore))
         {
             _shared ??= new RecentStore(DefaultPath(), log);
+            // 用了覆寫就要**說出來**：一行日誌讓「我的清單怎麼不見了」這種問題五秒內有答案。
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONFERN_RECENT")))
+                log?.Invoke($"recent: using '{_shared.FilePath}' (CONFERN_RECENT overrides the user list)");
             return _shared;
         }
     }

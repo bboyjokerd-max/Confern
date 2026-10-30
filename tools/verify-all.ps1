@@ -70,6 +70,15 @@ $exePath = (Resolve-Path $Exe).Path
 ""
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 
+# The suites really convert files (dozens of times each). Their outputs are temp paths and have no
+# business in the user's own "recent conversions" list -- which is exactly what happened on
+# 2026-10-23: after one sweep the tray submenu offered 11 leftover entries from
+# %TEMP%\confern-folder-drop. The override is an ENVIRONMENT VARIABLE on purpose: it is inherited by
+# every suite and by every Confern they start, so there is no per-call argument to forget.
+$env:CONFERN_RECENT = Join-Path $Work 'recent.json'
+"recent store: $env:CONFERN_RECENT (the user list is not touched)"
+Remove-Item $env:CONFERN_RECENT -Force -ErrorAction SilentlyContinue
+
 $rows = @()
 foreach ($s in $suites) {
     if ($Only.Count -gt 0 -and $Only -notcontains $s.Name) { continue }
