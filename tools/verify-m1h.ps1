@@ -356,11 +356,17 @@ if ($variantsOk) {
   Check 'S16.16 the worker really failed the file over the pipe (precondition for the row below)' `
     ($payload.ExitCode -eq 0 -and $payloadText -match 'conversion finished: finished=True ok=0 failed=1') `
     "exit=$($payload.ExitCode)"
-  $realLine = [regex]::Match($payloadText, "detail row: file=(\S+) reason='([^']*)'")
+  # P2-11 (2026-10-02 audit): `(\S+)` assumes the fixture name has no whitespace. That premise is
+  # now stated instead of assumed -- and note its failure direction: a name with a space would make
+  # S16.18's equality fail LOUDLY (the capture stops at the space), never pass quietly.
+  $realRows = [regex]::Matches($payloadText, "detail row: file=(\S+) reason='([^']*)'")
+  $realLine = if ($realRows.Count -gt 0) { $realRows[0] } else { [regex]::Match('', 'x') }
   $rowFile = if ($realLine.Success) { $realLine.Groups[1].Value.Trim() } else { '' }
   $rowReason = if ($realLine.Success) { $realLine.Groups[2].Value.Trim() } else { '' }
-  Check 'S16.17 the pipeline produced exactly one detail row' $realLine.Success `
-    "line='$($realLine.Value)'"
+  # P2-8 (2026-10-02 audit): the title said "exactly one" while the assertion only asked for a match.
+  # A pipeline that drew the same failure row twice passed. The count is now the assertion.
+  Check 'S16.17 the pipeline produced exactly one detail row' ($realRows.Count -eq 1) `
+    "rows=$($realRows.Count) line='$($realLine.Value)'"
   Check 'S16.18 that row names the file that actually failed (not a dummy name)' `
     ($rowFile -eq $FILE_DECODE) "file='$rowFile' expected='$FILE_DECODE'"
   # Non-ASCII on purpose: the reason is Traditional Chinese by spec 7.1, and an

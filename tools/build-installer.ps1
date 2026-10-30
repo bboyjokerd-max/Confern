@@ -288,6 +288,41 @@ if ($SkipDrill) {
     }
     Say 'drill: the installed exe answered "formats" correctly'
 
+    # The two commands the user actually types. Both stores are pointed at the drill folder first, so
+    # this cannot read or eat the real %LOCALAPPDATA%\Confern\*.json -- and "preset --set" proves the
+    # write path (AtomicWriter) works from an installed location, not just from bin\Release.
+    $drillPresets = Join-Path $drillRoot 'presets.json'
+    $drillRecent = Join-Path $drillRoot 'recent.json'
+    $oldPresets = $env:CONFERN_PRESETS
+    $oldRecent = $env:CONFERN_RECENT
+    try {
+        $env:CONFERN_PRESETS = $drillPresets
+        $env:CONFERN_RECENT = $drillRecent
+        $probe2 = Start-Process -FilePath $drillExe -ArgumentList (Quote-Argv @('preset', '--set', 'HEIC=JPG:82')) -Wait -PassThru `
+                                -WindowStyle Hidden -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+        $text2 = [System.IO.File]::ReadAllText($probeOut, [System.Text.Encoding]::UTF8)
+        if ($probe2.ExitCode -ne 0) { Die "the installed exe exited with $($probe2.ExitCode) on 'preset --set HEIC=JPG:82'" 5 }
+        if ($text2 -notmatch 'set HEIC -> JPG \(quality 82\)') {
+            $head = $text2.Substring(0, [Math]::Min(200, $text2.Length))
+            Die "the installed exe did not store the preset (first 200 chars: $head)" 5
+        }
+        if (-not (Test-Path -LiteralPath $drillPresets)) { Die "preset --set said it worked but wrote no file: $drillPresets" 5 }
+
+        $probe3 = Start-Process -FilePath $drillExe -ArgumentList (Quote-Argv @('recent')) -Wait -PassThru `
+                                -WindowStyle Hidden -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+        $text3 = [System.IO.File]::ReadAllText($probeOut, [System.Text.Encoding]::UTF8)
+        if ($probe3.ExitCode -ne 0) { Die "the installed exe exited with $($probe3.ExitCode) on 'recent'" 5 }
+        if ($text3 -notmatch 'recent conversions \(\d+ listed') {
+            $head = $text3.Substring(0, [Math]::Min(200, $text3.Length))
+            Die "the installed exe did not print its recent list (first 200 chars: $head)" 5
+        }
+        Say 'drill: the installed exe also answered "preset --set" (and wrote the file) and "recent"'
+    }
+    finally {
+        $env:CONFERN_PRESETS = $oldPresets
+        $env:CONFERN_RECENT = $oldRecent
+    }
+
     # Uninstall, with the same shape the Add/Remove Programs entry uses.
     $un = Start-Process -FilePath $uninst -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru -WindowStyle Hidden
     if ($un.ExitCode -ne 0) { Die "the silent uninstall exited with $($un.ExitCode)" 5 }

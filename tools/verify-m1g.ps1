@@ -434,6 +434,9 @@ $runAfterText = if (Test-Path -LiteralPath $runKeyPath) {
   $v = (Get-ItemProperty -LiteralPath $runKeyPath -Name $runName -ErrorAction SilentlyContinue).$runName
   if ($null -eq $v) { '(absent)' } else { "$v" }
 } else { '(absent)' }
+# P2-9 (2026-10-02 audit): this check proves the RESTORE, not the feature. The evidence that the
+# product really wrote the autostart value lives in S15.21/S15.22 (they read the value back while the
+# feature was on). Keeping that straight matters: this one can only go red if the cleanup breaks.
 Check 'S15.23 the real Run value is unchanged by the whole suite' ($runAfterText -eq $runBeforeText) `
   "$runBeforeText -> $runAfterText (the resident run under test wrote it on purpose; this suite restored it)"
 

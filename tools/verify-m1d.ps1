@@ -243,7 +243,11 @@ $p = Start-Process -FilePath $Exe -ArgumentList @('--codecs', '--quiet', '--log'
 $codecText = (Get-Content -LiteralPath $codecLog -Encoding UTF8) -join "`n"
 $offeredLine = ($codecText -split "`n" | Where-Object { $_ -match 'offered=\[' } | Select-Object -First 1)
 if ($offeredLine) {
-  Expect 3
+  # P2-6 (2026-10-02 audit): S12.9b/c used to assert "GIF is not in the list" and "WEBP is not in
+  # the list" right after S12.9 asserts the list EQUALS an exact set. Given that equality both are
+  # implied, so they were three checks resting on one fact -- the kind of arithmetic that inflates a
+  # count without adding evidence. They are gone; the exact-set assertion below carries them.
+  Expect 1
   $offered = ([regex]::Match($offeredLine, 'offered=\[([^\]]*)\]')).Groups[1].Value -split ','
   $sorted = ($offered | Sort-Object) -join ','
   # 2026-10-14: PDF joined the declared output matrix (image -> one page PDF). This expectation
@@ -251,8 +255,7 @@ if ($offeredLine) {
   # this change is exactly its job -- unlike the duplicate that used to live in Program.cs,
   # which was product code holding a copy of a product list (that one was a real defect).
   Check 'S12.9 offered outputs = declared n encodable' ($sorted -eq 'BMP,JPG,PDF,PNG,TIF') "offered=$sorted"
-  Check 'S12.9b GIF never offered (capable but not declared)' (-not ($offered -contains 'GIF')) ''
-  Check 'S12.9c WEBP never offered (declared but not encodable here)' (-not ($offered -contains 'WEBP')) ''
+
 } else {
   Expect 1
   Inconclusive 'S12.9 offered outputs' 'no offered=[] line in the codec log'

@@ -1,4 +1,4 @@
-﻿# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
+# verify-m1b.ps1 -- M1b acceptance runner (wheel geometry and display)
 #
 # Sections:
 #   S6  two-layer stack: the visual layer must be click-through (automatic, NON-INVASIVE)
@@ -560,8 +560,13 @@ function Invoke-S8([int]$Window) {
   $lines = Get-LogLines $log
   $enters = Count-Log $lines 'OLE DragEnter:'
   Check "S8.1 a real DragEnter was observed (count=$enters)" ($enters -ge 1)
-  # The injected diagnostic writes its own marker, so it can never satisfy the checks below.
-  Check "S8.2 no injected-payload marker in this log" ((Count-Log $lines '\*\*\* INJECTED') -eq 0)
+  # P2-2 (2026-10-02 audit): on its own this was an absence assertion that could not fail -- a log
+  # produced by a real drag has no reason to contain the injection marker, so it was green whether
+  # the gesture took the OLE path or nothing happened at all. With the premise that a real DragEnter
+  # WAS observed, the claim becomes a discrimination: the gesture went through OLE, not through the
+  # `--wheel-payload` seam (which the other sections use). That premise is what can fail.
+  Check "S8.2 the real drag never came through the injected seam (DragEnter x$enters)" `
+    (($enters -ge 1) -and ((Count-Log $lines '\*\*\* INJECTED') -eq 0))
   Check "S8.3 a DragEnter carried exactly one file" ((Count-Log $lines 'OLE DragEnter:.*files=1') -ge 1)
   Check "S8.4 the payload path is the sample that was dragged" ((Count-Log $lines ([regex]::Escape($sample))) -ge 1)
   Check "S8.5 the source format is real PNG, not a placeholder" ((Count-Log $lines 'wheel from OLE payload:.*source=PNG') -ge 1)
