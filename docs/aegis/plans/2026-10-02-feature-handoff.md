@@ -50,6 +50,13 @@
    並斷言安裝日誌裡的 `dotnet8: present=True`。細節與三個編譯坑在進度記錄
    「2026-10-23 · 安裝檔」那一節。**沒驗到的**：這台有 .NET 8，所以「缺 .NET」那個對話框本人
    沒有實測（要有乾淨機器或 VM）。
+7. **最近轉檔**（2026-10-23，`tools/verify-recent.ps1` 40/40）：托盤右鍵多一個「最近轉檔」子選單
+   （最多 8 筆檔名 ＋ 清除紀錄），命令列多了 `confern recent [--limit N] [--clear]`。資料在
+   `%LOCALAPPDATA%\Confern\recent.json`（上限 12 筆、原子寫入、輸出檔不見就移除、壞檔退回空清單
+   並說原因、被別的行程改過會重讀）。三條登記路徑：`ConvertOnce`（CLI）、`ConversionClient`
+   （worker 結果那一側，才知道是哪顆扇形）、`FolderWatcher`；**worker 不寫**。
+   **沒有動任何視覺設計**。驗收抓到的兩個真缺陷（`StreamWriter` 沒 `leaveOpen` 導致紀錄永遠寫不
+   進去；`--recent-limit` 單獨出現會掉到常駐分支而卡死驗收十分鐘）寫在進度記錄那一節。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 
@@ -121,6 +128,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $
 # 安裝檔（publish → ISCC → 靜默安裝 → 用裝起來的 exe 跑 formats → 解除安裝）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-installer.ps1
 # 產物: dist\Confern-Setup-<version>.exe（版本讀 Sidecar.csproj 的 <Version>）
+
+# 一次跑完 15 支（自己會先殺 Confern、印 exe 時間戳，最後給總表）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-all.ps1 -Exe <exe>
+
+# 使用者看得到的兩個新入口
+#   conforn recent / conforn recent --limit 5 / conforn recent --clear
+#   托盤右鍵 → 最近轉檔（子選單，最多 8 筆）
 ```
 
 ## 環境鐵律（踩過，別再踩）

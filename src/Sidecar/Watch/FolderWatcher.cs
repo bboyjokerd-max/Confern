@@ -210,6 +210,11 @@ internal sealed class FolderWatcher : IDisposable
             if (result.Ok && result.OutputPath != null) _done.Add(result.OutputPath);
         }
 
+        // 監看資料夾轉出來的檔也要出現在托盤的「最近轉檔」：使用者在那裡看不到它，就只能自己回想
+        // 「剛剛丟進去的東西跑去哪了」。登記在鎖外面（store 自己有自己的鎖，而且寫檔會慢一點）。
+        if (result.Ok && result.OutputPath != null && Converted >= 0)
+            RecentStore.Shared(_log).Add(file, result.OutputPath, "watch");
+
         if (result.Ok) Converted++;
         else
         {

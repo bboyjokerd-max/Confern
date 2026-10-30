@@ -154,31 +154,34 @@ Check 'S15.2 the shell really accepted the icon, and the probe can see it' (
   $trayText -match 'tray: PASS the shell holds the icon  \[NIM_MODIFY accepted\]') ''
 Check 'S15.3 the tray window is real and cannot take the focus (WS_EX_NOACTIVATE)' (
   $trayText -match 'tray: class=ConfernTray hwnd=0x[0-9A-F]+' -and
-  $trayText -match 'menu items=3') ''
+  $trayText -match 'menu items=4') ''
 Check 'S15.4 every tray event line is prefixed with tray:' (
   (@($trayText -split "`n" | Where-Object { $_ -match '^\d\d:\d\d:\d\d\.\d\d\d tray ' }).Count) -eq 0 -and
   (@($trayText -split "`n" | Where-Object { $_ -match '^\d\d:\d\d:\d\d\.\d\d\d tray:' }).Count) -ge 15) `
   "trayLines=$(@($trayText -split "`n" | Where-Object { $_ -match '^\d\d:\d\d:\d\d\.\d\d\d tray:' }).Count) unprefixed=$(@($trayText -split "`n" | Where-Object { $_ -match '^\d\d:\d\d:\d\d\.\d\d\d tray ' }).Count)"
 
-"=== S15.5-S15.7 the tooltip and the three menu items are what the spec says ==="
+"=== S15.5-S15.7 the tooltip and the four menu items are what the spec says ==="
 # The tooltip string is built from ProductInfo.Name, so this asserts the product name is the single
 # owner's value and not a second hard-coded literal somewhere.
 Check 'S15.5 the tooltip is the product name plus the running state' (
   $trayText -match "tray: tooltip 'Confern - running' state=running" -and
   $trayText -match "tray: PASS tooltip names the product and the state") ''
-Check 'S15.6 the menu has exactly three items, with the spec labels' (
-  $trayText -match "tray: menu items=3 item0='([^']+)' item1='([^']+)' item2='([^']+)' labels_ok=True") ''
-$m = [regex]::Match($trayText, "tray: menu items=3 item0='([^']+)' item1='([^']+)' item2='([^']+)'")
+# 2026-10-23: the tray gained a fourth top-level item, the "recent conversions" submenu. It is the
+# same four labels the product ships, and the count is still pinned on purpose: a menu that silently
+# loses an entry is a real regression, not a cosmetic one.
+Check 'S15.6 the menu has exactly four items, with the spec labels' (
+  $trayText -match "tray: menu items=4 item0='([^']+)' item1='([^']+)' item2='([^']+)' item3='([^']+)' labels_ok=True") ''
+$m = [regex]::Match($trayText, "tray: menu items=4 item0='([^']+)' item1='([^']+)' item2='([^']+)' item3='([^']+)'")
 $cjkLabels = 0
 if ($m.Success) {
-  foreach ($g in @(1,2,3)) {
+  foreach ($g in @(1,2,3,4)) {
     # Non-ASCII: the three labels are Traditional Chinese by product decision (open settings /
     # pause conversion / exit). Asserting the shape here keeps this file ASCII-clean while still
     # failing if a label is ever replaced by an empty or ASCII-only string.
     if ($m.Groups[$g].Value -match '[^\x00-\x7F]') { $cjkLabels++ }
   }
 }
-Check 'S15.7 all three menu labels are the real (non-ASCII) product strings' ($cjkLabels -eq 3) "nonAsciiLabels=$cjkLabels/3"
+Check 'S15.7 all four menu labels are the real (non-ASCII) product strings' ($cjkLabels -eq 4) "nonAsciiLabels=$cjkLabels/4"
 
 "=== S15.8-S15.10 each command ran through the shared dispatch ==="
 # The self-test calls InvokeCommand, which is the SAME method a real menu click ends up in. Three

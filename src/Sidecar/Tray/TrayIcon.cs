@@ -47,10 +47,20 @@ internal sealed class TrayIcon : IDisposable
     public static string MenuOpenSettings => UiStrings.Get("tray.openSettings");
     public static string MenuPause => UiStrings.Get("tray.pause");
     public static string MenuResume => UiStrings.Get("tray.resume");
+    public static string MenuRecent => UiStrings.Get("tray.recent");
+    public static string MenuRecentEmpty => UiStrings.Get("tray.recentEmpty");
+    public static string MenuRecentClear => UiStrings.Get("tray.recentClear");
     public static string MenuExit => UiStrings.Get("tray.exit");
 
-    /// <summary>選單有幾項。自測與驗收腳本都斷言這個數字（少一項是很容易發生、又不容易看見的退化）。</summary>
-    public const int MenuItemCount = 3;
+    /// <summary>
+    /// 選單有幾項（**頂層**：開啟設定／暫停轉換／最近轉檔／結束）。自測與驗收腳本都斷言這個數字
+    /// （少一項是很容易發生、又不容易看見的退化）。
+    ///
+    /// 2026-10-23 由 3 變成 4：「最近轉檔」是**子選單**，它自己是頂層的第三項。
+    /// 加這一項沒有動任何畫面設計——托盤選單就是規格允許的新入口（見 MEMORY 的 UI 凍結決定）。
+    /// </summary>
+    public const int MenuItemCount = 4;
+
 
     /// <summary>提示文字的兩個狀態（ASCII，因為驗收腳本必須是純 ASCII 才比對得到）。</summary>
     private const string StateRunning = "running";
@@ -77,8 +87,30 @@ internal sealed class TrayIcon : IDisposable
 
     private readonly IntPtr _hwnd;
     private readonly IntPtr _menu;
+    private readonly IntPtr _recentMenu;
     private readonly IntPtr _icon16;
     private readonly IntPtr _icon32;
+
+    /// <summary>
+    /// 「最近轉檔」的清單來源——**由呼叫端提供**，托盤自己不認識 <see cref="RecentStore"/>。
+    ///
+    /// 為什麼要切開：托盤是一個「照著清單畫出選單」的東西，它的自測需要一個**決定性的**清單
+    /// （兩個假路徑），而正式路徑需要真的紀錄。若托盤自己去摸全域 store，自測就會寫到使用者的
+    /// 紀錄檔裡——那正是驗收最不該有的副作用。
+    /// </summary>
+    private readonly Func<IReadOnlyList<string>> _recentPaths;
+
+    /// <summary>點了一個「最近轉檔」的列之後要做什麼。預設＝用預設程式打開那個檔。</summary>
+    private readonly Action<string> _openRecent;
+
+    /// <summary>子選單「清除紀錄」要做什麼。托盤不認識 store，所以也是一個回呼。</summary>
+    private readonly Action? _clearRecent;
+
+    /// <summary>
+    /// 子選單目前**真的列出來**的那些路徑。命令代碼是位置導向的（1001 + index），所以「第幾列是哪個檔」
+    /// 這張對照表是唯一能把回傳的 int 對回來的地方——重建選單時一起換掉。
+    /// </summary>
+    private readonly List<string> _shownRecent = new();
 
     private bool _paused;
     private bool _disposed;
@@ -102,13 +134,19 @@ internal sealed class TrayIcon : IDisposable
     public bool IsPaused => _paused;
 
     public TrayIcon(Evidence evidence, Func<bool> isCaptureDisabled,
-                    Action onOpenSettings, Action onTogglePause, Action onExit)
+                    Action onOpenSettings, Action onTogglePause, Action onExit,
+                    Func<IReadOnlyList<string>>? recentPaths = null,
+                    Action<string>? onOpenRecent = null,
+                    Action? onClearRecent = null)
     {
         _evidence = evidence;
         _isCaptureDisabled = isCaptureDisabled;
         _onOpenSettings = onOpenSettings;
         _onTogglePause = onTogglePause;
         _onExit = onExit;
+        _recentPaths = recentPaths ?? (() => Array.Empty<string>());
+        _openRecent = onOpenRecent ?? (path => RecentStore.OpenWithShell(path, _evidence.Line));
+        _clearRecent = onClearRecent;
         Tooltip = BuildTooltip(paused: false);
 
         try
@@ -150,8 +188,10 @@ internal sealed class TrayIcon : IDisposable
                 return;
             }
 
-            _menu = BuildMenu();
-            if (_menu == IntPtr.Zero)
+            (IntPtr menu, IntPtr recentMenu) = BuildMenu();
+            _menu = menu;
+            _recentMenu = recentMenu;
+            if (_menu == IntPtr.Zero || _recentMenu == IntPtr.Zero)
             {
                 Fail($"CreatePopupMenu failed (lastError={Marshal.GetLastWin32Error()})");
                 return;
@@ -161,7 +201,7 @@ internal sealed class TrayIcon : IDisposable
                            $"taskbarCreatedMessage=0x{_taskbarCreatedMessage:X} " +
                            $"icons=16px+32px (GDI+ drawn, no asset files) menu items={MenuItemCount}");
             _evidence.Line($"tray: menu items={MenuItemCount} item0='{LabelFor(TrayCommand.OpenSettings)}' " +
-                           $"item1='{LabelFor(TrayCommand.TogglePause)}' item2='{LabelFor(TrayCommand.Exit)}' " +
+                           $"item1='{LabelFor(TrayCommand.TogglePause)}' item2='{MenuRecent}' item3='{LabelFor(TrayCommand.Exit)}' " +
                            $"labels_ok={LabelsMatchSpec()}");
             LogTooltip();
 
@@ -197,11 +237,83 @@ internal sealed class TrayIcon : IDisposable
         _ => MenuExit
     };
 
-    /// <summary>自測用：選單的三行字是不是規格說的那三行（含暫停／繼續的切換）。</summary>
+    /// <summary>自測用：選單的**四行字**是不是規格說的那些（含暫停／繼續的切換與「最近轉檔」）。</summary>
     public bool LabelsMatchSpec() =>
         LabelFor(TrayCommand.OpenSettings) == MenuOpenSettings &&
         LabelFor(TrayCommand.TogglePause) == (_paused ? MenuResume : MenuPause) &&
+        MenuRecent == UiStrings.Get("tray.recent") &&
         LabelFor(TrayCommand.Exit) == MenuExit;
+
+    // ================= 最近轉檔（子選單） =================
+
+    /// <summary>子選單現在有幾項（自測斷言用：沒有東西時應該是 2——灰字說明＋清除紀錄）。</summary>
+    public int RecentMenuItemCount => _recentMenu == IntPtr.Zero ? 0 : Native.GetMenuItemCount(_recentMenu);
+
+    /// <summary>子選單現在列了幾個「最近轉檔」的列（自測用；灰字說明與分隔線不算）。</summary>
+    public int RecentEntryCount { get; private set; }
+
+    /// <summary>
+    /// 依目前清單重建子選單。**每次跳選單前都要重建**：
+    /// 轉檔隨時可能發生，選單卻只建立一次——不重建的話使用者看到的永遠是「程式剛啟動時的最近清單」，
+    /// 而那正是這個功能最容易被誤認為壞掉的方式。
+    ///
+    /// 全部按位置刪掉再重加，而不是逐項比較新舊：選單項目沒有穩定的身分（只有位置與命令代碼），
+    /// 「只換有變的那一項」在多一個／少一個的時候反而更容易錯。
+    /// </summary>
+    public void RefreshRecentMenu()
+    {
+        if (_recentMenu == IntPtr.Zero) return;
+
+        int existing = Native.GetMenuItemCount(_recentMenu);
+        for (int i = existing - 1; i >= 0; i--) Native.DeleteMenu(_recentMenu, (uint)i, Native.MF_BYPOSITION);
+
+        IReadOnlyList<string> paths;
+        try { paths = _recentPaths() ?? Array.Empty<string>(); }
+        catch (Exception ex)
+        {
+            // 清單來源壞掉不該讓選單開不起來：留一項說明，並把原因寫進日誌。
+            _evidence.Line($"tray: recent list provider threw {ex.GetType().Name}: {ex.Message}");
+            paths = Array.Empty<string>();
+        }
+
+        var shown = _shownRecent;
+        shown.Clear();
+        foreach (string path in paths)
+        {
+            if (shown.Count >= RecentStore.MenuEntries) break;
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            shown.Add(path);
+        }
+
+        if (shown.Count == 0)
+        {
+            Native.AppendMenuW(_recentMenu, Native.MF_STRING | Native.MF_GRAYED, IntPtr.Zero, MenuRecentEmpty);
+            RecentEntryCount = 0;
+            _evidence.Line("tray: recent menu refreshed (empty) items=1");
+            return;
+        }
+
+        for (int i = 0; i < shown.Count; i++)
+        {
+            string label = Path.GetFileName(shown[i]);
+            if (string.IsNullOrEmpty(label)) label = shown[i];
+            Native.AppendMenuW(_recentMenu, Native.MF_STRING,
+                               new IntPtr(Native.TrayCommandRecentBase + i), label);
+        }
+        Native.AppendMenuW(_recentMenu, Native.MF_SEPARATOR, IntPtr.Zero, null);
+        Native.AppendMenuW(_recentMenu, Native.MF_STRING, new IntPtr(Native.TrayCommandRecentClear), MenuRecentClear);
+
+        RecentEntryCount = shown.Count;
+        _evidence.Line($"tray: recent menu refreshed items={shown.Count} " +
+                       $"first='{Path.GetFileName(shown[0])}' clear='{MenuRecentClear}'");
+    }
+
+    /// <summary>自測用：直接走「點第 index 列」那一條（與真實點擊同一個 <see cref="Dispatch"/>）。</summary>
+    public void InvokeRecent(int index) => Dispatch(Native.TrayCommandRecentBase + index);
+
+    /// <summary>自測用：走「清除紀錄」那一條。</summary>
+    public void InvokeRecentClear() => Dispatch(Native.TrayCommandRecentClear);
+
 
     // ================= 圖示（GDI+ 畫，沒有資產檔） =================
 
@@ -341,14 +453,34 @@ internal sealed class TrayIcon : IDisposable
 
     // ================= 選單 =================
 
-    private IntPtr BuildMenu()
+    /// <summary>
+    /// 建出頂層選單與「最近轉檔」子選單。回傳兩個 HMENU：頂層那個、子選單那個。
+    ///
+    /// <c>MF_POPUP</c> 那一項的 <c>uIDNewItem</c> 放的是**子選單的 HMENU**（不是命令代碼）——
+    /// 這是 Win32 的介面約定，也是最容易寫錯的一行：寫成命令代碼的症狀是「母項點下去什麼都沒發生、
+    /// 子選單永遠是空的」。
+    ///
+    /// 順序：開啟設定（1）／暫停轉換（2）／最近轉檔（子選單）／結束（3）。
+    /// **暫停必須留在位置 1**：<see cref="ApplyPaused"/> 用 <c>ModifyMenuW(…, 1, …)</c> 換那一行的字，
+    /// 位置一改就會換錯列。
+    /// </summary>
+    private (IntPtr menu, IntPtr recentMenu) BuildMenu()
     {
         IntPtr menu = Native.CreatePopupMenu();
-        if (menu == IntPtr.Zero) return IntPtr.Zero;
+        if (menu == IntPtr.Zero) return (IntPtr.Zero, IntPtr.Zero);
+
+        IntPtr recent = Native.CreatePopupMenu();
+        if (recent == IntPtr.Zero)
+        {
+            Native.DestroyMenu(menu);
+            return (IntPtr.Zero, IntPtr.Zero);
+        }
+
         Native.AppendMenuW(menu, Native.MF_STRING, new IntPtr(Native.TrayCommandOpenSettings), MenuOpenSettings);
         Native.AppendMenuW(menu, Native.MF_STRING, new IntPtr(Native.TrayCommandTogglePause), MenuPause);
+        Native.AppendMenuW(menu, Native.MF_POPUP, recent, MenuRecent);
         Native.AppendMenuW(menu, Native.MF_STRING, new IntPtr(Native.TrayCommandExit), MenuExit);
-        return menu;
+        return (menu, recent);
     }
 
     /// <summary>
@@ -361,6 +493,8 @@ internal sealed class TrayIcon : IDisposable
     private void ShowContextMenu()
     {
         if (_menu == IntPtr.Zero || _hwnd == IntPtr.Zero) return;
+        // 先重建「最近轉檔」：清單是會變的（每次轉檔都變），而選單只建立一次。
+        RefreshRecentMenu();
         Native.GetCursorPos(out Native.POINT pt);
 
         IntPtr previousForeground = Native.GetForegroundWindow();
@@ -371,8 +505,20 @@ internal sealed class TrayIcon : IDisposable
 
         if (selected != 0)
         {
-            _evidence.Line($"tray: menu selection={selected} label='{LabelFor((TrayCommand)selected)}'");
-            InvokeCommand((TrayCommand)selected);
+            // 標籤要對每一種代碼都說得出來（最近轉檔的列沒有對應的 enum 值）。
+            string label = selected >= Native.TrayCommandRecentBase
+                ? $"recent[{selected - Native.TrayCommandRecentBase}] {Path.GetFileName(_shownRecent[selected - Native.TrayCommandRecentBase])}"
+                : selected == Native.TrayCommandRecentClear ? MenuRecentClear
+                : LabelFor((TrayCommand)selected);
+            _evidence.Line($"tray: menu selection={selected} label='{label}'");
+
+            // 子選單的母項（MF_POPUP）**不會**被回傳：點它只會展開子選單。
+            // 所以回傳值只有三種可能——三個命令、一個「清除紀錄」、或某一個 recent[101].
+            // 三種都走同一個 Dispatch；命令那三種再經 InvokeCommand（那是自測與真實點擊共用的入口）。
+            if (selected >= Native.TrayCommandRecentBase || selected == Native.TrayCommandRecentClear)
+                Dispatch(selected);
+            else
+                InvokeCommand((TrayCommand)selected);
         }
 
         // 選單關掉之後把前景還回去。少了這一步，使用者只是右鍵點一下托盤，焦點就留在
@@ -417,6 +563,17 @@ internal sealed class TrayIcon : IDisposable
             case Native.TrayCommandExit:
                 _onExit();
                 break;
+            case Native.TrayCommandRecentClear:
+                // 「清除紀錄」不是一個轉檔命令，但它同樣要**在擁有選單的執行緒上**跑（store 的
+                // 寫檔會在下一輪重建選單時被讀到）。回呼為 null 時要說出來，不能靜靜什麼都不做。
+                if (_clearRecent == null)
+                {
+                    _evidence.Line("tray: recent clear requested but no handler exists");
+                    break;
+                }
+                _clearRecent();
+                RefreshRecentMenu();
+                break;
             case PauseCommandCode:
                 ApplyPaused(true);
                 break;
@@ -424,6 +581,21 @@ internal sealed class TrayIcon : IDisposable
                 ApplyPaused(false);
                 break;
             default:
+                // 最近轉檔的列：1001 + index，對照表是 _shownRecent（重建選單時一起換）。
+                if (code >= Native.TrayCommandRecentBase)
+                {
+                    int index = code - Native.TrayCommandRecentBase;
+                    if (index < _shownRecent.Count)
+                    {
+                        string path = _shownRecent[index];
+                        _evidence.Line($"tray: recent selection index={index} path='{path}'");
+                        _openRecent(path);
+                        break;
+                    }
+                    _evidence.Line($"tray: recent selection index={index} is out of range " +
+                                   $"(entries={_shownRecent.Count}) ignored");
+                    break;
+                }
                 _evidence.Line($"tray: unknown command {code} ignored (no callback exists for it)");
                 break;
         }
@@ -535,6 +707,8 @@ internal sealed class TrayIcon : IDisposable
             _evidence.Line($"tray: NIM_DELETE removed={removed}");   // false 也要說，不能靜默
         }
 
+        // DestroyMenu 會連子選單一起銷毀（Win32 保證），所以「最近轉檔」那個 HMENU 不必、也不可以
+        // 再銷毀一次——重複銷毀是一個已經無效的 handle，在錯誤處理模式下就是一顆不定時炸彈。
         if (_menu != IntPtr.Zero) Native.DestroyMenu(_menu);
         if (_icon16 != IntPtr.Zero) Native.DestroyIcon(_icon16);
         if (_icon32 != IntPtr.Zero) Native.DestroyIcon(_icon32);

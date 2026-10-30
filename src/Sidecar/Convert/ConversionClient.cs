@@ -112,6 +112,12 @@ internal sealed class ConversionClient : IDisposable
         _log = log;
     }
 
+    /// <summary>
+    /// 這一批是哪一顆扇形發的（`convert`／`rotate90`／`remove-bg`…）。由 <see cref="Start"/> 記下來，
+    /// 只為了「最近轉檔」那一列要知道這個檔是怎麼來的——它不影響任何轉檔行為。
+    /// </summary>
+    private string _toolOp = "convert";
+
     public ConversionSnapshot Snapshot => _snapshot;
 
     /// <summary>
@@ -150,6 +156,7 @@ internal sealed class ConversionClient : IDisposable
                       string? pageSize = null)
     {
         error = null;
+        _toolOp = toolOp ?? "convert";
         // **非同步管道**（PipeOptions.Asynchronous）：兩端都只用非同步 I/O。
         // 先前用同步管道、一個執行緒阻塞讀、另一個執行緒寫，會互相卡死
         // （症狀：worker 的 ready 要等到行程被殺才送達，每一批都逾時）。詳見 PipeLink 的說明。
@@ -334,6 +341,12 @@ internal sealed class ConversionClient : IDisposable
                 };
                 _log($"worker result: ok={message.ok} output={message.outputPath ?? "-"} " +
                      $"error={message.errorCode} message={message.message}");
+
+                // 「最近轉檔」的唯一登記點（UI 這一側）：**每一個成功且有輸出檔的結果**都在這裡經過，
+                // 而且只有這裡同時知道來源、輸出與是哪一顆扇形做的。
+                // worker 那一側不登記：兩個行程寫同一個紀錄檔，遲早會互相蓋掉。
+                if (message.ok && !string.IsNullOrEmpty(message.outputPath))
+                    RecentStore.Shared(_log).Add(message.sourcePath ?? "", message.outputPath!, _toolOp);
                 break;
 
             case WorkerMessageTypes.Summary:

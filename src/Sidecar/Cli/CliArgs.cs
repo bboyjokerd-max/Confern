@@ -46,14 +46,23 @@ internal static class CliArgs
 
         // ② 第一個字是裸字卻不是子命令 → 不要默默變成「啟動常駐程式」。
         //    這條是刻意加的安全網：以前 `confern typo` 會安靜地開一個托盤圖示。
-        if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert") && !Is(args[0], "watch"))
-            return Error($"unknown command '{args[0]}' (try: conforn formats, conforn convert, conforn watch, or conforn --help)");
+        if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert") && !Is(args[0], "watch")
+            && !Is(args[0], "recent"))
+            return Error($"unknown command '{args[0]}' (try: conforn formats, conforn convert, conforn watch, " +
+                         "confern recent, or conforn --help)");
 
         bool isConvert = Is(args[0], "convert");
         // `watch` 是第二個位置參數型子命令（2026-10-22）：`confern watch <folder>` 直接監看，
         // 而 `watch --add`／`--remove`／`--list` 是管理設定檔裡的那份清單。
         bool isWatch = Is(args[0], "watch");
+        // `recent` 是第三個子命令（2026-10-23）：印出／清空「最近轉檔」。
+        // 它**沒有位置參數**——清單是程式自己寫的，使用者沒有東西要指定。
+        bool isRecent = Is(args[0], "recent");
         string? watchFolder = null;
+        // recent 沒有位置參數，但「有沒有多打東西」還是要看得出來，所以裸字自己收一份。
+        // ⚠ 不能用「事後掃 rest 裡的裸字」代替：`recent --limit 5` 的那個 `5` 就長得像裸字，
+        // 掃下去會變成「你多打了參數」而 exit 4（實測抓到）。
+        var recentExtra = new List<string>();
 
         var rest = new List<string>();
         var files = new List<string>();
@@ -61,7 +70,7 @@ internal static class CliArgs
 
         // 子命令自己（`convert`／`watch`）要跳過，它是動詞不是參數。第一版的 watch 忘了這件事，
         // 於是 `confern watch --list` 被讀成「監看一個叫 watch 的資料夾」（實測 exit 4）。
-        for (int i = (isConvert || isWatch) ? 1 : 0; i < args.Length; i++)
+        for (int i = (isConvert || isWatch || isRecent) ? 1 : 0; i < args.Length; i++)
         {
             string a = args[i];
 
@@ -80,6 +89,21 @@ internal static class CliArgs
             // ⚠ 第一版漏了這段：`watch --add C:\dir` 的 `--add` 被當成普通旗標丟進 rest、
             // 而 `C:\dir` 變成位置參數 ⇒ **它其實開了一個前台監看**，不是「加進設定檔」。
             // 使用者打的是「記下來」，跑出來的卻是「現在就盯著」——這種錯最難發現，因為兩者都活著。
+            // `recent --list`／`--clear`／`--limit N`：翻成長旗標。`--list` 是預設行為，
+            // 但明打一次也要接受（「我打了卻沒反應」是最容易讓人以為壞掉的體驗）。
+            if (!stopOptions && isRecent)
+            {
+                if (a == "--list") { rest.Add("--recent-list"); continue; }
+                if (a == "--clear") { rest.Add("--recent-clear"); continue; }
+                if (a == "--limit")
+                {
+                    if (i + 1 >= args.Length) return Error("--limit needs a number, e.g. --limit 5");
+                    rest.Add("--recent-limit");
+                    rest.Add(args[++i]);
+                    continue;
+                }
+            }
+
             if (!stopOptions && isWatch && (a == "--add" || a == "--remove" || a == "--list"))
             {
                 if (a == "--list") { rest.Add("--watch-list"); continue; }
@@ -113,6 +137,12 @@ internal static class CliArgs
             if (isConvert && (stopOptions || !a.StartsWith("-", StringComparison.Ordinal)))
             {
                 files.Add(a);
+                continue;
+            }
+
+            if (isRecent && (stopOptions || !a.StartsWith("-", StringComparison.Ordinal)))
+            {
+                recentExtra.Add(a);
                 continue;
             }
 
@@ -151,6 +181,18 @@ internal static class CliArgs
             w.AddRange(rest);
             w.Add("--cli-subcommand");
             return w.ToArray();
+        }
+
+        if (isRecent)
+        {
+            // 位置參數一律拒絕：`confern recent foo` 看起來像「查某個檔」，但這個清單沒有查詢介面。
+            // 与其猜，不如說清楚（與 watch 的「只收一個資料夾」同一條規矩）。
+            if (recentExtra.Count > 0)
+                return Error($"recent takes no arguments (got '{string.Join(" ", recentExtra)}'); " +
+                             "try: conforn recent, conforn recent --limit 5, or conforn recent --clear");
+            if (rest.Count == 0) rest.Insert(0, "--recent-list");
+            rest.Add("--cli-subcommand");
+            return rest.ToArray();
         }
 
         if (!isConvert) return rest.ToArray();
@@ -205,6 +247,7 @@ internal static class CliArgs
         "--progress-dump-detail-json",
         "--progress-dump-detail-raw",
         "--quality",
+        "--recent-limit",
         "--settings-file",
         "--settings-probe",
         "--settings-set",

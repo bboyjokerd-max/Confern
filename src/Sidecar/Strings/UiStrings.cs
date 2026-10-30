@@ -451,6 +451,10 @@ internal static class UiStrings
             ["tray.pause"] = "暫停轉換",
             ["tray.resume"] = "繼續轉換",
             ["tray.exit"] = "結束",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "最近轉檔",
+    ["tray.recentEmpty"] = "（還沒有紀錄）",
+    ["tray.recentClear"] = "清除紀錄",
 
             ["progress.moreHidden"] = "…還有 {0} 筆",
 
@@ -668,6 +672,10 @@ internal static class UiStrings
             ["tray.pause"] = "暂停转换",
             ["tray.resume"] = "继续转换",
             ["tray.exit"] = "退出",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "最近转换",
+    ["tray.recentEmpty"] = "（还没有记录）",
+    ["tray.recentClear"] = "清除记录",
             ["progress.moreHidden"] = "…还有 {0} 项",
             ["format.moreKinds"] = "等 {0} 种",
             ["format.example"] = "（例如 {0}）",
@@ -921,6 +929,10 @@ internal static class UiStrings
             ["tray.pause"] = "変換を一時停止",
             ["tray.resume"] = "変換を再開",
             ["tray.exit"] = "終了",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "最近の変換",
+    ["tray.recentEmpty"] = "（まだ記録がありません）",
+    ["tray.recentClear"] = "記録を消す",
 
             ["progress.moreHidden"] = "…ほか {0} 件",
 
@@ -1155,6 +1167,10 @@ internal static class UiStrings
             ["tray.pause"] = "변환 일시 중지",
             ["tray.resume"] = "변환 재개",
             ["tray.exit"] = "종료",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "최근 변환",
+    ["tray.recentEmpty"] = "（기록 없음）",
+    ["tray.recentClear"] = "기록 지우기",
 
             ["progress.moreHidden"] = "…{0}개 더",
 
@@ -1393,6 +1409,10 @@ internal static class UiStrings
             ["tray.pause"] = "Pause conversion",
             ["tray.resume"] = "Resume conversion",
             ["tray.exit"] = "Quit",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "Recent conversions",
+    ["tray.recentEmpty"] = "(nothing yet)",
+    ["tray.recentClear"] = "Clear list",
 
             ["progress.moreHidden"] = "…{0} more",
 
@@ -1624,6 +1644,10 @@ internal static class UiStrings
             ["tray.pause"] = "Suspendre la conversion",
             ["tray.resume"] = "Reprendre la conversion",
             ["tray.exit"] = "Quitter",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "Conversions récentes",
+    ["tray.recentEmpty"] = "(rien pour l'instant)",
+    ["tray.recentClear"] = "Effacer la liste",
 
             ["progress.moreHidden"] = "…{0} de plus",
 
@@ -1855,6 +1879,10 @@ internal static class UiStrings
             ["tray.pause"] = "Umwandlung pausieren",
             ["tray.resume"] = "Umwandlung fortsetzen",
             ["tray.exit"] = "Beenden",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "Letzte Umwandlungen",
+    ["tray.recentEmpty"] = "(noch nichts)",
+    ["tray.recentClear"] = "Liste löschen",
 
             ["progress.moreHidden"] = "…{0} weitere",
 
@@ -2086,6 +2114,10 @@ internal static class UiStrings
             ["tray.pause"] = "Pausar conversión",
             ["tray.resume"] = "Reanudar conversión",
             ["tray.exit"] = "Salir",
+    // 托盤「最近轉檔」子選單（待辦 4 之後的切片，2026-10-23）：只加托盤選單，沒有動任何畫面設計。
+    ["tray.recent"] = "Conversiones recientes",
+    ["tray.recentEmpty"] = "(aún nada)",
+    ["tray.recentClear"] = "Borrar la lista",
 
             ["progress.moreHidden"] = "…{0} más",
 

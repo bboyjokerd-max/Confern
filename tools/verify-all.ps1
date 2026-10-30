@@ -58,6 +58,9 @@ $suites = @(
     [pscustomobject]@{ Name = 'orientation';Script = 'verify-orientation-matrix.ps1'; Extra = @(); Kind = 'matrix' }
     [pscustomobject]@{ Name = 'merge';      Script = 'verify-merge-images.ps1';    Extra = @() }
     [pscustomobject]@{ Name = 'folder-drop';Script = 'verify-folder-drop.ps1';     Extra = @() }
+    # 2026-10-23: the "recent conversions" list (store + `confern recent` + the tray half that needs
+    # no mouse). It moves the user's own %LOCALAPPDATA%\Confern\recent.json aside and puts it back.
+    [pscustomobject]@{ Name = 'recent';     Script = 'verify-recent.ps1';          Extra = @() }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }

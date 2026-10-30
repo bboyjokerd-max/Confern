@@ -234,6 +234,16 @@ internal static class Program
             return App.RunWatchCli(opt, watchEvidence);
         }
 
+        // 「最近轉檔」（2026-10-23）：托盤子選單看得到的同一份清單，從命令列也看得到。
+        // 有這個入口，驗收才能斷言那份清單本身，而不是只斷言「托盤好像有開起來」。
+        if (opt.RecentList || opt.RecentClear)
+        {
+            Native.AttachParentConsole();
+            using var recentEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
+                                                    opt.Quiet || opt.CliSubcommand);
+            return App.RunRecentCli(opt, recentEvidence);
+        }
+
         // M1d：無需滑鼠的整條轉檔管線（解碼 → 編碼 → 原子寫入）。驗證靠它，不靠人工拖曳。
         if (!string.IsNullOrEmpty(opt.ConvertPayload))
         {
@@ -589,6 +599,10 @@ internal sealed class Options
           --out-dir <dir>           write the results into this folder (default: next to each source).
                                     A folder that does not exist is NOT created; the output falls back to
                                     the source folder and the log says so
+          --recent-list             print the "recent conversions" list and exit (same as
+                                    `confern recent`); it is the same list the tray submenu shows
+          --recent-limit <N>        with --recent-list: only the newest N entries (0 = all)
+          --recent-clear            empty that list and exit (same as `confern recent --clear`)
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)
@@ -1029,6 +1043,12 @@ internal sealed class Options
     public int WatchSettleMs = WatchRules.DefaultSettleMs;
     /// <summary>`--watch-duration-ms`：跑多久就自己停（0＝一直跑到 Ctrl+C）。自動驗收用它取代按鍵。</summary>
     public int WatchDurationMs;
+    /// <summary>`--recent-list`（`confern recent`）：印出「最近轉檔」的清單。</summary>
+    public bool RecentList;
+    /// <summary>`--recent-clear`（`confern recent --clear`）：清空那份清單。</summary>
+    public bool RecentClear;
+    /// <summary>`--recent-limit <N>`：只印最新的 N 筆（0＝全部，最多 <see cref="RecentStore.MaxEntries"/>）。</summary>
+    public int RecentLimit;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
@@ -1350,6 +1370,15 @@ internal sealed class Options
                     break;
                 case "--watch-duration-ms":
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out int watchMs)) { o.WatchDurationMs = watchMs; i++; }
+                    break;
+                case "--recent-list": o.RecentList = true; break;
+                case "--recent-clear": o.RecentClear = true; break;
+                case "--recent-limit":
+                    // 只給 --recent-limit 也是「印清單」：少了這一行，`confern recent --limit 5`
+                    // 會因為 RecentList/Clear 都 false 而落到**常駐程式**那條路——程式開了托盤、
+                    // 掛在訊息迴圈裡等按鍵，命令列永遠不回來（驗收實測卡死十分鐘才發現）。
+                    o.RecentList = true;
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int recentLimit)) { o.RecentLimit = recentLimit; i++; }
                     break;
                 case "--worker":
                     if (i + 1 < args.Length) { o.WorkerPipe = args[i + 1]; i++; }
@@ -1760,7 +1789,16 @@ internal static class App
             isCaptureDisabled: () => guard.CaptureDisabled || detector.IsDisabled,
             // 這條也刻意不碰 tray（同上，而且連 using 的隱藏賦值都算在建構式求值之後）：
             // 結束時要的是「正常關機」，而托盤的 Dispose 由 using 負責，不需要在這裡讀那個變數。
-            onExit: () => RequestCleanExit(evidence, guard));
+            onExit: () => RequestCleanExit(evidence, guard),
+            // 「最近轉檔」的清單來自 RecentStore（托盤本身不認識它，見 TrayIcon 的欄位註解）。
+            // 傳進去的是**查詢**不是快照：每次跳選單都重新問一次，所以剛轉完的檔一定在裡面。
+            recentPaths: () => RecentStore.Shared(evidence.Line)
+                                          .Entries(RecentStore.MenuEntries)
+                                          .Select(e => e.OutputPath)
+                                          .ToList(),
+            // 點一列＝用使用者的預設程式打開它（打不開會寫一行日誌，不會靜靜沒反應）。
+            onOpenRecent: path => RecentStore.OpenWithShell(path, evidence.Line),
+            onClearRecent: () => RecentStore.Shared(evidence.Line).Clear());
 
         // 驗收用的「請它自己結束」：計時器在執行緒池上，所以只**張貼**托盤命令，不直接呼叫回呼
         // （直接呼叫會從錯誤的執行緒碰到托盤的視窗與選單）。關機路徑因此與選單的「結束」完全同一條。
@@ -4684,6 +4722,55 @@ internal static class App
     }
 
     /// <summary>
+    /// 「最近轉檔」的命令列入口（2026-10-23）：`confern recent` 印清單、`--clear` 清空、`--limit N` 只印最新 N 筆。
+    ///
+    /// <para>為什麼這個功能需要一個文字入口：托盤子選單的內容在自動驗收裡**看不到**
+    /// （要真的按滑鼠才看得到選單），而清單本身是純資料——有文字入口，驗收就能斷言
+    /// 「轉完的檔真的進了清單、順序是新的在前、重複的只留一筆、檔案被刪掉的不會留在上面」。
+    /// 托盤那一半由 `--tray-selftest` 的 MenuItemCount／RecentEntryCount 斷言，兩半合起來才完整。</para>
+    /// </summary>
+    internal static int RunRecentCli(Options opt, Evidence evidence)
+    {
+        RecentStore store = RecentStore.Shared(evidence.Line);
+
+        if (opt.RecentClear)
+        {
+            store.Clear();
+            Console.Out.WriteLine($"recent: cleared  ({store.FilePath})");
+            evidence.Line($"recent cli: cleared the list at {store.FilePath}");
+            return 0;
+        }
+
+        int limit = opt.RecentLimit > 0 ? opt.RecentLimit : RecentStore.MaxEntries;
+        IReadOnlyList<RecentEntry> entries = store.Entries(limit);
+
+        if (!string.IsNullOrEmpty(store.LoadError))
+        {
+            // 退回空清單是對的（壞檔不該讓功能停擺），但**不能靜靜的**：使用者會以為清單本來就空。
+            Console.Error.WriteLine($"confern: recent: '{store.FilePath}' is unreadable " +
+                                    $"({store.LoadError}); starting with an empty list");
+        }
+        Console.Out.WriteLine($"recent conversions ({entries.Count} listed, newest first)");
+        Console.Out.WriteLine($"  file: {store.FilePath}");
+        if (entries.Count == 0)
+        {
+            Console.Out.WriteLine("  (none) - convert a file and it shows up here and in the tray menu");
+        }
+        else
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                RecentEntry entry = entries[i];
+                Console.Out.WriteLine($"  {i + 1}. {entry.OutputPath}");
+                Console.Out.WriteLine($"     from {entry.SourcePath}  [{entry.Tool}]  {entry.At:yyyy-MM-dd HH:mm:ss}");
+            }
+        }
+        Console.Out.WriteLine($"total={entries.Count}");
+        evidence.Line($"recent cli: total={entries.Count} limit={limit} file={store.FilePath}");
+        return 0;
+    }
+
+    /// <summary>
     /// 監看資料夾的命令列入口（2026-10-22）：`confern watch &lt;folder&gt;` 前台跑、
     /// `--watch-add`／`--watch-remove`／`--watch-list` 管理**設定檔**裡的那份清單。
     ///
@@ -6599,6 +6686,17 @@ internal static class App
         var detector = new DragDetector(evidence, Program.DefaultTriggerKey);
         bool pausing = false;          // 自測用的暫停狀態（與正式回呼同一組呼叫）
 
+        // 「最近轉檔」的自測用清單：**兩個假路徑**，不是使用者真正的紀錄。
+        // 托盤只負責「照著清單畫選單」，所以它不需要那兩個檔真的存在；而紀錄檔（RecentStore）
+        // 有自己的驗收（tools\verify-recent.ps1），這裡驗的是選單那一半。
+        var recentForTest = new List<string>
+        {
+            @"C:\selftest\recent-a.png",
+            @"C:\selftest\recent-b.pdf"
+        };
+        string? openedRecent = null;
+        int clearedRecent = 0;
+
         using var tray = new TrayIcon(
             evidence,
             // 走**真正的**「托盤開啟設定」路徑。這條要求只是排隊後返回（設定頁跑在自己的 STA
@@ -6615,7 +6713,13 @@ internal static class App
                 SetCapturePaused(pausing, guard, detector, evidence);
                 evidence.Line($"tray: dispatch toggle-pause paused={pausing}");
             },
-            onExit: () => evidence.Line("tray: dispatch exit"));
+            onExit: () => evidence.Line("tray: dispatch exit"),
+            // 正式路徑傳的是 RecentStore 的查詢；自測傳的是上面那兩個假路徑（決定性、不碰使用者紀錄）。
+            recentPaths: () => recentForTest,
+            // 「打開」在自測裡當然不能真的開一個程式（那會在驗收機器上彈出圖片檢視器），
+            // 所以換成記錄下來——驗的是「選單選到的那個路徑有沒有正確交出去」。
+            onOpenRecent: path => { openedRecent = path; evidence.Line($"tray: selftest open-recent '{path}'"); },
+            onClearRecent: () => { clearedRecent++; recentForTest.Clear(); evidence.Line("tray: selftest clear-recent"); });
 
         Report("icon created", tray.IsCreated, $"menu items={TrayIcon.MenuItemCount}");
 
@@ -6623,12 +6727,62 @@ internal static class App
         Report("tooltip names the product and the state",
                tray.Tooltip == $"{ProductInfo.Name} - running",
                $"tooltip='{tray.Tooltip}' expected='{ProductInfo.Name} - running'");
-        Report("menu has exactly the three spec items", TrayIcon.MenuItemCount == 3,
+        Report("menu has exactly the four spec items", TrayIcon.MenuItemCount == 4,
                $"count={TrayIcon.MenuItemCount}");
         Report("menu labels are the spec labels",
                tray.LabelsMatchSpec(),
-               $"'{TrayIcon.MenuOpenSettings}' / '{TrayIcon.MenuPause}' / '{TrayIcon.MenuExit}'");
+               $"'{TrayIcon.MenuOpenSettings}' / '{TrayIcon.MenuPause}' / '{TrayIcon.MenuRecent}' / '{TrayIcon.MenuExit}'");
         Report("the shell holds the icon", tray.ProbeShellStillHasIcon(), "NIM_MODIFY accepted");
+
+        // ---- 最近轉檔：子選單是**重建**出來的，不是建一次就固定 ----
+        tray.RefreshRecentMenu();
+        Report("recent submenu lists the entries it was given",
+               tray.RecentEntryCount == 2 && tray.RecentMenuItemCount == 4,
+               $"entries={tray.RecentEntryCount} items={tray.RecentMenuItemCount} " +
+               "(2 entries + separator + clear)");
+        tray.InvokeRecent(1);
+        for (int i = 0; i < 3; i++) Native.PumpMessages();
+        Report("clicking a recent entry hands over the right path",
+               openedRecent == @"C:\selftest\recent-b.pdf", $"opened='{openedRecent}'");
+        tray.InvokeRecentClear();
+        for (int i = 0; i < 3; i++) Native.PumpMessages();
+        tray.RefreshRecentMenu();
+        Report("clear reached its handler and emptied the submenu",
+               clearedRecent == 1 && tray.RecentEntryCount == 0 && tray.RecentMenuItemCount == 1,
+               $"cleared={clearedRecent} entries={tray.RecentEntryCount} items={tray.RecentMenuItemCount} " +
+               "(the single item is the greyed explanation)");
+        // 清單恢復後選單也要跟著恢復（＝重建真的每次都讀最新的那一份）。
+        recentForTest.Add(@"C:\selftest\recent-c.jpg");
+        tray.RefreshRecentMenu();
+        Report("the submenu follows the list it is given on every refresh",
+               tray.RecentEntryCount == 1 && tray.RecentMenuItemCount == 3,
+               $"entries={tray.RecentEntryCount} items={tray.RecentMenuItemCount}");
+        tray.InvokeRecent(0);
+        for (int i = 0; i < 3; i++) Native.PumpMessages();
+        Report("the index maps to the entry at that position, not a stale one",
+               openedRecent == @"C:\selftest\recent-c.jpg", $"opened='{openedRecent}'");
+
+        // ---- 最近轉檔的 store：**別的行程**改了檔案，這裡必須看得到 ----
+        // 托盤是常駐的，而 `confern convert`／`confern watch` 可能在它還活著的時候寫同一份檔案。
+        // 只在建構時讀一次的話，子選單會永遠停在啟動那一刻的內容，而每個行程自己都覺得自己很正常。
+        // 這裡用**兩個獨立的 store 實例**模擬兩個行程（沒有任何共用狀態），全部在 %TEMP% 裡，
+        // 不碰使用者的紀錄。
+        string tempStorePath = Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-tray-selftest-recent.json");
+        try { File.Delete(tempStorePath); } catch { }
+        var storeThisProcess = new RecentStore(tempStorePath, evidence.Line);
+        string probeA = Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-tray-selftest-a.txt");
+        string probeB = Path.Combine(Path.GetTempPath(), ProductInfo.Slug + "-tray-selftest-b.txt");
+        File.WriteAllText(probeA, "a");
+        File.WriteAllText(probeB, "b");
+        storeThisProcess.Add(probeA, probeA, "selftest");
+        // 第二個實例＝另一個行程：它讀的是同一個檔，寫回去時第一個實例並不知道。
+        var storeOtherProcess = new RecentStore(tempStorePath, null);
+        storeOtherProcess.Add(probeB, probeB, "cli");
+        var seen = storeThisProcess.Entries();
+        Report("recent store reloads when another process changed the file",
+               seen.Any(e => e.Tool == "cli"),
+               $"tools=[{string.Join(",", seen.Select(e => e.Tool))}] (expected the 'cli' entry the second instance wrote)");
+        try { File.Delete(tempStorePath); File.Delete(probeA); File.Delete(probeB); } catch { }
 
         // 三個命令各自走一次（與真實選單點擊同一條分派）。
         tray.InvokeCommand(TrayCommand.OpenSettings);
@@ -7397,6 +7551,9 @@ internal static class App
             ConversionResult result = engine.Convert(path, target, opt.ConvertQuality, journal,
                                                      opt.OutDir.Length > 0 ? opt.OutDir : null);
             results.Add(result);
+            // CLI 轉出來的檔同樣進「最近轉檔」：命令列不是第二種使用者，只是同一批人換一個入口。
+            if (result.Ok && result.OutputPath != null)
+                RecentStore.Shared(evidence.Line).Add(result.SourcePath, result.OutputPath, "convert");
             evidence.Line(result.Ok
                 ? $"convert result: Ok source={result.SourcePath} output={result.OutputPath} detail={result.Detail}"
                 : $"convert result: Fail error={result.Error} source={result.SourcePath} " +

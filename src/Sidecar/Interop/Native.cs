@@ -220,6 +220,17 @@ internal static class Native
     public const int TrayCommandOpenSettings = 1;
     public const int TrayCommandTogglePause = 2;
     public const int TrayCommandExit = 3;
+    /// <summary>托盤「最近轉檔」子選單的父項（子選單本身不會回傳它，只是給人看的識別代碼）。</summary>
+    public const int TrayCommandRecentMenu = 4;
+
+    /// <summary>子選單裡的「清除紀錄」。</summary>
+    public const int TrayCommandRecentClear = 1000;
+
+    /// <summary>
+    /// 最近轉檔的每一列：<c>1001 + index</c>。用保留範圍而不是逐項註冊，是因為重建子選單時
+    /// **命令代碼必須跟著位置走**——TrackPopupMenu 只回傳一個 int，沒有別的東西可以對回去。
+    /// </summary>
+    public const int TrayCommandRecentBase = 1001;
 
     /// <summary>托盤回呼的滑鼠訊息（放在 <c>WM_APP_TRAY</c> 的 lParam）。</summary>
     public const int TrayCallbackLeftDoubleClick = 0x0203;   // WM_LBUTTONDBLCLK
@@ -274,12 +285,30 @@ internal static class Native
     public static extern bool ModifyMenuW(IntPtr hMenu, uint uPosition, uint uFlags, IntPtr uIDNewItem, string? lpNewItem);
     [DllImport("user32.dll")]
     public static extern bool DestroyMenu(IntPtr hMenu);
+    /// <summary>按**位置**刪除一個選單項目（重建「最近轉檔」子選單時用）。</summary>
+    [DllImport("user32.dll")]
+    public static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
+
+    /// <summary>目前有幾項。子選單重建前要先問這個，刪不乾淨就會累積出重複的列。</summary>
+    [DllImport("user32.dll")]
+    public static extern int GetMenuItemCount(IntPtr hMenu);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int TrackPopupMenu(IntPtr hMenu, uint uFlags, int x, int y, int nReserved,
         IntPtr hWnd, IntPtr prcRect);
 
     public const uint MF_STRING = 0x00000000;
-    public const uint TPM_RETURNCMD = 0x0100;
+    // ---- 選單旗標（托盤「最近轉檔」子選單用）----
+    //
+    // MF_POPUP：這一項不是命令而是一個子選單，此時 AppendMenuW 的 uIDNewItem 放的是**子選單的
+    //           HMENU**，不是命令代碼。忘記這件事的症狀是「子選單點開是空的、父項也沒反應」。
+    // MF_GRAYED：沒有東西可列時，子選單裡放一項灰字說明。刻意**不**把整個子選單變灰——
+    //           灰掉的子選單在某些 Windows 版本連點都點不開，使用者看不到原因。
+    // MF_BYPOSITION：DeleteMenu 按位置刪（命令代碼會隨重建而變，不能拿它定位）。
+    public const uint MF_GRAYED = 0x00000001;
+    public const uint MF_DISABLED = 0x00000002;
+    public const uint MF_POPUP = 0x00000010;
+    public const uint MF_BYPOSITION = 0x00000400;
+    public const uint MF_SEPARATOR = 0x00000800;    public const uint TPM_RETURNCMD = 0x0100;
     public const uint TPM_RIGHTBUTTON = 0x0002;
 
     /// <summary>

@@ -3807,3 +3807,100 @@ elapsed=14.1 s
 影響其他程式），或在沒裝 .NET 的機器上跑。目前有的是：偵測函式本身在日誌裡留了 `present=True`、
 兩條搜尋路徑都印出來，以及缺模型/缺檔那類失敗路徑的既有斷言。要真驗這條，下次找一台乾淨的
 Windows 或在 VM 裡跑一次。
+
+## 2026-10-23 · 最近轉檔：托盤子選單 ＋ `confern recent`
+
+從 Filee 抄的四個點子裡的第 4 個（前三個是 `confern` 命令列、監看資料夾、每種檔型一組預設，
+第 3 個還沒做）。這一項**不動任何既有版面**：UI 設計是凍結的（方向 D、`GlowEnabled=false`、
+`SectorCornerPx=7`），所以入口只能開在**托盤右鍵選單**與**命令列**——兩者都不需要改扇形。
+
+### 它做什麼
+
+托盤右鍵選單從三項變四項：
+
+```
+開啟設定
+暫停轉換
+最近轉檔  ▸  two.jpg
+              one.jpg
+              ─────────
+              清除紀錄
+結束
+```
+
+子選單列的是**輸出檔的檔名**（使用者要的是「剛剛那個東西在哪」），最多 8 筆；空的顯示一行灰字
+「（還沒有紀錄）」。點一列＝用預設程式打開那個檔。
+
+命令列看得到同一份資料：
+
+```
+confern recent                 # 印清單（含來源檔、是哪顆扇形做的、時間）
+confern recent --limit 5       # 只印最新 5 筆
+confern recent --clear         # 清空
+```
+
+### 三條登記路徑（誰寫的、在哪一側）
+
+| 誰 | 在哪登記 | 為什麼是這一側 |
+| --- | --- | --- |
+| `confern convert` | `ConvertOnce`，每個成功的 `ConversionResult` | 命令列不是第二種使用者，是同一個功能換入口 |
+| 拖曳／扇形轉檔 | `ConversionClient` 收到 worker 的 `Result` 時 | 只有這裡同時知道來源、輸出與**是哪顆扇形**（`_toolOp`） |
+| 監看資料夾 | `FolderWatcher` 每個成功結果 | 不登記的話，丟進資料夾的檔會「憑空消失」 |
+
+**worker 那一側刻意不寫**：兩個行程寫同一個紀錄檔遲早互相蓋掉；worker 也不該知道 UI 的清單。
+
+### 資料：`%LOCALAPPDATA%\Confern\recent.json`
+
+最多 12 筆（選單取前 8 筆），一個 `RecentEntry` 只有四個欄位（輸出路徑、來源路徑、工具、時間）。
+實測兩筆＝493 B。寫入走**既有的** `AtomicWriter.Write(..., overwrite: true)`——不另寫第二套，
+「不留 `.tmp-*`」這個保證仍然只有一份實作。
+
+三件「清單必須說實話」的規矩：
+
+- **輸出檔不見了就從清單移除**（並且寫回檔案）。選單上列著一個點下去打不開的檔，比沒有這個
+  功能更糟。
+- **壞掉的檔案不會讓功能停擺**：讀不起來就退回空清單，並把原因留在 `LoadError`，命令列因此
+  印得出「`recent.json` is unreadable (…); starting with an empty list」——`--quiet` 模式
+  下日誌一行都不會印，沒有這個欄位就只會安靜地說 `total=0`，看起來像「清單本來就是空的」。
+- **跨行程會重讀**：托盤是常駐行程，`confern convert`／監看可能在它活著的時候寫同一份檔。
+  用「時戳＋長度」判斷有沒有被別的行程改過（見下面第 4 條）。
+
+### 驗收抓到的四件事（都不是猜的）
+
+1. **`StreamWriter` 會接管 stream** ⇒ `AtomicWriter` 後面的 `Flush(flushToDisk: true)` 丟
+   `ObjectDisposedException`，於是**每一次轉檔都印 `recorded … saved=False`、清單永遠是空的**。
+   日誌原文：
+   `WARNING recent: could not save '…\recent.json' (ObjectDisposedException: Cannot access a closed file.); conversion is unaffected`。
+   修法是一個引數：`new StreamWriter(stream, …, leaveOpen: true)`。
+   （值得一提的是：`Add` 回傳 `saved=False` 而不是謊報成功，這件事讓上面那行日誌一眼就有意義。）
+2. **`confern recent --limit 5` 會開出常駐程式**：`--recent-limit` 只設了「筆數」沒設「要印清單」，
+   於是兩個旗標都 false，落到常駐那條路——程式開了托盤、掛在訊息迴圈等按鍵，**驗收因此卡死
+   十分鐘**才被 `job` 逾時砍掉。修法：`--recent-limit` 隱含印清單，並在日誌旁寫清楚理由。
+3. **PowerShell 把 `Invoke-Cli @('convert') + $batch` 拆成多個參數**（`+` 變成一個字面引數），
+   於是 exe 收到檔名 `"+"` 而 exit 4。驗收腳本改成先把 argv 組成一個變數再具名傳入。
+4. **跨行程的失效模式**：清單只在 `RecentStore` 建構時讀一次，常駐托盤就會永遠顯示「啟動那一刻」
+   的內容，而每個行程自己都覺得很正常。修法：`Entries()` 先比對檔案時戳＋長度，被別人改過就重讀
+   （日誌 `recent: reloaded '…' (another process changed it) count=2`）。這一條有自動斷言：
+   `--tray-selftest` 用**兩個獨立的 store 實例**（＝兩個行程，沒有共用狀態）證明第二個寫的
+   第一看得到。
+
+### 驗收：`tools\verify-recent.ps1`（40 項）
+
+它會把使用者真正的 `recent.json` **先搬開、跑完再放回去**（驗收不該花掉使用者的歷史）。斷言全部
+是位元組、exit code 或真的檔案：清單順序（新的在前）、`[convert]`／`[watch]` 標記、列出的路徑
+真的存在、刪掉輸出檔後那一筆消失且**檔案也改寫了**、13 個檔之後只剩 12 筆且掉的是最舊那一個、
+壞檔退回空清單並在 stderr 說原因、`--clear` 之後檔案內容是 `[]`。托盤那一半靠 `--tray-selftest`
+的 Shared Dispatch（與真實點擊同一條路徑），加上兩條原始碼守衛（`MF_POPUP` 真的把子選單掛上去、
+跳選單前一定先重建）。
+
+全套 15 支：**587 項，561 pass、0 fail、26 inconclusive**（inconclusive 全是需要真滑鼠／鍵盤的
+m1a 20 項與 m1h 6 項）。
+
+### 誠實缺口
+
+- **真的右鍵點一次**沒有自動驗：選單要真的展開才看得到，那需要合成輸入或人手（與 m1a／m1h 那
+  26 項同一類）。目前有的是「選單項目數 4、子選單重建、索引對應到哪個路徑」全部由自測走同一條
+  dispatch。
+- **`OpenWithShell` 沒有端到端驗**：真的驗就得在使用者機器上開一個圖片檢視器，那是副作用。
+  目前驗到「選單把正確的路徑交出去」，最後那一步（ShellExecute）只有程式碼與失敗時的日誌。
+
