@@ -4038,3 +4038,57 @@ confern preset --clear
 
 總計從 16 支／630 條變成 **16 支／628 條**（m1d 74 → 72），仍然 0 fail、26 inconclusive。
 
+## 2026-10-23 · `tools\fault-inject.ps1`：把「這條檢查真的會紅」變成可重跑的事
+
+假故障稽核最大的問題不是它找到的 289 條，而是**它的證明只活在對話裡**：有人改一行產品程式、
+看著套件變紅、再改回來。下一次重構沒有人會再做一次。這支腳本把它變成資料表：
+
+```powershell
+powershell -File tools\fault-inject.ps1 -List                       # 看有哪些注入
+powershell -File tools\fault-inject.ps1                             # 全部跑
+powershell -File tools\fault-inject.ps1 -Only preset-quality-ignored
+```
+
+每一個注入都要同時成立兩件事，缺一不可：
+
+1. **套件真的紅了**（非零離開碼或 FAIL 行），而且
+2. **紅在指定的那一條**（`Expected` 是 `FAIL  S5.1 ` 這種字串）。
+
+第 2 點是關鍵。只證明「套件紅了」等於什麼都沒證明——崩潰、逾時、編譯意外都會讓套件紅。
+
+### 目前的三個注入與結果
+
+| 注入 | 一行改動 | 預期紅在 | 實際 |
+| --- | --- | --- | --- |
+| `preset-quality-ignored` | `PresetStore.QualityFor` 讀了 store 卻回 `null` | `S5.1` | PROVEN（3 條紅，含 S5.1） |
+| `preset-wheel-sector-ignored` | `PresetSelection` 讀到預設就 `return 0` | `S4.2` | PROVEN（日誌裡 `selected=0`，預設要的是 PDF） |
+| `recent-never-recorded` | `RecentStore.Add` 把紀錄丟掉 | `S2.3` | PROVEN（16 條紅，含 S2.3） |
+
+跑完之後它會**重新建置並再跑一次受影響的套件**（實測兩支都 exit 0／0 fail），因為「還原失敗」
+比「假故障失敗」嚴重得多。安全性：動檔前先寫 state 檔（崩潰後下一次啟動會自動還原）、拒絕在
+檔案有未提交修改時動手、每次建置前先殺 Confern。
+
+### 這支工具自己抓到自己的謊（值得單獨記）
+
+第一版寫 `"... `"$(Resolve-Path $Exe).Path`" ..."` 當命令列。在雙引號字串裡，`$( )` 之後的
+`.Path` 是**字面文字**，所以子行程收到的是 `...\Confern.exe.Path`——**每一次啟動都失敗**。而套件
+那時對「叫不起 exe」是交出空的 Exit/Out/Err（`$null` 傳播），於是每一條檢查都「紅」了。
+
+結果是：**三個注入全部回報 PROVEN，理由全是假的**。這正是它要抓的那種假綠，長在我自己的工具上。
+
+修法有兩層，缺一不可：
+
+1. 命令列改用已解析好的字串組出來（不再把 `.Path` 寫在字串裡）。
+2. **套件端也要修**：`verify-presets.ps1` 的 `Start-Captured` 現在會 catch 啟動例外，回
+   `START FAILED (型別): 訊息 -- exe=… argv=…`；行程跑起來卻一個字都沒印時也會留下
+   `produced no output at all (exit=…)`。`fault-inject.ps1` 看到這兩種字串一律判 **INVALID**。
+
+換句話說：**「叫不起來」不可以長得跟「產品答錯了」一樣**。這條規則以前只寫在心裡，現在兩邊都有
+程式碼守著。
+
+### 誠實缺口
+
+- 只有 3 個注入。稽核表上還有十幾條只證明過一次的檢查（P0-2 的覆蓋層、P1-4 的 Run 機碼…），
+  它們的注入還沒有寫進表裡。表是資料，加一列就能多證一條。
+- 這支腳本會**重建產品二進位**，所以不進 `verify-all` 的綠色掃描（那是唯讀產品的一輪）。
+

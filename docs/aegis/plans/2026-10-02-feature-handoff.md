@@ -144,12 +144,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-installer.ps1
 # 一次跑完 16 支（自己會先殺 Confern、印 exe 時間戳，最後給總表）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-all.ps1 -Exe <exe>
 
+# 假故障注入：證明「這條檢查真的會紅」（會重建產品二進位，所以不進上面那一輪）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1 -List
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1 -Only preset-quality-ignored
+
 # 使用者看得到的三個新入口
 #   confern recent / confern recent --limit 5 / confern recent --clear   （托盤右鍵的「最近轉檔」）
 #   confern preset / confern preset --set HEIC=JPG:82 / --remove / --clear （輪盤一開始停在哪）
 ```
 
 ## 環境鐵律（踩過，別再踩）
+
+0. **「叫不起來」不可以長得跟「產品答錯了」一樣**（2026-10-23，被自己的工具咬到）：如果一段
+   驗收程式在「啟動 exe 就失敗」時交出空的 Exit/Out/Err，那一條檢查會紅——但紅的理由是錯的，
+   而**同一件事發生在假故障注入裡時，它會回報 PROVEN**。實例：`fault-inject.ps1` 第一版把
+   `"$(Resolve-Path $Exe).Path"` 寫進雙引號字串（`.Path` 是字面文字），三個注入全部假報 PROVEN。
+   規矩：啟動失敗要**講出來**（`START FAILED (型別): 訊息 -- exe=… argv=…`），「跑起來了卻一個字
+   都沒印」也要講出來，而工具端看到這兩種字串就判 INVALID，不准當成判決。
 
 1. **驗收前先殺 `Confern` 行程**：殘留行程會鎖住 exe、讓複製**靜默失敗**（MSB3027/MSB3021，
    被 `Select-String -First N` 濾掉就完全看不到），結果是「0 錯誤」卻驗到舊二進位。

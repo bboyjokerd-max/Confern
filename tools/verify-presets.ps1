@@ -73,7 +73,16 @@ function Start-Captured([string]$exePath, [string[]]$argv, [int]$timeoutMs) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.RedirectStandardInput = $true
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    }
+    catch {
+        return [pscustomobject]@{
+            Exit = -1; Out = ''
+            Err = "START FAILED ($($_.Exception.GetType().Name)): $($_.Exception.Message) -- exe='$exePath' argv=$($argv -join ' ')"
+            TimedOut = $false
+        }
+    }
     $proc.StandardInput.Close()
     # Both pipes are drained asynchronously: a full pipe buffer would deadlock the child.
     $outTask = $proc.StandardOutput.ReadToEndAsync()
@@ -85,8 +94,14 @@ function Start-Captured([string]$exePath, [string[]]$argv, [int]$timeoutMs) {
         }
     }
     $null = $proc.WaitForExit()
+    $outText = [string]$outTask.Result
+    $errText = [string]$errTask.Result
+    if ($outText -eq '' -and $errText -eq '') {
+        # Not a test result: the process started but said nothing. Say so, with the code.
+        $errText = "the process produced no output at all (exit=$($proc.ExitCode), exe='$exePath', argv=$($argv -join ' '))"
+    }
     return [pscustomobject]@{
-        Exit = $proc.ExitCode; Out = [string]$outTask.Result; Err = [string]$errTask.Result; TimedOut = $false
+        Exit = $proc.ExitCode; Out = $outText; Err = $errText; TimedOut = $false
     }
 }
 
