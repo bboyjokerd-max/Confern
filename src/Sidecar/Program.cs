@@ -41,10 +41,10 @@ internal static class Program
         {
             Native.AttachParentConsole();
             Console.Error.WriteLine("confern: " + opt.CliError);
-            Console.Error.WriteLine("usage:  conforn convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o DIR]");
-            Console.Error.WriteLine("        conforn formats");
-            Console.Error.WriteLine("        conforn watch <folder> --to <FORMAT> [--quality N] [-o DIR]");
-            Console.Error.WriteLine("        conforn watch --add <folder> --to <FORMAT> | --list | --remove <folder>");
+            Console.Error.WriteLine("usage:  confern convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o DIR]");
+            Console.Error.WriteLine("        confern formats");
+            Console.Error.WriteLine("        confern watch <folder> --to <FORMAT> [--quality N] [-o DIR]");
+            Console.Error.WriteLine("        confern watch --add <folder> --to <FORMAT> | --list | --remove <folder>");
             return 4;
         }
 
@@ -242,6 +242,15 @@ internal static class Program
             using var recentEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
                                                     opt.Quiet || opt.CliSubcommand);
             return App.RunRecentCli(opt, recentEvidence);
+        }
+
+        // 每種來源格式的預設目標格式（2026-10-23）：托盤拖曳時輪盤會停在那顆扇形上。
+        if (opt.PresetList || opt.PresetClear || opt.PresetSet.Length > 0 || opt.PresetRemove.Length > 0)
+        {
+            Native.AttachParentConsole();
+            using var presetEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(),
+                                                    opt.Quiet || opt.CliSubcommand);
+            return App.RunPresetCli(opt, presetEvidence);
         }
 
         // M1d：無需滑鼠的整條轉檔管線（解碼 → 編碼 → 原子寫入）。驗證靠它，不靠人工拖曳。
@@ -449,11 +458,11 @@ internal sealed class Options
         Confern (M1a)
 
         Commands (no --flag needed; they are translated to the flags below by Cli/CliArgs.cs)
-          conforn convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o <dir>]
+          confern convert <file> [<file> ...] --to <FORMAT> [--quality N] [-o <dir>]
                                     convert files from the command line, no window, no tray icon.
                                     Exit 0 = every file converted, 9 = at least one failed,
                                     4 = the command itself is wrong (unknown format, no files)
-          conforn formats           print what this build can read and write
+          confern formats           print what this build can read and write
 
           --version                 print version and exit
           --dump-monitors           list monitors and exit (arrives in T2)
@@ -606,6 +615,12 @@ internal sealed class Options
                                     (the store path can be overridden with the CONFERN_RECENT
                                     environment variable; acceptance runs use that so their temp
                                     conversions never enter your own list)
+          preset                    show the per-source-format presets (same as `confern preset`)
+          --preset-set SRC=TGT[:Q]  remember the target the wheel starts on when you drop a SRC file,
+                                    e.g. --preset-set HEIC=JPG:82 (quality only for JPG/WEBP)
+          --preset-remove SRC       forget that format's preset
+          --preset-clear            forget all presets
+                                    (CONFERN_PRESETS overrides the store path, for acceptance runs)
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)
@@ -1052,6 +1067,16 @@ internal sealed class Options
     public bool RecentClear;
     /// <summary>`--recent-limit <N>`：只印最新的 N 筆（0＝全部，最多 <see cref="RecentStore.MaxEntries"/>）。</summary>
     public int RecentLimit;
+    /// <summary>`--preset-list`（`confern preset`）：印出「每種來源格式預設轉成什麼」。</summary>
+    public bool PresetList;
+    /// <summary>`--preset-set &lt;SRC=TGT[:Q]&gt;`（`confern preset --set …`）：寫入一筆預設。</summary>
+    public string PresetSet = "";
+    /// <summary>`--preset-remove &lt;SRC&gt;`：移除一個來源格式的預設。</summary>
+    public string PresetRemove = "";
+    /// <summary>`--preset-clear`：清空全部預設。</summary>
+    public bool PresetClear;
+    /// <summary>`--quality` 有沒有**明打**。決定「命令列 &gt; 預設 &gt; 設定頁」那個優先序。</summary>
+    public bool ConvertQualityGiven;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
     public string WorkerPipe = "";
     /// <summary>--progress-dump <dir>：把進度那一行畫成 PNG，用來驗證字形與版面（不必有畫面）。</summary>
@@ -1348,7 +1373,15 @@ internal sealed class Options
                     if (i + 1 < args.Length) { o.ConvertTarget = args[i + 1]; i++; }
                     break;
                 case "--quality":
-                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int q)) { o.ConvertQuality = q; i++; }
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int q))
+                    {
+                        o.ConvertQuality = q;
+                        // **明打**才算數：這個旗標決定它要不要蓋掉「該來源格式的預設品質」。
+                        // 沒有這個標記，`--quality 85`（預設值）與「使用者真的打了 85」無法分辨，
+                        // 而那個分辨正是優先序唯一需要的資訊。
+                        o.ConvertQualityGiven = true;
+                        i++;
+                    }
                     break;
                 case "--out-dir":
                     if (i + 1 < args.Length) { o.OutDir = args[i + 1]; i++; }
@@ -1376,6 +1409,14 @@ internal sealed class Options
                     break;
                 case "--recent-list": o.RecentList = true; break;
                 case "--recent-clear": o.RecentClear = true; break;
+                case "--preset-list": o.PresetList = true; break;
+                case "--preset-clear": o.PresetClear = true; break;
+                case "--preset-set":
+                    if (i + 1 < args.Length) { o.PresetSet = args[i + 1]; i++; }
+                    break;
+                case "--preset-remove":
+                    if (i + 1 < args.Length) { o.PresetRemove = args[i + 1]; i++; }
+                    break;
                 case "--recent-limit":
                     // 只給 --recent-limit 也是「印清單」：少了這一行，`confern recent --limit 5`
                     // 會因為 RecentList/Clear 都 false 而落到**常駐程式**那條路——程式開了托盤、
@@ -3725,7 +3766,7 @@ internal static class App
                           : "-> " + presenter.Destination)}");
 
         bool showTools = (IsShiftDown() || _forceToolLayer) && PendingTools.Count > 0;
-        RenderWheelLayer(presenter, showTools, p.X, p.Y);
+        RenderWheelLayer(presenter, showTools, p.X, p.Y, evidence);
         sw.Stop();
         // tools= 附加在行尾（既有套件比對的是這行的前綴）。
         evidence.Line($"wheel from OLE payload: files={paths.Length} status={verdict.Status} " +
@@ -3777,7 +3818,8 @@ internal static class App
     /// 兩邊遲早會畫得不一樣，而「同一層在兩個時刻長得不一樣」是使用者一眼就會發現的事。
     /// ⚠ <c>Show</c> 會把選取**重設到第一格**：切層等於換一組選項，這是刻意的（見計畫 §10.1）。
     /// </summary>
-    private static void RenderWheelLayer(WheelPresenter presenter, bool tools, int x, int y)
+    private static void RenderWheelLayer(WheelPresenter presenter, bool tools, int x, int y,
+                                        Evidence? evidence = null)
     {
         if (tools)
         {
@@ -3790,7 +3832,53 @@ internal static class App
             return;
         }
 
-        presenter.Show(x, y, _wheelSourceFormat, _wheelFormatTargets, 0, _wheelPreview, _wheelNotice);
+        // 每種來源格式的預設（2026-10-23）：使用者每次都選同一格時，輪盤一開始就停在那裡。
+        // **這不是鎖**：方向鍵與滑鼠照樣可以選別的；它只決定「游標還沒動時」停在哪一顆扇形。
+        int selected = PresetSelection(_wheelSourceFormat, _wheelFormatTargets, evidence);
+        presenter.Show(x, y, _wheelSourceFormat, _wheelFormatTargets, selected, _wheelPreview, _wheelNotice);
+    }
+
+    /// <summary>
+    /// 輪盤一開始要停在第幾顆扇形：有那個來源格式的預設、而且這一版的目標清單裡真的有它，就用它；
+    /// 其餘一律 0（＝改動前的行為）。
+    ///
+    /// <para><b>為什麼要對清單比對而不是直接相信檔案</b>：`presets.json` 是可以被手改、也可能是上一個
+    /// 版本留下來的。裡面的目標如果在這一版不被提供（例如某個編碼器這台機器沒有），選一個不存在的
+    /// 索引會讓 `Show` 的 `Math.Clamp` 悄悄退到最後一格——畫面上看起來正常，但選中的是使用者沒有要的
+    /// 格式。所以：認不得就退回 0，並把「為什麼」寫進日誌。</para>
+    /// </summary>
+    private static int PresetSelection(string sourceFormat, IReadOnlyList<string> targets, Evidence? evidence)
+    {
+        if (targets.Count == 0) return 0;
+        Action<string>? log = evidence == null ? null : evidence.Line;
+        PresetStore store = PresetStore.Shared(log);
+        Preset? preset = store.For(sourceFormat);
+        if (preset == null) return 0;
+
+        for (int i = 0; i < targets.Count; i++)
+        {
+            if (!string.Equals(targets[i], preset.Target, StringComparison.OrdinalIgnoreCase)) continue;
+            evidence?.Line($"wheel preset: source={sourceFormat} -> {preset.Target} starts on sector {i} " +
+                           $"of {targets.Count} (from {store.FilePath}); the keys still change it");
+            return i;
+        }
+        evidence?.Line($"wheel preset: source={sourceFormat} -> {preset.Target} is not offered by this " +
+                       $"build (targets=[{string.Join(",", targets)}]); starting on sector 0");
+        return 0;
+    }
+
+    /// <summary>
+    /// 這次轉檔要用哪個品質。優先序**只有這一份**：命令列明打 <c>--quality</c>（在 CLI 那一側處理）
+    /// &gt; 這個來源格式的預設 &gt; 設定頁。工具一律 100（見 <see cref="ConversionEngine"/> 的說明）。
+    /// </summary>
+    private static int PresetQuality(int fallback, string target, Evidence evidence)
+    {
+        PresetStore store = PresetStore.Shared(evidence.Line);
+        int quality = store.QualityFor(_wheelSourceFormat, target, fallback);
+        if (quality == fallback) return quality;
+        evidence.Line($"preset quality: {_wheelSourceFormat} -> {target} uses {quality} instead of " +
+                      $"{fallback} (from {store.FilePath}); the settings page is the fallback");
+        return quality;
     }
 
     /// <summary>
@@ -3807,7 +3895,7 @@ internal static class App
         if (showTools == currentlyTools) return;
 
         Native.GetCursorPos(out Native.POINT p);
-        RenderWheelLayer(presenter, showTools, p.X, p.Y);
+        RenderWheelLayer(presenter, showTools, p.X, p.Y, evidence);
         evidence.Line($"wheel layer switch: {(currentlyTools ? "tool" : "format")} -> " +
                       $"{(showTools ? "tool" : "format")} (shift {(shiftDown ? "down" : "up")}, " +
                       $"selection reset to first)");
@@ -4094,7 +4182,7 @@ internal static class App
         }
         runner.Start(paths,
                      toolOp == null ? target : "",
-                     toolOp == null ? settings.QualityFor(target) : 100,
+                     toolOp == null ? PresetQuality(settings.QualityFor(target), target, evidence) : 100,
                      centerX, centerY,
                      toolOp: toolOp, outputDir: outputDir, compression: compression,
                      removeBgModel: removeBgModel, removeBgRefine: removeBgRefine);
@@ -4714,9 +4802,9 @@ internal static class App
         Say("use the tools instead (rotate90, strip-metadata, compress, crop, read-qr, merge-pdf, remove-bg).");
         Say("");
         Say("examples");
-        Say("  conforn convert photo.jpg --to webp");
-        Say("  conforn convert *.png --to jpg --quality 80 -o .\\out");
-        Say("  conforn --settings-ui");
+        Say("  confern convert photo.jpg --to webp");
+        Say("  confern convert *.png --to jpg --quality 80 -o .\\out");
+        Say("  confern --settings-ui");
 
         evidence.Line($"list formats: in={registry.InputFormats.Count} out={registry.OfferedOutputs.Count} " +
                       $"inFormats=[{string.Join(",", registry.InputFormats)}] " +
@@ -4774,6 +4862,164 @@ internal static class App
     }
 
     /// <summary>
+    /// 「每種來源格式預設轉成什麼」的命令列入口（2026-10-23）：`confern preset` 印清單、
+    /// `--set PNG=WEBP[:78]` 寫入、`--remove PNG` 移除、`--clear` 清空。
+    ///
+    /// <para><b>為什麼要先驗證再寫</b>：一份存得下卻永遠不會生效的預設，比沒有預設更糟——使用者
+    /// 以為他設定好了，於是每次拖檔都奇怪「為什麼還是選 PNG」。所以來源格式必須是這一版真的能開的
+    /// （<see cref="CodecRegistry.InputFormats"/>）、目標必須是那個來源**真的**能轉成的
+    /// （<see cref="FormatCatalog.TargetsFor"/>，它已經排除了自己），而品質只有編碼器真的在乎大小的
+    /// 格式才准寫（<see cref="CompressionPolicy.QualityControlsSize"/>）。三條都是 exit 4 並說清楚。</para>
+    /// </summary>
+    internal static int RunPresetCli(Options opt, Evidence evidence)
+    {
+        var registry = new CodecRegistry();
+        var catalog = new FormatCatalog(registry);
+        PresetStore store = PresetStore.Shared(evidence.Line);
+
+        if (!string.IsNullOrEmpty(store.LoadError))
+        {
+            // 退回空清單是對的，但**不能靜靜的**（`--quiet` 之下日誌一行都不會印）。
+            Console.Error.WriteLine($"confern: presets: '{store.FilePath}' is unreadable " +
+                                    $"({store.LoadError}); starting with an empty list");
+        }
+
+        // ① --preset-clear
+        if (opt.PresetClear)
+        {
+            store.Clear();
+            Console.Out.WriteLine($"presets: cleared  ({store.FilePath})");
+            evidence.Line($"preset cli: cleared the list at {store.FilePath}");
+            return 0;
+        }
+
+        // ② --preset-remove <SRC>
+        if (opt.PresetRemove.Length > 0)
+        {
+            string source = opt.PresetRemove.Trim().ToUpperInvariant();
+            if (!store.Remove(source))
+            {
+                Console.Error.WriteLine($"confern: '{source}' has no preset (see: confern preset)");
+                return 4;
+            }
+            Console.Out.WriteLine($"removed {source}  (remaining {store.Count})");
+            evidence.Line($"preset cli: removed '{source}' remaining={store.Count}");
+            return 0;
+        }
+
+        // ③ --preset-set <SRC=TGT[:Q]>
+        if (opt.PresetSet.Length > 0)
+        {
+            string spec = opt.PresetSet.Trim();
+            int eq = spec.IndexOf('=');
+            if (eq <= 0 || eq == spec.Length - 1)
+            {
+                Console.Error.WriteLine($"confern: --set needs <SOURCE=TARGET>, e.g. --set PNG=WEBP " +
+                                        $"(got '{spec}')");
+                return 4;
+            }
+            string source = spec.Substring(0, eq).Trim().ToUpperInvariant();
+            string targetPart = spec.Substring(eq + 1).Trim();
+            int quality = 0;
+
+            int colon = targetPart.IndexOf(':');
+            if (colon >= 0)
+            {
+                string qualityText = targetPart.Substring(colon + 1).Trim();
+                targetPart = targetPart.Substring(0, colon).Trim();
+                if (!int.TryParse(qualityText, out quality))
+                {
+                    Console.Error.WriteLine($"confern: '{qualityText}' is not a quality number " +
+                                            $"({CodecRegistry.MinEncodeQuality}-{CodecRegistry.MaxEncodeQuality})");
+                    return 4;
+                }
+            }
+            string target = targetPart.ToUpperInvariant();
+
+            // 來源格式：這一版真的開得起來的（不然這份預設永遠不會被用到）。
+            string? sourceMatch = registry.InputFormats
+                .FirstOrDefault(f => string.Equals(f, source, StringComparison.OrdinalIgnoreCase));
+            if (sourceMatch == null)
+            {
+                Console.Error.WriteLine($"confern: '{source}' is not a format this build opens " +
+                                        $"(opens=[{string.Join(",", registry.InputFormats)}])");
+                return 4;
+            }
+            source = sourceMatch.ToUpperInvariant();
+
+            // 目標格式：那個來源**真的**能轉成的（TargetsFor 已排除自己，也排除了不能轉圖片的來源）。
+            IReadOnlyList<string> allowed = catalog.TargetsFor(source);
+            string? targetMatch = allowed.FirstOrDefault(f => string.Equals(f, target, StringComparison.OrdinalIgnoreCase));
+            if (targetMatch == null)
+            {
+                Console.Error.WriteLine($"confern: {source} cannot be converted to '{target}' " +
+                                        $"(can be: [{string.Join(",", allowed)}])");
+                return 4;
+            }
+            target = targetMatch.ToUpperInvariant();
+
+            // 品質：只有真的有品質旋鈕的格式才准寫。存一個永遠被忽略的數字，就是那種
+            // 「設定看起來生效了、其實什麼都沒發生」的缺陷。
+            if (quality != 0)
+            {
+                if (!CompressionPolicy.QualityControlsSize(target))
+                {
+                    Console.Error.WriteLine($"confern: {target} has no quality setting " +
+                                            "(only JPG and WEBP do); drop the ':{quality}' part");
+                    return 4;
+                }
+                if (quality < CodecRegistry.MinEncodeQuality || quality > CodecRegistry.MaxEncodeQuality)
+                {
+                    Console.Error.WriteLine($"confern: quality must be " +
+                                            $"{CodecRegistry.MinEncodeQuality}-{CodecRegistry.MaxEncodeQuality} " +
+                                            $"(got {quality})");
+                    return 4;
+                }
+            }
+
+            if (!store.Set(source, target, quality))
+            {
+                Console.Error.WriteLine($"confern: could not save the preset to '{store.FilePath}' " +
+                                        "(see the log for the reason)");
+                return 4;
+            }
+            var written = new Preset(source, target, quality);
+            Console.Out.WriteLine($"set {written.Describe()}   ({store.FilePath})");
+            Console.Out.WriteLine($"  the wheel will start on {target} when you drop a {source} file");
+            evidence.Line($"preset cli: set '{written.Describe()}' count={store.Count} file={store.FilePath}");
+            return 0;
+        }
+
+        // ④ 什麼都沒給＝印清單（與 `confern recent` 同一個規矩）
+        IReadOnlyList<Preset> all = store.All();
+        Console.Out.WriteLine($"preset conversions ({all.Count} source format(s), the wheel starts on these)");
+        Console.Out.WriteLine($"  file: {store.FilePath}");
+        if (all.Count == 0)
+        {
+            Console.Out.WriteLine("  (none) - add one with: confern preset --set PNG=WEBP");
+        }
+        else
+        {
+            foreach (Preset preset in all)
+            {
+                string quality = preset.Quality > 0 ? $"quality {preset.Quality}" : "quality from settings";
+                Console.Out.WriteLine($"  {preset.SourceFormat,-5} -> {preset.Target,-5} ({quality})");
+            }
+            // 「存得下」與「這一版真的會用」是兩件事：這一段是為了讓後者看得見。
+            foreach (Preset preset in all)
+            {
+                IReadOnlyList<string> allowed = catalog.TargetsFor(preset.SourceFormat);
+                if (!allowed.Contains(preset.Target, StringComparer.OrdinalIgnoreCase))
+                    Console.Out.WriteLine($"  note: {preset.Describe()} would not be offered by this build " +
+                                          $"(can be: [{string.Join(",", allowed)}])");
+            }
+        }
+        Console.Out.WriteLine($"total={all.Count}");
+        evidence.Line($"preset cli: total={all.Count} file={store.FilePath}");
+        return 0;
+    }
+
+    /// <summary>
     /// 監看資料夾的命令列入口（2026-10-22）：`confern watch &lt;folder&gt;` 前台跑、
     /// `--watch-add`／`--watch-remove`／`--watch-list` 管理**設定檔**裡的那份清單。
     ///
@@ -4793,7 +5039,7 @@ internal static class App
             Console.Out.WriteLine($"watched folders (from {settingsPath})");
             if (settings.WatchFolders.Count == 0)
             {
-                Console.Out.WriteLine("  (none) — add one with: conforn watch --add <folder> --to <FORMAT>");
+                Console.Out.WriteLine("  (none) — add one with: confern watch --add <folder> --to <FORMAT>");
             }
             else
             {
@@ -4823,7 +5069,7 @@ internal static class App
                 if (removed == 0)
                 {
                     Console.Error.WriteLine($"confern: '{folder}' is not in the watched list " +
-                                            $"(see: conforn watch --list)");
+                                            $"(see: confern watch --list)");
                     return 4;
                 }
                 SettingsStore.Save(settings with { WatchFolders = list }, settingsPath, evidence.Line);
@@ -7546,12 +7792,28 @@ internal static class App
         evidence.Line($"convert job: files={paths.Length} target={target} quality={opt.ConvertQuality} " +
                       $"offered=[{string.Join(",", registry.OfferedOutputs)}]");
 
+        // 每種來源格式的預設品質（2026-10-23）：優先序＝命令列明打 --quality > 預設 > 預設值 85。
+        // ⚠ `opt.ConvertQuality` 的預設值本身就是 85，所以「有沒有明打」必須是**另一個旗標**，
+        //   否則「使用者打了 85」與「什麼都沒打」無法分辨，優先序就無從實作。
+        PresetStore presets = PresetStore.Shared(evidence.Line);
         var results = new List<ConversionResult>();
         foreach (string path in paths)
         {
+            string sourceFormat = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
+            int quality = opt.ConvertQuality;
+            if (!opt.ConvertQualityGiven)
+            {
+                int presetQuality = presets.QualityFor(sourceFormat, target, opt.ConvertQualitySane);
+                if (presetQuality != opt.ConvertQualitySane)
+                {
+                    quality = presetQuality;
+                    evidence.Line($"convert preset: {sourceFormat} -> {target} uses quality {quality} " +
+                                  $"(instead of {opt.ConvertQualitySane}; from {presets.FilePath})");
+                }
+            }
             // 輸出資料夾：空字串＝來源檔旁邊（既有行為）。命名與碰撞規則完全不變——
             // 我們沒有另開一條「CLI 專用」的寫檔路徑，所以「永不覆寫、永不詢問」對 CLI 同樣成立。
-            ConversionResult result = engine.Convert(path, target, opt.ConvertQuality, journal,
+            ConversionResult result = engine.Convert(path, target, quality, journal,
                                                      opt.OutDir.Length > 0 ? opt.OutDir : null);
             results.Add(result);
             // CLI 轉出來的檔同樣進「最近轉檔」：命令列不是第二種使用者，只是同一批人換一個入口。

@@ -4,13 +4,13 @@ namespace Sidecar;
 /// 命令列的表面層：把使用者打的句子翻譯成既有的長旗標。
 ///
 /// <code>
-/// conforn convert a.png b.jpg --to webp --quality 80 -o C:\出圖
+/// confern convert a.png b.jpg --to webp --quality 80 -o C:\出圖
 ///   → --convert "a.png;b.jpg" --target webp --quality 80 --out-dir C:\出圖
-/// conforn formats
+/// confern formats
 ///   → --list-formats
-/// conforn watch C:\in --to JPG
+/// confern watch C:\in --to JPG
 ///   → --watch C:\in --target JPG
-/// conforn watch --add C:\in --to PNG -o D:\out
+/// confern watch --add C:\in --to PNG -o D:\out
 ///   → --watch-add C:\in --target PNG --out-dir D:\out
 /// </code>
 ///
@@ -47,9 +47,9 @@ internal static class CliArgs
         // ② 第一個字是裸字卻不是子命令 → 不要默默變成「啟動常駐程式」。
         //    這條是刻意加的安全網：以前 `confern typo` 會安靜地開一個托盤圖示。
         if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert") && !Is(args[0], "watch")
-            && !Is(args[0], "recent"))
-            return Error($"unknown command '{args[0]}' (try: conforn formats, conforn convert, conforn watch, " +
-                         "confern recent, or conforn --help)");
+            && !Is(args[0], "recent") && !Is(args[0], "preset"))
+            return Error($"unknown command '{args[0]}' (try: confern formats, confern convert, confern watch, " +
+                         "confern recent, confern preset, or confern --help)");
 
         bool isConvert = Is(args[0], "convert");
         // `watch` 是第二個位置參數型子命令（2026-10-22）：`confern watch <folder>` 直接監看，
@@ -58,11 +58,16 @@ internal static class CliArgs
         // `recent` 是第三個子命令（2026-10-23）：印出／清空「最近轉檔」。
         // 它**沒有位置參數**——清單是程式自己寫的，使用者沒有東西要指定。
         bool isRecent = Is(args[0], "recent");
+        // `preset` 是第四個子命令（2026-10-23）：「每種來源格式預設轉成什麼」。
+        // 形狀是 `--set PNG=WEBP` 這種「旗標＋一個值」，所以只有 `--set/--remove` 要吃值。
+        bool isPreset = Is(args[0], "preset");
         string? watchFolder = null;
         // recent 沒有位置參數，但「有沒有多打東西」還是要看得出來，所以裸字自己收一份。
         // ⚠ 不能用「事後掃 rest 裡的裸字」代替：`recent --limit 5` 的那個 `5` 就長得像裸字，
         // 掃下去會變成「你多打了參數」而 exit 4（實測抓到）。
         var recentExtra = new List<string>();
+        // 同理：`preset --set PNG=WEBP` 的那個值不是裸字，它只是「不像旗標」。收在同一條規則裡。
+        var presetExtra = new List<string>();
 
         var rest = new List<string>();
         var files = new List<string>();
@@ -70,7 +75,7 @@ internal static class CliArgs
 
         // 子命令自己（`convert`／`watch`）要跳過，它是動詞不是參數。第一版的 watch 忘了這件事，
         // 於是 `confern watch --list` 被讀成「監看一個叫 watch 的資料夾」（實測 exit 4）。
-        for (int i = (isConvert || isWatch || isRecent) ? 1 : 0; i < args.Length; i++)
+        for (int i = (isConvert || isWatch || isRecent || isPreset) ? 1 : 0; i < args.Length; i++)
         {
             string a = args[i];
 
@@ -91,6 +96,23 @@ internal static class CliArgs
             // 使用者打的是「記下來」，跑出來的卻是「現在就盯著」——這種錯最難發現，因為兩者都活著。
             // `recent --list`／`--clear`／`--limit N`：翻成長旗標。`--list` 是預設行為，
             // 但明打一次也要接受（「我打了卻沒反應」是最容易讓人以為壞掉的體驗）。
+            // `preset --set PNG=WEBP`／`--remove PNG`／`--clear`／`--list`：翻成長旗標。
+            // `--set` 的值含 `=` 與 `:`（`HEIC=JPG:82`），但它仍然是一個 token——shell 不會拆它。
+            if (!stopOptions && isPreset)
+            {
+                if (a == "--list") { rest.Add("--preset-list"); continue; }
+                if (a == "--clear") { rest.Add("--preset-clear"); continue; }
+                if (a == "--set" || a == "--remove")
+                {
+                    if (i + 1 >= args.Length)
+                        return Error(a == "--set" ? "--set needs SRC=TGT, e.g. --set PNG=WEBP"
+                                                  : "--remove needs a source format, e.g. --remove PNG");
+                    rest.Add(a == "--set" ? "--preset-set" : "--preset-remove");
+                    rest.Add(args[++i]);
+                    continue;
+                }
+            }
+
             if (!stopOptions && isRecent)
             {
                 if (a == "--list") { rest.Add("--recent-list"); continue; }
@@ -146,6 +168,12 @@ internal static class CliArgs
                 continue;
             }
 
+            if (isPreset && (stopOptions || !a.StartsWith("-", StringComparison.Ordinal)))
+            {
+                presetExtra.Add(a);
+                continue;
+            }
+
             if (isWatch && (stopOptions || !a.StartsWith("-", StringComparison.Ordinal)))
             {
                 // 只收一個資料夾：`confern watch a b` 看起來像「監看兩個」但我們的旗標只有一個位置，
@@ -173,8 +201,8 @@ internal static class CliArgs
                 return Error($"watch --{(add ? "add" : remove ? "remove" : "list")} takes its folder from the flag, " +
                              $"not as a bare word (got '{watchFolder}')");
             if (modes == 0 && watchFolder == null)
-                return Error("watch needs a folder: conforn watch <folder> --to <FORMAT>, " +
-                             "or conforn watch --list");
+                return Error("watch needs a folder: confern watch <folder> --to <FORMAT>, " +
+                             "or confern watch --list");
 
             var w = new List<string>();
             if (modes == 0) { w.Add("--watch"); w.Add(watchFolder!); }
@@ -189,8 +217,28 @@ internal static class CliArgs
             // 与其猜，不如說清楚（與 watch 的「只收一個資料夾」同一條規矩）。
             if (recentExtra.Count > 0)
                 return Error($"recent takes no arguments (got '{string.Join(" ", recentExtra)}'); " +
-                             "try: conforn recent, conforn recent --limit 5, or conforn recent --clear");
-            if (rest.Count == 0) rest.Insert(0, "--recent-list");
+                             "try: confern recent, confern recent --limit 5, or confern recent --clear");
+            // ⚠ 不是 `rest.Count == 0`：`--log`／`--quality` 這些**共用**旗標也在 rest 裡，
+            //   用它判斷會讓 `confern recent --log x.log` 落到常駐那條路（＝開出托盤）。
+            //   判斷的是「模式旗標有沒有出現」。
+            if (!rest.Contains("--recent-list") && !rest.Contains("--recent-clear") &&
+                !rest.Contains("--recent-limit"))
+                rest.Insert(0, "--recent-list");
+            rest.Add("--cli-subcommand");
+            return rest.ToArray();
+        }
+
+        if (isPreset)
+        {
+            // 位置參數一律拒絕：`confern preset PNG=WEBP` 看起來像「直接設定」，但那要 `--set`。
+            // 與 `recent`／`watch` 同一條規矩：与其猜，不如說清楚。
+            if (presetExtra.Count > 0)
+                return Error($"preset takes no bare words (got '{string.Join(" ", presetExtra)}'); " +
+                             "try: confern preset --set PNG=WEBP");
+            // 同上：`confern preset --log x.log` 也必須印清單，而不是開一個托盤。
+            if (!rest.Contains("--preset-list") && !rest.Contains("--preset-clear") &&
+                !rest.Contains("--preset-set") && !rest.Contains("--preset-remove"))
+                rest.Insert(0, "--preset-list");
             rest.Add("--cli-subcommand");
             return rest.ToArray();
         }
@@ -198,7 +246,7 @@ internal static class CliArgs
         if (!isConvert) return rest.ToArray();
 
         if (files.Count == 0)
-            return Error("convert needs at least one file: conforn convert <file> [<file> ...] --to <FORMAT>");
+            return Error("convert needs at least one file: confern convert <file> [<file> ...] --to <FORMAT>");
 
         var result = new List<string> { "--convert", string.Join(";", files) };
         result.AddRange(rest);
@@ -247,6 +295,8 @@ internal static class CliArgs
         "--progress-dump-detail-json",
         "--progress-dump-detail-raw",
         "--quality",
+        "--preset-remove",
+        "--preset-set",
         "--recent-limit",
         "--settings-file",
         "--settings-probe",

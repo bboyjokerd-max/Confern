@@ -59,6 +59,16 @@
    進去；`--recent-limit` 單獨出現會掉到常駐分支而卡死驗收十分鐘）寫在進度記錄那一節。
    **驗收會寫進使用者的清單**這件事也修了：`CONFERN_RECENT` 環境變數（`verify-all` 自己設），
    所以套件真的轉檔時紀錄只會落在 `%TEMP%`。
+8. **每種檔型一組預設**（2026-10-23，`tools/verify-presets.ps1` 40/40）：`confern preset --set
+   HEIC=JPG:82` 之後，拖 HEIC 進來時輪盤**一開始就停在那顆扇形**，而且那個品質真的送進編碼器
+   （同一張圖品質 60 = 9,794 B、100 = 20,686 B）。資料在 `%LOCALAPPDATA%\Confern\presets.json`
+   （一筆三個欄位；與 `settings.json` 分開，所以**零 UI 改動**是可檢查的事實）。品質優先序只有
+   一份：命令列明打 `--quality` &gt; 預設 &gt; 設定頁（為此 `--quality` 多了一個「是否明打」的位元）。
+   `--set` 會先驗來源格式／目標格式／品質三件事，任何一件不過就 exit 4 並說清楚——**存得下卻永遠
+   不會生效的預設比沒有更糟**。同一天驗收還抓到兩個真缺陷：`confern preset --log` 與
+   `confern recent --log` 會掉到常駐分支開出托盤（CliArgs 用 `rest.Count == 0` 判斷模式，共用旗標
+   也算進去了），以及產品自己的說明文字把名字拼成 `conforn` **29 次**（使用者第一眼就會照著打）。
+   細節與實測數字在進度記錄「2026-10-23 · 每種檔型一組預設」那一節。
 
 ## 下一步（建議順序，出自 `2026-10-01-ui-redesign.md` §7）
 
@@ -131,12 +141,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$wd\check-frame.ps1" -Dir $
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-installer.ps1
 # 產物: dist\Confern-Setup-<version>.exe（版本讀 Sidecar.csproj 的 <Version>）
 
-# 一次跑完 15 支（自己會先殺 Confern、印 exe 時間戳，最後給總表）
+# 一次跑完 16 支（自己會先殺 Confern、印 exe 時間戳，最後給總表）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-all.ps1 -Exe <exe>
 
-# 使用者看得到的兩個新入口
-#   conforn recent / conforn recent --limit 5 / conforn recent --clear
-#   托盤右鍵 → 最近轉檔（子選單，最多 8 筆）
+# 使用者看得到的三個新入口
+#   confern recent / confern recent --limit 5 / confern recent --clear   （托盤右鍵的「最近轉檔」）
+#   confern preset / confern preset --set HEIC=JPG:82 / --remove / --clear （輪盤一開始停在哪）
 ```
 
 ## 環境鐵律（踩過，別再踩）

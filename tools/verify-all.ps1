@@ -61,6 +61,9 @@ $suites = @(
     # 2026-10-23: the "recent conversions" list (store + `confern recent` + the tray half that needs
     # no mouse). It moves the user's own %LOCALAPPDATA%\Confern\recent.json aside and puts it back.
     [pscustomobject]@{ Name = 'recent';     Script = 'verify-recent.ps1';          Extra = @() }
+    # 2026-10-23: per-source-format presets (the wheel's initial sector, plus the preset quality).
+    # It points CONFERN_PRESETS at its own file and asserts the real one is byte-identical afterwards.
+    [pscustomobject]@{ Name = 'presets';    Script = 'verify-presets.ps1';         Extra = @() }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }
@@ -78,6 +81,13 @@ New-Item -ItemType Directory -Path $Work -Force | Out-Null
 $env:CONFERN_RECENT = Join-Path $Work 'recent.json'
 "recent store: $env:CONFERN_RECENT (the user list is not touched)"
 Remove-Item $env:CONFERN_RECENT -Force -ErrorAction SilentlyContinue
+
+# Same reasoning for the per-format presets: the wheel's initial sector now depends on presets.json,
+# so a user who has a preset would turn every other suite's "starts on sector 0" check red. An absent
+# file here means "no presets", i.e. exactly the behaviour before the feature existed.
+$env:CONFERN_PRESETS = Join-Path $Work 'presets.json'
+"preset store: $env:CONFERN_PRESETS (no presets, the user file is not touched)"
+Remove-Item $env:CONFERN_PRESETS -Force -ErrorAction SilentlyContinue
 
 $rows = @()
 foreach ($s in $suites) {

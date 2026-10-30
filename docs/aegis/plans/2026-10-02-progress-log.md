@@ -3913,3 +3913,85 @@ m1a 20 項與 m1h 6 項）。
 - **`OpenWithShell` 沒有端到端驗**：真的驗就得在使用者機器上開一個圖片檢視器，那是副作用。
   目前驗到「選單把正確的路徑交出去」，最後那一步（ShellExecute）只有程式碼與失敗時的日誌。
 
+## 2026-10-23 · 每種檔型一組預設：`confern preset`
+
+Filee 的四個點子到這裡湊齊（`confern` 命令列、監看資料夾、每種檔型一組預設、最近轉檔）。這一項
+同樣**不動版面**：入口只有命令列與 `presets.json`，輪盤只是「一開始停在哪一顆扇形」改變。
+
+### 它做什麼
+
+```powershell
+confern preset --set HEIC=JPG:82     # 之後拖 HEIC 進來，輪盤一開始就停在 JPG，並用 82
+confern preset --set PNG=TIF        # 不指定品質＝照設定頁
+confern preset                        # 看目前記了什麼
+confern preset --remove PNG
+confern preset --clear
+```
+
+資料在 `%LOCALAPPDATA%\Confern\presets.json`（一筆三個欄位：來源格式、目標格式、品質）。**與
+`settings.json` 分開**：設定頁的九列與它的字串鍵都被 `m1f` 逐項釘住，而這個功能不需要動任何畫面——
+獨立檔案讓「零 UI 改動」變成可檢查的事實，不是承諾。寫入還是走同一個 `AtomicWriter`（含
+`leaveOpen: true`，那是 `recent.json` 教過的）。
+
+**品質的優先序只有一份**：命令列明打 `--quality` &gt; 預設 &gt; 設定頁。為此 `--quality` 多了一個
+「是否明打」的旗標——`opt.ConvertQuality` 的預設值本身就是 85，沒有那個位元，「使用者打了 85」與
+「什麼都沒打」無法分辨，優先序就無從實作。
+
+### 三條「先拒絕，別存下去」的規矩
+
+存得下但永遠不會生效的預設，比沒有預設更糟：使用者以為設定好了，每次拖檔卻還是選 PNG。所以
+`--set` 會先驗三件事，任何一件不過就是 exit 4 並說清楚：
+
+| 規則 | 為什麼 | 實測訊息 |
+| --- | --- | --- |
+| 來源必須是這一版真的開得起的 | 否則這份預設永遠不會被用到 | `'XCF' is not a format this build opens (opens=[JPG,PNG,BMP,TIF,GIF,WEBP,HEIC])` |
+| 目標必須是那個來源真的能轉成的 | 輪盤上不會有那顆扇形 | `PNG cannot be converted to 'ZIP' (can be: [JPG,BMP,TIF,PDF])` |
+| 品質只能给有品質旋鈕的格式 | 存一個永遠被忽略的數字，就是「設定看起來生效了、其實什麼都沒發生」 | `BMP has no quality setting (only JPG and WEBP do)` |
+
+第二條順帶暴露了一個事實：**這台機器沒有 WebP 編碼器**，所以 PNG 的扇形是 `[JPG,BMP,TIF,PDF]`，
+`--set PNG=WEBP` 會被拒絕並列出真正可用的那四個。文件與訊息裡的範例因此改成 `HEIC=JPG`（那也正是
+這個功能最想要的用法）；寫死 `PNG=WEBP` 的教學在這台機器上是錯的。
+
+### 驗收：`tools\verify-presets.ps1`（40 項）
+
+行為面不是看日誌，是看**位元組**：
+
+- `PNG=PDF` 預設 ⇒ 日誌 `wheel preset: source=PNG -> PDF starts on sector 3 of 4`、`selected=3`，
+  而且資料夾裡真的出現 `b.pdf`（不是預設的第一顆）。
+- 手寫一筆 `PNG=AVIF`（這一版不提供）⇒ 退回 sector 0，且日誌說 `is not offered by this build`。
+  這條防的是「索引不存在時 `Math.Clamp` 悄悄退到最後一格」——畫面看起來正常，選中的卻不是使用者要的。
+- 同一張 220×220 PNG，品質 60 與 100：**9,794 B vs 20,686 B**（顯式 `--quality 90` 則是 14,844 B）。
+  日誌說「quality 60」只能證明程式認為它設了 60，位元組才證明編碼器真的照做。
+- 為另一個來源格式寫的預設（`HEIC=JPG`）對 PNG 拖曳完全沒有影響。
+
+`presets.json` 兩筆 = 163 B。
+
+### 驗收抓到的兩個真缺陷
+
+1. **`confern preset --log x.log` 會開出常駐程式**（托盤 ＋ 訊息迴圈，實測 15 秒不返回）。
+   原因：CliArgs 用 `rest.Count == 0` 判斷「使用者沒給模式」，但 `--log` 這種**共用**旗標也在
+   `rest` 裡，於是不會補上「印清單」⇒ 落到常駐那條路。同一個坑在 `confern recent --log x.log`
+   上本來就存在（上一個切片沒踩到只是因為驗收從沒帶 `--log`）。兩處都改成「模式旗標有沒有出現」。
+2. **產品自己的說明文字把名字拼錯了 29 次**：`conforn convert`、`conforn formats`、
+   `conforn --help`——命令叫 `confern`（con ＋ fern）。這是使用者第一眼就會照著打的地方，卻沒有
+   任何一支套件斷言過（所以它活了下來）。全部改成 `confern`（`CliArgs.cs` 16 處、
+   `Program.cs` 13 處，含每次用法錯誤時印出的 usage 區塊）。
+
+另外兩個驗收工具本身的教訓（都已寫進套件開頭）：
+
+- **PowerShell 5.1 的 `Start-Process -PassThru` 沒有 `-Wait` 時 `$p.ExitCode` 是 null**，而 `-Wait`
+  又不能給逾時。改成直接用 .NET 起行程：`WaitForExit(ms)` 既能給上限也能填 `ExitCode`。
+- **每一槍都要有硬上限**：一個卡住的子行程讓掃描卡十分鐘（上次 `--recent-limit` 就是這樣），
+  所以逾時就砍掉並回報 `exit=-1`。
+- 還有一件：這支套件自己也會真的轉檔十幾次，第一版忘了隔離`recent.json`，**實測把 12 筆
+  `%TEMP%` 路徑寫進使用者的清單**。現在它也把 `CONFERN_RECENT`／`CONFERN_PRESETS` 指到自己的
+  暫存檔，並且在 S7 用兩個 hash 斷言使用者那兩個檔案前後一字不差。
+
+全套現在 16 支：**630 項，604 pass、0 fail、26 inconclusive**。
+
+### 誠實缺口
+
+- 托盤上**沒有**這個功能的入口（UI 凍結；要在設定頁加一列是另一個決定，不是順手做的）。
+- 真正從檔案總管拖一次仍然沒有自動驗（與 m1a／m1h 那 26 項同一類）；`--wheel-payload` 走的是
+  同一條 seam，但它不是真的 OLE DragEnter。
+
