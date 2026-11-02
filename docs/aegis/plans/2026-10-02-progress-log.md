@@ -4144,8 +4144,14 @@ Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11�
   其中 S14.38b 是關鍵那條：鉤子送的是 `0xA4-down`，而偵測器仍然收到——沒有收斂這件事就不成立。
 - 常駐路徑（真正的路）實測：修好之後 `triggerAlt` DOWN=2／UP=2、`triggerShift`／`triggerCtrl`
   各 1／1、`triggerSpace` 1／1；而且觸發鍵設 Alt 時注入 Space 是 **0**（不會誤觸發）。
-- 假故障注入：`trigger-key-not-normalized`（把收斂拿掉）→ `S14.38` 變紅；`settings-page-drops-alt`
-  （清單把 Alt 拿掉）→ `S14.38d` 變紅。**兩者都在指定的那一條紅**，不是「反正紅了」。
+- 假故障注入：`trigger-key-not-normalized`（把收斂拿掉）→ **S14.38 紅**（連帶 5 條）；
+  `settings-page-drops-alt`（清單把 Alt 拿掉）→ **S14.38d 紅**。兩個都「紅在指定的那一條」，
+  而且跑完的重建＋重跑都回復全綠。
+- 全套：**16 支 / 639 條 / 613 pass / 0 fail / 26 inconclusive**（628 → 639 是 m1f 的 11 條）。
+- 安裝檔重打：18.45 MB，sha256 `77668A8C53CCD416307B91B6024E7512FF027E4DB8EF37D58ED8D16BE8B43C21`，
+  鑽孔（靜默安裝 → 檔案到位 → formats → preset --set → recent → 靜默移除）15.4 s 全過。
+- 順帶被 `verify-cli` 的 S8.1 咬到一次：新的 `--trigger-key-probe` 忘了登記進 `CliArgs.ValueFlags`，
+  那條檢查是拿「解析器實際吃值的旗標」對照「登記表」，所以少一個就紅。已補。
 
 ### 誠實缺口
 
