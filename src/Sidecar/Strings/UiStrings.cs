@@ -149,7 +149,13 @@ internal static class UiStrings
     /// 同時檢查佔位符：譯文**不可以**出現基準表沒有的 <c>{n}</c>。多引數被忽略是安全的，
     /// 但引用一個呼叫端沒傳的編號會丟 <c>FormatException</c>——這種錯在執行期才炸。
     /// </summary>
-    public static (string Line, bool Ok) SelfTest()
+    /// <param name="required">
+    /// 呼叫端**保證會被畫面用到**的鍵。只用來補一個真實的洞（2026-10-23）：表格彼此對齊只證明
+    /// 「八張表一樣」，不證明「畫面上真的會出現的鍵存在」——`vk.Alt` 在八張表裡都沒有，
+    /// 於是對齊報告說 missing=0、自檢全綠，而下拉選單那一列顯示的是 <c>!vk.Alt!</c>。
+    /// 由呼叫端（設定頁）把自己會用的鍵交進來，才是「缺鍵」真正的定義。
+    /// </param>
+    public static (string Line, bool Ok) SelfTest(IReadOnlyList<string>? required = null)
     {
         string[] order = { ZhHant, ZhHans, Ja, Ko, Fr, De, Es, En };
         var baseKeys = new HashSet<string>(Table[ZhHant].Keys, StringComparer.Ordinal);
@@ -158,6 +164,8 @@ internal static class UiStrings
         var missing = new List<string>();
         var extra = new List<string>();
         var badPlaceholders = new List<string>();
+        var requiredMissing = new List<string>();
+        int requiredCount = 0;
 
         foreach (string lang in order)
         {
@@ -171,7 +179,11 @@ internal static class UiStrings
                 if (!table.ContainsKey(key)) missing.Add($"{lang}:{key}");
             foreach (string key in table.Keys)
                 if (!baseKeys.Contains(key)) extra.Add($"{lang}:{key}");
+            if (required != null)
+                foreach (string key in required)
+                    if (!table.ContainsKey(key)) requiredMissing.Add($"{lang}:{key}");
         }
+        requiredCount = required?.Count ?? 0;
 
         // 佔位符：譯文用到的編號必須是基準表用到的編號的子集。
         foreach (string lang in order)
@@ -186,16 +198,20 @@ internal static class UiStrings
             }
         }
 
-        bool ok = missing.Count == 0 && extra.Count == 0 && badPlaceholders.Count == 0;
+        bool ok = missing.Count == 0 && extra.Count == 0 && badPlaceholders.Count == 0 &&
+                  requiredMissing.Count == 0;
         string line = string.Format(
             global::System.Globalization.CultureInfo.InvariantCulture,
-            "strings selftest: tables={0} base={1} baseKeys={2} aligned={3} missing={4} extra={5} badPlaceholders={6} per=[{7}]{8}{9}{10}",
+            "strings selftest: tables={0} base={1} baseKeys={2} aligned={3} missing={4} extra={5} " +
+            "badPlaceholders={6} requiredKeys={7} missingRequired={8} per=[{9}]{10}{11}{12}{13}",
             perLang.Count, ZhHant, baseKeys.Count, ok ? "True" : "False",
-            missing.Count, extra.Count, badPlaceholders.Count,
+            missing.Count, extra.Count, badPlaceholders.Count, requiredCount, requiredMissing.Count,
             string.Join(" ", perLang.ToArray()),
             missing.Count == 0 ? "" : " missingList=" + string.Join(",", missing.ToArray()),
             extra.Count == 0 ? "" : " extraList=" + string.Join(",", extra.ToArray()),
-            badPlaceholders.Count == 0 ? "" : " badList=" + string.Join(",", badPlaceholders.ToArray()));
+            badPlaceholders.Count == 0 ? "" : " badList=" + string.Join(",", badPlaceholders.ToArray()),
+            requiredMissing.Count == 0 ? "" : " missingRequiredList=" +
+                string.Join(",", requiredMissing.ToArray()));
         return (line, ok);
     }
 
@@ -430,6 +446,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "CapsLock",
             ["vk.Escape"] = "Escape",
             ["vk.Shift"] = "Shift",
+        ["vk.Alt"] = "Alt 鍵",
+        ["vk.Ctrl"] = "Ctrl 鍵",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Backspace",
             ["vk.ArrowUp"] = "↑",
@@ -654,6 +672,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "CapsLock",
             ["vk.Escape"] = "Escape",
             ["vk.Shift"] = "Shift",
+        ["vk.Alt"] = "Alt 键",
+        ["vk.Ctrl"] = "Ctrl 键",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Backspace",
             ["vk.ArrowUp"] = "↑",
@@ -908,6 +928,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "CapsLock",
             ["vk.Escape"] = "Escape",
             ["vk.Shift"] = "Shift",
+        ["vk.Alt"] = "Alt キー",
+        ["vk.Ctrl"] = "Ctrl キー",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Backspace",
             ["vk.ArrowUp"] = "↑",
@@ -1147,6 +1169,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "CapsLock",
             ["vk.Escape"] = "Escape",
             ["vk.Shift"] = "Shift",
+        ["vk.Alt"] = "Alt 키",
+        ["vk.Ctrl"] = "Ctrl 키",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Backspace",
             ["vk.ArrowUp"] = "↑",
@@ -1388,6 +1412,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "CapsLock",
             ["vk.Escape"] = "Escape",
             ["vk.Shift"] = "Shift",
+        ["vk.Alt"] = "Alt",
+        ["vk.Ctrl"] = "Ctrl",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Backspace",
             ["vk.ArrowUp"] = "Up",
@@ -1623,6 +1649,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "Verr. maj.",
             ["vk.Escape"] = "Échap",
             ["vk.Shift"] = "Maj",
+        ["vk.Alt"] = "Alt",
+        ["vk.Ctrl"] = "Ctrl",
             ["vk.Enter"] = "Entrée",
             ["vk.Backspace"] = "Retour arr.",
             ["vk.ArrowUp"] = "Haut",
@@ -1858,6 +1886,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "Feststell",
             ["vk.Escape"] = "Esc",
             ["vk.Shift"] = "Umschalt",
+        ["vk.Alt"] = "Alt",
+        ["vk.Ctrl"] = "Strg",
             ["vk.Enter"] = "Enter",
             ["vk.Backspace"] = "Rücktaste",
             ["vk.ArrowUp"] = "Hoch",
@@ -2093,6 +2123,8 @@ internal static class UiStrings
             ["vk.CapsLock"] = "Bloq Mayús",
             ["vk.Escape"] = "Esc",
             ["vk.Shift"] = "Mayús",
+        ["vk.Alt"] = "Alt",
+        ["vk.Ctrl"] = "Ctrl",
             ["vk.Enter"] = "Intro",
             ["vk.Backspace"] = "Retroceso",
             ["vk.ArrowUp"] = "Arriba",

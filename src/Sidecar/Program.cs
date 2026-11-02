@@ -1631,7 +1631,12 @@ internal static class App
         if (opt.StringsSelfTest)
         {
             Native.AttachParentConsole();
-            (string stringsLine, bool stringsOk) = UiStrings.SelfTest();
+            // required：設定頁承諾會出現的每一個鍵。只有這樣才驗得到「表格對齊但畫面上是 !key!」那類缺鍵
+            // （2026-10-23：vk.Alt 在八張表裡都沒有，對齊報告卻是綠的）。
+            IReadOnlyList<string> requiredStrings = SettingsWindow.TriggerKeyChoices
+                .Select(n => "vk." + n)
+                .ToArray();
+            (string stringsLine, bool stringsOk) = UiStrings.SelfTest(requiredStrings);
             evidence.Line(stringsLine);
             Console.WriteLine(stringsLine);
             return stringsOk ? 0 : 1;

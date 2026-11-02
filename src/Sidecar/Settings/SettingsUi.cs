@@ -1140,7 +1140,10 @@ internal static class SettingsUi
                     string ratio = (fore != null && back != null)
                         ? $"{Contrast(fore.Color, back.Color):0.0}:1"
                         : "?";
-                    Log(log, $"popup item {i}: bg={BrushText(item.Background)} " +
+                    // 文字也要印出來（2026-10-23）：這一格以前只印顏色，於是「這一列的顏色很健康」
+                    // 與「這一列寫的是 !vk.Alt!」可以同時成立——使用者看到的正是後者。
+                    string itemText = (item.Content as string) ?? item.Content?.ToString() ?? "";
+                    Log(log, $"popup item {i}: text='{itemText}' bg={BrushText(item.Background)} " +
                              $"backdrop={BrushText(back)} fg={BrushText(fore)} contrast={ratio}");
                 }
 

@@ -78,6 +78,18 @@ $faults = @(
         Why      = 'the wheel must START on the preset sector, not merely know about it'
     }
     [pscustomobject]@{
+        Name     = 'strings-table-misses-alt'
+        File     = 'src\Sidecar\Strings\UiStrings.cs'
+        Old      = '        ["vk.Shift"] = "Shift",' + "`n" +
+                   '        ["vk.Alt"] = "Alt",' + "`n" +
+                   '        ["vk.Ctrl"] = "Ctrl",'
+        New      = '        ["vk.Shift"] = "Shift",' + "`n" +
+                   '        // FAULT: the English table lost the label the settings page asks for'
+        Suite    = 'verify-m1f.ps1'
+        Expected = 'FAIL  S14.37e '
+        Why      = 'table-to-table alignment is green even when a key is missing from ALL tables'
+    }
+    [pscustomobject]@{
         Name     = 'trigger-key-not-normalized'
         File     = 'src\Sidecar\Interaction\DragDetector.cs'
         Old      = '    public void OnKey(uint vk, bool isDown)' +

@@ -668,6 +668,11 @@ $ssLine = (($ssText -split "`r?`n") | Where-Object { $_ -match 'strings selftest
 Check 'S14.37a all eight language tables hold the same keys and no impossible placeholder' `
   ($ssDone -and $ss.ExitCode -eq 0 -and $ssLine -match 'aligned=True' -and $ssLine -match 'missing=0' `
    -and $ssLine -match 'extra=0' -and $ssLine -match 'badPlaceholders=0') "$ssLine"
+# Every key the settings page promises to render must exist in EVERY table. Table-to-table alignment
+# alone is not that: vk.Alt was missing from all eight tables at once (2026-10-23), so the alignment
+# report stayed perfectly green while the dropdown showed the literal string !vk.Alt!.
+Check 'S14.37e every key the settings page renders exists in all eight tables' `
+  ($ssLine -match 'requiredKeys=[1-9]\d*' -and $ssLine -match 'missingRequired=0') "$ssLine"
 
 # (b)(c) every language lays out inside its rows, needs no scrollbar, and renders a frame of its own.
 $langs = @('zh-Hant','zh-Hans','ja','ko','fr','de','es','en')
@@ -705,7 +710,28 @@ $ppText = if (Test-Path -LiteralPath $langPopupLog) { Get-Content -LiteralPath $
 $langItemCount = @(($ppText -split "`r?`n") | Where-Object { $_ -match 'popup item \d+:' }).Count
 Check 'S14.37d the language dropdown offers all eight languages plus "follow the system"' `
   ($ppDone -and $pp.ExitCode -eq 0 -and $langItemCount -eq 9) "items=$langItemCount (expected 9)"
-Expect 4
+
+# The trigger-key dropdown, dumped through the product's own offscreen renderer: six entries, every
+# one of them a real label. `!vk.xxx!` is what UiStrings.Get returns for a key it cannot find, and
+# that is exactly what a user would have seen in place of "Alt".
+$tkPng = Join-Path $uiWork 'trigger-popup.png'
+$tkLog = Join-Path $uiWork 'trigger-popup.log'
+$tkJson = Join-Path $uiWork 'trigger-popup.json'
+Set-Content -LiteralPath $tkJson -Value '{ "Language": "zh-Hant", "TriggerKey": "Alt" }' -Encoding UTF8
+$tkp = Start-Process -FilePath $Exe -ArgumentList @('--settings-ui-dump-popup',$tkPng,'--settings-ui-popup-box','TriggerPresetBox','--settings-file',$tkJson,'--quiet','--log',$tkLog) -PassThru -WindowStyle Hidden
+$tkDone = $tkp.WaitForExit(30000)
+if (-not $tkDone) { $tkp.Kill(); $tkp.WaitForExit(5000) | Out-Null }
+$tkText = if (Test-Path -LiteralPath $tkLog) { Get-Content -LiteralPath $tkLog -Raw } else { '' }
+$tkItems = @(($tkText -split "`r?`n") | Where-Object { $_ -match 'popup item \d+: text=' })
+$tkMissingMarker = @($tkItems | Where-Object { $_ -match "text='!" })
+Check 'S14.37f the trigger dropdown renders six labelled entries, none of them a missing-key marker' `
+  ($tkDone -and $tkp.ExitCode -eq 0 -and $tkItems.Count -eq 6 -and $tkMissingMarker.Count -eq 0 `
+   -and (Test-Path -LiteralPath $tkPng)) `
+  "exit=$($tkp.ExitCode) items=$($tkItems.Count) markers=$($tkMissingMarker.Count)"
+$tkAltLabel = (($tkText -split "`r?`n") | Where-Object { $_ -match "text='Alt " } | Select-Object -First 1)
+Check 'S14.37g Alt has a real localized label in the dropdown (zh-Hant)' `
+  ($null -ne $tkAltLabel) "altLine=$tkAltLabel"
+Expect 7
 
 "=== S14.36 this suite did not touch the real configuration ==="
 $realAfter = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
