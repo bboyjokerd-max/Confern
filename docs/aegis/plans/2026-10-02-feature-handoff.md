@@ -1,4 +1,4 @@
-# 接手起點：功能開發（2026-10-02）
+  OK 新增「使用者現在可以做的事」   OK 常指令加 --trigger-key-probe # 接手起點：功能開發（2026-10-02）
 
 這份是**換 session 後的起點**。UI 設計已暫定，這一輪回到功能開發。
 
@@ -144,6 +144,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-installer.ps1
 # 一次跑完 16 支（自己會先殺 Confern、印 exe 時間戳，最後給總表）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-all.ps1 -Exe <exe>
 
+# 觸發鍵可達性探針：設定成觸發鍵的鍵，真人按下去偵測器收不收得到（Alt／Ctrl／Shift 這種修飾鍵
+# 一定要跑這條——鉤子送的是左右分明的 VK，2026-10-23 之前設定得進去卻永遠按不動）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-m1f.ps1 -Exe <exe>   # S14.38 驗的就是這個
+confern --trigger-key-probe Alt --log %TEMP%\alt.log
+
 # 假故障注入：證明「這條檢查真的會紅」（會重建產品二進位，所以不進上面那一輪）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1 -List
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1
@@ -153,6 +158,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\fault-inject.ps1 -Only
 #   confern recent / confern recent --limit 5 / confern recent --clear   （托盤右鍵的「最近轉檔」）
 #   confern preset / confern preset --set HEIC=JPG:82 / --remove / --clear （輪盤一開始停在哪）
 ```
+
+## 使用者現在可以做的事（觸發鍵）
+
+- 設定頁的觸發鍵下拉現在有六個：**Space／Tab／Alt／CapsLock／Escape／Shift**；也可以按「按下新鍵」
+  自己按一個（修飾鍵現在也可以，只擋 Win）。
+- 寫設定檔也可以：`"TriggerKey": "Alt"`，或 `--trigger-key ALT`。十六進位寫法（`0xA4`）會被收斂成
+  `Alt` 再存回去。
+- **Alt／Ctrl／Shift 都有規格警告**：它們在檔案總管裡本來就是別的手勢（Alt＝選單模式、Ctrl＝複製、
+  Shift＝移動），選了就要接受撞在一起。警告文字原文照登、不翻譯。
+- 想確認「這個鍵到底按得動嗎」：confern --trigger-key-probe <鍵名>，它會裝真鉤子、注入、要求
+  偵測器收到按下與放開，並把鉤子實際送來的 vkCode 印出來。
 
 ## 環境鐵律（踩過，別再踩）
 

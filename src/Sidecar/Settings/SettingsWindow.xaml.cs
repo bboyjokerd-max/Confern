@@ -39,7 +39,19 @@ namespace Sidecar;
 internal partial class SettingsWindow : Window
 {
     /// <summary>規格 §8 允許直接挑的常用觸發鍵（其他單鍵走「按下新鍵」）。</summary>
-    private static readonly string[] PresetTriggerKeys = { "Space", "Tab", "CapsLock", "Escape", "Shift" };
+    /// <remarks>
+    /// 2026-10-23 使用者要求「把 Alt 加進可選觸發鍵」。Alt 早就在 <see cref="SettingsStore.TryResolveTriggerKey"/>
+    /// 認得的名字裡（設定檔寫 `triggerKey: "Alt"` 一直有效），缺的只是這張清單與按鍵捕獲那一條——
+    /// 而真正讓它「設得進去卻按不動」的是鉤子送分邊 VK（修於 <see cref="Native.NormalizeModifierVk"/>）。
+    /// 修飾鍵都在這裡，因為它們現在都真的能用；警告由 <see cref="SettingsStore"/> 的規格文字負責。
+    /// </remarks>
+    private static readonly string[] PresetTriggerKeys = { "Space", "Tab", "Alt", "CapsLock", "Escape", "Shift" };
+
+    /// <summary>
+    /// 設定頁提供的觸發鍵選項（下拉清單的正式來源）。診斷探針 `--trigger-key-probe` 會把它原樣印出來，
+    /// 讓「下拉拉得到」與「按下去有反應」不會各說各話。
+    /// </summary>
+    internal static IReadOnlyList<string> TriggerKeyChoices => PresetTriggerKeys;
 
     /// <summary>
     /// 輸出資料夾的三個選項（規格 §9.5）。<c>Tag</c> 就是**寫回設定檔的值**，<c>Key</c> 是畫面上的標籤；
@@ -366,8 +378,11 @@ internal partial class SettingsWindow : Window
         e.Handled = true;                       // 連 Tab／空白鍵都要吃掉，否則會變成移動焦點
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
 
-        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
-                 or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin or Key.None)
+        // 修飾鍵現在**可以**單獨當觸發鍵（Alt 是使用者 2026-10-23 明確要的；Ctrl／Shift 同一條路，
+        // 而且三者都已經在 <see cref="PresetTriggerKeys"/> 裡）。仍然拒絕的只有 Win 與 Key.None：
+        // Win 單按會開開始功能表，且沒有「按住不放」的語意；Key.None 根本不是按鍵。
+        // 這裡留下的那句提示字串因此只服務 Win 這一種情況。
+        if (key is Key.LWin or Key.RWin or Key.None)
         {
             TriggerValueText.Text = UiStrings.Get("key.captureHintModifier", _language);
             return;
@@ -383,7 +398,10 @@ internal partial class SettingsWindow : Window
         uint vk;
         try
         {
-            vk = (uint)KeyInterop.VirtualKeyFromKey(key);
+            // 收斂成通用值：捕獲到的 LeftAlt 是 0xA4，而設定檔與下拉清單寫的是 `Alt`（0x12）。
+            // 不收斂的話，這一路會把 `0xA4` 寫進設定檔（畫面顯示 0xA4、清單選不到），
+            // 而偵測器那邊也認不得同一個鍵的兩種寫法。
+            vk = Native.NormalizeModifierVk((uint)KeyInterop.VirtualKeyFromKey(key));
         }
         catch (Exception ex)
         {

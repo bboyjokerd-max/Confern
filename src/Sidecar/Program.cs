@@ -478,6 +478,12 @@ internal sealed class Options
                                     happened, 1 otherwise. The keys are injected from another thread
                                     so the WH_KEYBOARD_LL callback can actually run; nothing here
                                     calls the layer switch directly (see the method comment).
+          --trigger-key-probe <key> diagnostic: resolve that key name, install the real keyboard hook,
+                                    inject the key from another thread, and confirm the detector saw
+                                    the press and the release; exit 0 when both arrived, 1 otherwise.
+                                    This is the only headless way to prove that a trigger key is
+                                    REACHABLE (the hook reports the left/right modifier VK, so Alt,
+                                    Ctrl and Shift are easy to get wrong).
           --watchdog-seconds <N>    override guard #3 visible timeout (default 30)
           --assume-explorer-foreground
                                     diagnostic: arm without the explorer-foreground
@@ -712,8 +718,18 @@ internal sealed class Options
     /// 見 <see cref="WheelLayerProbe"/>。
     /// </summary>
     public string? WheelLayerProbe;
+
+    /// <summary>
+    /// `--trigger-key-probe &lt;鍵名&gt;`：只驗一件事——設成觸發鍵的那個鍵，真人按下去偵測器收不收得到。
+    /// 見 <see cref="Program.TriggerKeyProbe"/>。
+    /// </summary>
+    public string? TriggerKeyProbe;
+
     public string? LogPath;
     public uint TriggerKey = Program.DefaultTriggerKey;
+
+    /// <summary>命令列上 `--trigger-key` 的原文。0x0 解析失敗時要靠它把原因寫進日誌。</summary>
+    public string? TriggerKeyText;
     public int CycleTest;
     public bool Quiet;
 
@@ -1487,7 +1503,15 @@ internal sealed class Options
                     if (++i < args.Length) o.LogPath = args[i];
                     break;
                 case "--trigger-key":
-                    if (++i < args.Length) { o.TriggerKey = ParseVirtualKey(args[i]); o.TriggerKeyFromCli = true; }
+                    if (++i < args.Length)
+                    {
+                        o.TriggerKeyText = args[i];
+                        o.TriggerKey = ParseVirtualKey(args[i]);   // 0x0 = 看不懂，App.Run 會明講並退回預設
+                        o.TriggerKeyFromCli = true;
+                    }
+                    break;
+                case "--trigger-key-probe":
+                    if (++i < args.Length) o.TriggerKeyProbe = args[i];
                     break;
                 case "--cycle-test":
                     if (++i < args.Length && int.TryParse(args[i], out int n) && n > 0) o.CycleTest = n;
@@ -1555,25 +1579,14 @@ internal sealed class Options
         _ => $"0x{vk:X2}"
     };
 
-    /// <summary>接受 0xNN 十六進位或少量具名虛擬鍵；未知值一律退回預設並由呼叫端記錄。</summary>
-    public static uint ParseVirtualKey(string text)
-    {
-        string t = text.Trim();
-        if (t.StartsWith("0x", StringComparison.OrdinalIgnoreCase) &&
-            uint.TryParse(t.AsSpan(2), System.Globalization.NumberStyles.HexNumber, null, out uint hex))
-            return hex;
-
-        return t.ToUpperInvariant() switch
-        {
-            "VK_SPACE" => 0x20,
-            "VK_TAB" => 0x09,
-            "VK_CAPITAL" or "VK_CAPSLOCK" => 0x14,
-            "VK_ESCAPE" => 0x1B,
-            "VK_RMENU" => 0xA5,
-            "VK_F8" => 0x77,
-            _ => Program.DefaultTriggerKey
-        };
-    }
+    /// <summary>
+    /// 命令列觸發鍵 → VK。**問唯一的擁有者**（<see cref="SettingsStore.TryResolveTriggerKey"/>），
+    /// 不另外養第二份鍵名表：這裡以前只認 `VK_RMENU`、`VK_F8` 等五個字，`--trigger-key ALT`
+    /// 於是靜靜變成空白鍵——而設定檔那一邊早就認得 Alt。看不懂就回 0，由 <see cref="App.Run"/>
+    /// 明講原因並退回預設，不再假裝接受。
+    /// </summary>
+    public static uint ParseVirtualKey(string text) =>
+        SettingsStore.TryResolveTriggerKey(text, out TriggerKeyInfo info, out _) ? info.Vk : 0;
 }
 
 /// <summary>組裝與訊息迴圈。業務邏輯一律不放在這裡（收層由 ReleaseGuard 擁有）。</summary>
@@ -1582,6 +1595,13 @@ internal static class App
     public static int Run(Options opt)
     {
         using var evidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+        if (opt.TriggerKeyFromCli && opt.TriggerKey == 0)
+        {
+            SettingsStore.TryResolveTriggerKey(opt.TriggerKeyText ?? "", out _, out string whyKey);
+            evidence.Line($"WARNING --trigger-key '{opt.TriggerKeyText}' unusable ({whyKey}) -> " +
+                          $"using {Options.VirtualKeyLabel(Program.DefaultTriggerKey)} (VK 0x{Program.DefaultTriggerKey:X2})");
+            opt.TriggerKey = Program.DefaultTriggerKey;
+        }
         evidence.Line($"{ProductInfo.Name} {Program.VersionText()} starting: trigger=VK 0x{opt.TriggerKey:X2} " +
                       $"dumpMonitors={opt.DumpMonitors} raise={opt.ForceRaiseHitLayer} " +
                       $"cycleTest={opt.CycleTest} assumeExplorerForeground={opt.AssumeExplorerForeground} " +
@@ -2129,6 +2149,10 @@ internal static class App
         using var hooks = new Hooks();
         // 診斷：Shift 切層那兩行的**唯一**可自動化入口。順序刻意與下面兩條相反（先接線、先裝鉤子、
         // 再叫輪盤），因為它一進去就自己送合成按鍵，鉤子必須已經在聽。
+        // 觸發鍵可達性探針：它自己建偵測器（觸發鍵來自命令列），所以要在共用 detector 被接線之前。
+        if (opt.TriggerKeyProbe != null)
+            return TriggerKeyProbe(opt.TriggerKeyProbe, hooks, evidence);
+
         if (opt.WheelLayerProbe != null)
             return WheelLayerProbe(opt.WheelLayerProbe, hooks, detector, presenter, catalog,
                                    guard, evidence, runner);
@@ -2255,6 +2279,71 @@ internal static class App
                 return;
             detector.OnKey(vk, isDown);
         };
+    }
+
+    /// <summary>
+    /// 診斷探針（`--trigger-key-probe &lt;key&gt;`）：**只**驗一件事——把某個鍵設成觸發鍵之後，真人按
+    /// 那個鍵會不會被偵測器收到。
+    ///
+    /// <para>
+    /// 存在的理由（2026-10-23，使用者要求「把 Alt 加進可選觸發鍵」時量到的）：低階鍵盤鉤子送的是
+    /// **左右分明**的修飾鍵 VK（Alt→0xA4／0xA5、Ctrl→0xA2／0xA3、Shift→0xA0／0xA1），而設定檔與
+    /// 命令列寫的是通用值 0x12／0x11／0x10。兩邊不統一，於是 `triggerKey=Alt` 看起來設定成功了
+    /// （日誌明明寫著 `settings in effect: trigger=VK 0x12`），按下去卻永遠沒有反應——Shift 也是同一個
+    /// 病灶，也就是那個下拉選項從來沒有真的作用過。修法在 <see cref="Native.NormalizeModifierVk"/>，
+    /// 這個探針負責讓人可以隨時把那件事重新證明一次。
+    /// </para>
+    /// <para>
+    /// 注入的是**通用** VK（keybd_event 收的就是它，實體鍵盤走的是同一條輸入路徑），鉤子送來的是分邊
+    /// 值——兩者的差異正是要驗的東西，所以日誌會把鉤子**實際送來**的 vkCode 一起印出來：失敗的時候
+    /// 那一行自己會說明原因，不必再猜。
+    /// </para>
+    /// </summary>
+    private static int TriggerKeyProbe(string keyText, Hooks hooks, Evidence evidence)
+    {
+        int failures = 0;
+        void Report(string text, bool ok)
+        {
+            if (!ok) failures++;
+            evidence.Line($"{(ok ? "PASS" : "FAIL")}  trigger-key-probe: {text}");
+        }
+
+        evidence.Line($"=== trigger-key-probe: key='{keyText}' ===");
+        if (!SettingsStore.TryResolveTriggerKey(keyText, out TriggerKeyInfo info, out string why))
+        {
+            Report($"'{keyText}' is not a key name this build knows ({why})", false);
+            evidence.Line("trigger-key-probe: nothing was proven -> exit 1");
+            return 1;
+        }
+        evidence.Line($"trigger-key-probe: resolved vk=0x{info.Vk:X2} name='{info.Name}' " +
+                      $"label='{Options.VirtualKeyLabel(info.Vk)}'");
+        // `settings page offers [...]` 是一個**事實**，不是自我恭維：套件靠它把「下拉清單裡有 Alt」
+        // 與「按得動」綁在一起檢查（清單少一個名字，那一行就不會出現）。
+        evidence.Line($"trigger-key-probe: settings page offers [{string.Join(",", SettingsWindow.TriggerKeyChoices)}]");
+        if (info.Warning != null) evidence.Line($"trigger-key-probe: spec warning: {info.Warning}");
+
+        var detector = new DragDetector(evidence, info.Vk);
+        var hookSaw = new List<string>();
+        // 只讀的第二個訂閱者：把鉤子**實際送來**的 vkCode 記下來（與 WheelLayerProbe 同一個手法）。
+        hooks.KeyEvent += (vk, isDown) => hookSaw.Add($"0x{vk:X2}{(isDown ? "-down" : "-up")}");
+        hooks.KeyEvent += (vk, isDown) => detector.OnKey(vk, isDown);
+        hooks.Install(evidence);
+        Report("the keyboard hook really installed (WH_KEYBOARD_LL handle != 0)", hooks.KeyboardInstalled);
+        if (!hooks.KeyboardInstalled)
+        {
+            evidence.Line("trigger-key-probe: without the hook there is nothing to prove -> exit 1");
+            return 1;
+        }
+
+        bool down = InjectKeyFromAnotherThread((byte)info.Vk, down: true, () => detector.IsTriggerDown, pumpMs: 1500);
+        Report($"pressing it reaches the detector (the hook saw [{string.Join(",", hookSaw)}])", down);
+        hookSaw.Clear();
+        bool up = InjectKeyFromAnotherThread((byte)info.Vk, down: false, () => !detector.IsTriggerDown, pumpMs: 1500);
+        Report($"releasing it reaches the detector (the hook saw [{string.Join(",", hookSaw)}])", up);
+
+        evidence.Line($"trigger-key-probe: {(failures == 0 ? "PASS (exit 0)" : $"FAIL ({failures} check(s)) -> exit 1")} " +
+                      $"triggerDownNow={detector.IsTriggerDown}");
+        return failures == 0 ? 0 : 1;
     }
 
     /// <summary>

@@ -78,6 +78,28 @@ $faults = @(
         Why      = 'the wheel must START on the preset sector, not merely know about it'
     }
     [pscustomobject]@{
+        Name     = 'trigger-key-not-normalized'
+        File     = 'src\Sidecar\Interaction\DragDetector.cs'
+        Old      = '    public void OnKey(uint vk, bool isDown)' +
+                   "`n    {`n" +
+                   '        vk = Native.NormalizeModifierVk(vk);'
+        New      = '    public void OnKey(uint vk, bool isDown)' +
+                   "`n    {`n" +
+                   '        // FAULT: the raw VK is compared again (the behaviour before 2026-10-23)'
+        Suite    = 'verify-m1f.ps1'
+        Expected = 'FAIL  S14.38 '
+        Why      = 'the hook reports the left/right modifier VK, so Alt/Ctrl/Shift must still match'
+    }
+    [pscustomobject]@{
+        Name     = 'settings-page-drops-alt'
+        File     = 'src\Sidecar\Settings\SettingsWindow.xaml.cs'
+        Old      = '    private static readonly string[] PresetTriggerKeys = { "Space", "Tab", "Alt", "CapsLock", "Escape", "Shift" };'
+        New      = '    private static readonly string[] PresetTriggerKeys = { "Space", "Tab", "CapsLock", "Escape", "Shift" };  // FAULT: Alt removed again'
+        Suite    = 'verify-m1f.ps1'
+        Expected = 'FAIL  S14.38d '
+        Why      = 'the page must offer the key it can actually drive (the user asked for Alt here)'
+    }
+    [pscustomobject]@{
         Name     = 'recent-never-recorded'
         File     = 'src\Sidecar\Recent\RecentStore.cs'
         Old      = '            _entries.Insert(0, new RecentEntry(sourcePath ?? string.Empty, outputPath, tool ?? "convert", DateTime.Now));'

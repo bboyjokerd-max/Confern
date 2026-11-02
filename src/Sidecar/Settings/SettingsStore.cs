@@ -597,7 +597,8 @@ internal static class SettingsStore
             uint.TryParse(t.AsSpan(2), System.Globalization.NumberStyles.HexNumber, null, out uint hex) &&
             hex is > 0 and <= 0xFE)
         {
-            info = new TriggerKeyInfo(hex, $"0x{hex:X2}", null);
+            uint canonical = Native.NormalizeModifierVk(hex);
+            info = new TriggerKeyInfo(canonical, NameOf(canonical), WarningFor(canonical));
             return true;
         }
 
@@ -614,6 +615,11 @@ internal static class SettingsStore
             "SHIFT" => 0x10,
             "CTRL" or "CONTROL" => 0x11,
             "ALT" or "MENU" => 0x12,
+            // 左右分明的別名：鉤子本來就送這些值，寫設定檔的人也可能照 Windows 的常數抄。
+            // 全部收斂成通用值（Native.NormalizeModifierVk 同一個道理：偵測器只認一個家）。
+            "LSHIFT" or "RSHIFT" => 0x10,
+            "LCONTROL" or "RCONTROL" => 0x11,
+            "LMENU" or "RMENU" => 0x12,
             "BACKSPACE" => 0x08,
             "INSERT" => 0x2D,
             "DELETE" => 0x2E,
@@ -637,14 +643,26 @@ internal static class SettingsStore
 
         if (vk == 0) { reason = "not a key name this build knows"; return false; }
 
-        // 規格 §8 明文的警告：單獨 Shift 在檔案總管拖曳時代表「移動」，可能誤操作。
-        string? warning = vk == 0x10
-            ? "Shift is also Explorer's drag-modifier: holding it while dragging means MOVE, which can surprise the user"
-            : null;
-
-        info = new TriggerKeyInfo(vk, NameOf(vk), warning);
+        vk = Native.NormalizeModifierVk(vk);
+        info = new TriggerKeyInfo(vk, NameOf(vk), WarningFor(vk));
         return true;
     }
+
+    /// <summary>
+    /// 修飾鍵當觸發鍵的**規格警告**（原文照登，不翻譯——理由見 <see cref="TriggerKeyInfo.Warning"/>）。
+    /// 這三個都不是「不行」，是「這樣用會撞到作業系統的既有手勢」：使用者要的是按住某鍵不放，
+    /// 而 Shift／Ctrl／Alt 在檔案總管裡各自都已經是別的東西。
+    ///
+    /// <para>Alt 這一條是 2026-10-23 使用者要求「把 Alt 加進可選觸發鍵」時補的。它同時是唯一一條
+    /// 會影響**沒有在拖曳**時的警告：單按 Alt 會讓前景視窗進入選單模式（標題列閃一下）。</para>
+    /// </summary>
+    private static string? WarningFor(uint vk) => vk switch
+    {
+        0x10 => "Shift is also Explorer's drag-modifier: holding it while dragging means MOVE, which can surprise the user",
+        0x11 => "Ctrl is also Explorer's copy-modifier: holding it while dragging means COPY, and Ctrl+click changes the selection",
+        0x12 => "Alt alone opens the focused window's menu bar, and Alt+drag onto a shortcut opens that shortcut's properties; on layouts where AltGr types characters, the right Alt is that key",
+        _ => null
+    };
 
     /// <summary>解析設定檔裡的觸發鍵；解析不了就**明講**並用預設，不讓程式起不來。</summary>
     public static uint ResolveTriggerVk(Settings settings, Action<string> log)

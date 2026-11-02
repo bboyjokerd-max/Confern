@@ -4092,3 +4092,68 @@ powershell -File tools\fault-inject.ps1 -Only preset-quality-ignored
   它們的注入還沒有寫進表裡。表是資料，加一列就能多證一條。
 - 這支腳本會**重建產品二進位**，所以不進 `verify-all` 的綠色掃描（那是唯讀產品的一輪）。
 
+## 2026-10-23 · Alt 可以當觸發鍵了（順帶發現 Shift／Ctrl 一直沒作用）
+
+使用者原話：「我想多增加 Alt 鍵做觸發鍵供選擇」。聽起來只是下拉清單多一個選項，量了之後發現
+是**三個功能沒有一個真的能用**。
+
+### 先量，再改
+
+`Alt` 這個名字 `SettingsStore.TryResolveTriggerKey` 本來就認（`triggerKey: "Alt"` 寫進設定檔一直
+有效），所以「加一個選項」表面上是加一行。我先用注入 + 真鉤子量了一輪（`%TEMP%\alt-vk-measure`，
+`keybd_event` → 系統佇列 → WH_KEYBOARD_LL → 偵測器日誌）：
+
+| 設定 | 注入 | `trigger key DOWN` |
+| --- | --- | --- |
+| `Space` | 0x20 | **1**（陽性對照，代表注入路徑沒問題）|
+| `Alt` | 0x12 或 0xA4 | **0** |
+| `Ctrl` | 0x11 或 0xA2 | **0** |
+| `Shift` | 0x10 或 0xA0 | **0** |
+| `0xA4`（十六進位寫法） | 0x12 | **1** |
+
+最後兩列把病灶釘死：**低階鍵盤鉤子送的是左右分明的 VK**（Alt→0xA4／0xA5、Ctrl→0xA2／0xA3、
+Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11／0x10。偵測器比對的是原始 VK，
+所以修飾鍵**永遠比不上**。Shift 那個選項在設定頁上從 M1 就存在，也就是說「Shift 當觸發鍵」
+從來沒有作用過——只是沒有人按下去用。日誌倒是很配合地寫著 `settings in effect: trigger=VK 0x12`，
+看起來一切正常。
+
+（Shift 切層那條路一直是好的，因為它比對的是 0xA0／0xA1 本身；壞的只有「Shift 當觸發鍵」。）
+
+### 改了什麼
+
+- **`Native.NormalizeModifierVk`**：0xA0/0xA1→0x10、0xA2/0xA3→0x11、0xA4/0xA5→0x12、0x5B/0x5C→0x5B。
+  **唯一家**，三邊都問它。
+- **`DragDetector`**：建構子／`SetTriggerKey`／`OnKey` 三個入口都收斂；另加 `IsTriggerDown`（探針要能
+  「等到它成立」，不是睡固定時間再猜）。
+- **`SettingsStore`**：十六進位寫法也收斂（`triggerKey: "0xA4"` 寫回檔案變成 `Alt`）；新增
+  `WarningFor`，Alt／Ctrl 各自拿到規格警告（Alt：單按會讓前景視窗進選單模式、Alt+拖到捷徑開內容、
+  AltGr 配置下右 Alt 是輸入字元的鍵；Ctrl：拖曳＝複製、Ctrl+點選改變選取）。
+- **設定頁**：`PresetTriggerKeys` 加 `Alt`（現在六個：Space／Tab／Alt／CapsLock／Escape／Shift）；
+  按鍵捕獲不再一律拒絕修飾鍵，只擋 Win 與 Key.None（Win 單按會開開始功能表，也沒有「按住」的語意），
+  而且捕獲到的 `0xA4` 會收斂成 `Alt` 再存。
+- **命令列**：`ParseVirtualKey` 改成**問唯一擁有者**（`SettingsStore.TryResolveTriggerKey`），不另外
+  養第二份鍵名表。以前它只認 `VK_RMENU`／`VK_F8` 五個字，`--trigger-key ALT` 會靜靜變成空白鍵；
+  現在看不懂就回 0，由 `App.Run` 寫 `WARNING --trigger-key '...' unusable (原因) -> using space`。
+- **新探針 `--trigger-key-probe <鍵名>`**：解析鍵名 → 裝真鉤子 → 從另一個執行緒注入通用 VK →
+  要求偵測器**收到按下也收到放開**。日誌會印出鉤子實際送來的 vkCode（`0xA4-down` 這種）與設定頁
+  的清單——失敗時那一行自己解釋原因。
+
+### 驗收
+
+- `verify-m1f.ps1` 新增 S14.38（a–h）與 S14.39／S14.39a，共 **11 條**：46 → **57 條全綠**。
+  其中 S14.38b 是關鍵那條：鉤子送的是 `0xA4-down`，而偵測器仍然收到——沒有收斂這件事就不成立。
+- 常駐路徑（真正的路）實測：修好之後 `triggerAlt` DOWN=2／UP=2、`triggerShift`／`triggerCtrl`
+  各 1／1、`triggerSpace` 1／1；而且觸發鍵設 Alt 時注入 Space 是 **0**（不會誤觸發）。
+- 假故障注入：`trigger-key-not-normalized`（把收斂拿掉）→ `S14.38` 變紅；`settings-page-drops-alt`
+  （清單把 Alt 拿掉）→ `S14.38d` 變紅。**兩者都在指定的那一條紅**，不是「反正紅了」。
+
+### 誠實缺口
+
+- 我們**不吞鍵**（低階鉤子只看不擋），所以「按住 Alt 時前景視窗的選單列會閃一下」是真實副作用，
+  規格警告照實寫出來，但沒有抑制它。要抑制就得吞掉 Alt，那是另一個風險等級的決定。
+- AltGr 配置（波蘭文、土耳其文等）下右 Alt 是輸入字元的鍵，選了 `Alt` 就等於連它一起收。目前
+  不提供「只收左 Alt」——需要的話那是下一片（`0xA4` 十六進位寫法現在還能用，但會被收斂成 `Alt`，
+  所以「只收左 Alt」這件事其實做不到，要另外做）。
+- 設定頁那句 `key.captureHintModifier`（「修飾鍵不能單獨當觸發鍵」）現在只服務 Win 這一種情況，
+  文字沒改（要改就得動五種語言的表）；下次動字串表時順手改寫。
+

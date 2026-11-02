@@ -711,6 +711,69 @@ Expect 4
 $realAfter = if (Test-Path -LiteralPath $realSettings) { (Get-FileHash -LiteralPath $realSettings -Algorithm SHA256).Hash } else { 'absent' }
 Check 'S14.36 the real settings file is byte-identical afterwards' ($realBefore -eq $realAfter) "$realBefore -> $realAfter"
 
+# ------------------------------------------------------------------------------------------------
+"=== S14.38 a modifier can be the trigger key (Alt was the request, 2026-10-23) ==="
+# WHY THIS EXISTS: the low-level keyboard hook reports the LEFT/RIGHT modifier VK (Alt -> 0xA4/0xA5,
+# Ctrl -> 0xA2/0xA3, Shift -> 0xA0/0xA1) while the settings file and the command line carry the
+# generic 0x12/0x11/0x10. Until Native.NormalizeModifierVk existed the two never matched: the log
+# said 'settings in effect: trigger=VK 0x12' and pressing Alt did nothing at all. Shift, which this
+# page has offered since M1, was broken the same way -- nobody had held it down to check.
+# The probe below is the re-runnable proof: it resolves a key name, installs the REAL hook, injects
+# the key from another thread (the generic VK, exactly what a real keyboard puts on the wire), and
+# demands that the detector saw the press AND the release.
+Get-Process Confern -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 600
+$probeWork = Join-Path $Work 'tkprobe'
+New-Item -ItemType Directory -Force -Path $probeWork | Out-Null
+
+function Invoke-KeyProbe([string]$name) {
+  $safe = $name -replace '[^A-Za-z0-9]', '_'
+  $log = Join-Path $probeWork ("probe-$safe.log")
+  if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  $p = Start-Process -FilePath $Exe -ArgumentList @('--trigger-key-probe', $name, '--log', $log) -PassThru -WindowStyle Hidden
+  $done = $p.WaitForExit(60000)
+  if (-not $done) { $p.Kill(); $p.WaitForExit(5000) | Out-Null }
+  $text = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
+  [pscustomobject]@{ Exit = $p.ExitCode; Text = $text; Done = $done }
+}
+
+$alt = Invoke-KeyProbe 'Alt'
+$altPress = (($alt.Text -split "`r?`n") | Where-Object { $_ -match 'PASS  trigger-key-probe: pressing it reaches' } | Select-Object -First 1)
+Check 'S14.38 Alt as the trigger key really reaches the detector (probe exit 0)' `
+  ($alt.Done -and $alt.Exit -eq 0) "exit=$($alt.Exit)"
+Check 'S14.38a the Alt probe reports no FAIL line at all' `
+  (-not ($alt.Text -match 'FAIL  trigger-key-probe')) ''
+# The load-bearing one: the hook must have sent the SPLIT VK and the detector must still have matched.
+# Without the normalization this line does not exist, which is exactly what went unnoticed until now.
+Check 'S14.38b the hook really sent the left-Alt VK (0xA4) and it still matched Alt' `
+  ($altPress -match '0xA4-down') "$altPress"
+Check 'S14.38c releasing Alt reached the detector too' `
+  ($alt.Text -match 'PASS  trigger-key-probe: releasing it reaches') ''
+Check 'S14.38d the settings page offers Alt (the dropdown and the wiring agree)' `
+  ($alt.Text -match 'settings page offers \[[^\]]*\bAlt\b') ''
+
+$ctrl = Invoke-KeyProbe 'Ctrl'
+Check 'S14.38e Ctrl works the same way (the hook sends 0xA2)' `
+  (($ctrl.Exit -eq 0) -and ($ctrl.Text -match '0xA2-down')) "exit=$($ctrl.Exit)"
+$shift = Invoke-KeyProbe 'Shift'
+Check 'S14.38f Shift works too -- it was offered since M1 and never worked' `
+  (($shift.Exit -eq 0) -and ($shift.Text -match '0xA0-down')) "exit=$($shift.Exit)"
+$f8 = Invoke-KeyProbe 'F8'
+Check 'S14.38g a non-modifier key is unaffected by the normalization' `
+  ($f8.Exit -eq 0) "exit=$($f8.Exit)"
+$bad = Invoke-KeyProbe 'NoSuchKey'
+Check 'S14.38h an unknown key name is refused with its reason instead of silently accepted' `
+  (($bad.Exit -eq 1) -and ($bad.Text -match 'is not a key name this build knows')) "exit=$($bad.Exit)"
+
+"=== S14.39 the command line accepts the same names as the settings file ==="
+$r = Invoke-Sidecar @('--trigger-key', 'ALT', '--cycle-test', '1') 'cli-alt'
+Check 'S14.39 --trigger-key ALT resolves to VK 0x12 (it used to become Space without a word)' `
+  ($r.Text -match 'settings in effect: trigger=VK 0x12' -and $r.Text -match 'trigger from command line') ''
+$r = Invoke-Sidecar @('--trigger-key', 'NotAThing', '--cycle-test', '1') 'cli-badkey'
+Check 'S14.39a an unusable --trigger-key is called out and falls back to space' `
+  ($r.Text -match "WARNING --trigger-key 'NotAThing' unusable") ''
+Expect 11
+
 ""
 "M1f summary: $($script:Pass)/$($script:Checks) checks passed"
 "checks=$($script:Checks) pass=$($script:Pass) fail=$($script:Fail) inconclusive=$($script:Inconclusive) expected=$($script:ExpectedChecks)"

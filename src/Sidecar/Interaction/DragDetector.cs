@@ -29,10 +29,14 @@ internal sealed class DragDetector
     public bool IsDisabled { get; private set; }
     public DetectorState State => _state;
 
+    /// <summary>觸發鍵現在是否按著。給診斷探針用：探針要能「等到它成立」，而不是睡固定時間再猜。</summary>
+    public bool IsTriggerDown => _triggerDown;
+
     public DragDetector(Evidence evidence, uint triggerKey, bool assumeExplorerForeground = false)
     {
         _evidence = evidence;
-        TriggerKey = triggerKey;
+        // 收斂成通用值：鉤子送的是分邊的 VK（見 Native.NormalizeModifierVk 的實測說明）。
+        TriggerKey = Native.NormalizeModifierVk(triggerKey);
         _assumeExplorerForeground = assumeExplorerForeground;
         _thresholdX = Math.Max(2, Native.GetSystemMetrics(Native.SM_CXDRAG));
         _thresholdY = Math.Max(2, Native.GetSystemMetrics(Native.SM_CYDRAG));
@@ -100,6 +104,7 @@ internal sealed class DragDetector
     /// </summary>
     public void SetTriggerKey(uint vk)
     {
+        vk = Native.NormalizeModifierVk(vk);
         if (vk == TriggerKey) return;
         uint previous = TriggerKey;
         TriggerKey = vk;
@@ -110,6 +115,7 @@ internal sealed class DragDetector
 
     public void OnKey(uint vk, bool isDown)
     {
+        vk = Native.NormalizeModifierVk(vk);
         if (vk != TriggerKey) return;
         if (_triggerDown == isDown) return;
         _triggerDown = isDown;

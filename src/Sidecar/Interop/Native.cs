@@ -423,6 +423,27 @@ internal static class Native
     public const uint VK_MENU = 0x12;
     public const uint VK_Q = 0x51;
 
+    /// <summary>
+    /// 把**左右分明**的修飾鍵 VK 收斂成通用值。低階鍵盤鉤子送來的是 VK_LSHIFT(0xA0)／VK_RSHIFT(0xA1)、
+    /// VK_LCONTROL(0xA2)／VK_RCONTROL(0xA3)、VK_LMENU(0xA4)／VK_RMENU(0xA5)，而設定檔與命令列寫的是
+    /// 通用值 0x10／0x11／0x12。兩邊不統一，比對就永遠不成立。
+    ///
+    /// <para>
+    /// 2026-10-23 實測（%TEMP%\alt-vk-measure：keybd_event 注入 → 真的 WH_KEYBOARD_LL →
+    /// <see cref="Interaction.DragDetector.OnKey"/> 的日誌）：設定 `Alt`（0x12）時注入 0x12 或 0xA4
+    /// 都收不到 DOWN；設定 `0xA4` 時注入 **0x12** 收得到 —— 鉤子送的是分邊值。Shift／Ctrl 同一個病灶，
+    /// 也就是說「Shift 當觸發鍵」在這一刻之前從來沒有作用過，只是沒有人把那個下拉選項真的按下去用。
+    /// </para>
+    /// </summary>
+    public static uint NormalizeModifierVk(uint vk) => vk switch
+    {
+        0xA0 or 0xA1 => VK_SHIFT,
+        0xA2 or 0xA3 => VK_CONTROL,
+        0xA4 or 0xA5 => VK_MENU,
+        0x5B or 0x5C => 0x5B,          // LWIN／RWIN → VK_LWIN（Win 不建議當觸發鍵，但代碼要一致）
+        _ => vk
+    };
+
     // ---- 輪盤操作鍵（規格 §4.3 的鍵盤表）----
     public const uint VK_RETURN = 0x0D;
     public const uint VK_ESCAPE = 0x1B;

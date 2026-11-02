@@ -301,6 +301,7 @@ internal static class CliArgs
         "--settings-file",
         "--settings-probe",
         "--settings-set",
+        "--trigger-key-probe",
         "--settings-ui-dump",
         "--settings-ui-dump-after-palette",
         "--settings-ui-dump-popup",
