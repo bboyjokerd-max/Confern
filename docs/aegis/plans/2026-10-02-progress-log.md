@@ -4181,8 +4181,18 @@ Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11�
   `aligned=False missing=2 … requiredKeys=6 missingRequired=1 … en=209`；跑完重建＋重跑回復全綠。
 - 全套：16 支全綠（**642 條**：cli 46、watch 39、m1a 48、m1b 52、m1c 20、m1d 72、m1f 60、m1g 25、
   m1h 62、m3c 20、m3d 39、orientation 8、merge 26、folder-drop 42、recent 43、presets 40；
-  616 pass ＋ 26 inconclusive）。標籤簡化後重打安裝檔 **18.50 MB**
-  sha256 `9861B60B0A3500AD9FA3B82DEF1AF0FE986D92F852B5D6A3879437CC0D8D1A5B`，鑽孔全過。
+  616 pass ＋ 26 inconclusive）。標籤簡化後重打安裝檔 **18.45 MB**
+  sha256 `250F3A76885BE54C7A6776A7F9ED3407C08BB4D2DB9F32ACFC7C342EC3722058`，鑽孔全過。
+  ⚠ Inno 的輸出**不可重現**：同一份原始碼重打兩次，大小與 sha256 都會變（實測 18.50 MB
+  `9861B60B…` 與 18.45 MB `250F3A76…` 兩次）。要對外講版本時，講「這一份」的 sha，不要把它當成
+  「原始碼的指紋」。
+- 使用者問「安裝檔都更新打包好了嗎」時的做法（值得留著）：**不要**只回時間戳。把安裝檔靜默裝到
+  臨時資料夾，然後用**裝好的那顆 exe** 跑三件事——`--strings-selftest`（要 `requiredKeys=6
+  missingRequired=0`）、觸發鍵下拉的離屏傾印（要 `text='Alt'`）、`--trigger-key-probe Alt`（要
+  `PASS`，日誌裡看得到鉤子送的 `0xA4`）——最後靜默移除並確認 exe 真的不見了。29 個檔案全到位。
+- 附帶補了一件事：安裝檔附的 `使用說明.txt`（`tools\installer\payload\usage.txt`）原本寫死
+  「按住空白鍵」，也沒有列出觸發鍵有哪些選擇。已改成「按住觸發鍵（預設空白鍵）」並列出
+  Space／Tab／Alt／CapsLock／Escape／Shift、修飾鍵可用與它們在檔案總管裡的手勢衝突。
 - 畫面上的證據（產品自己的離屏 dump，不是桌面截圖）：`selected='Alt'`、`settings ui layout …
   scrollbar=False rowOverflow=0 overlaps=0`——Alt 那一條很長的規格警告**不會把頁面撐出捲軸**。
 
