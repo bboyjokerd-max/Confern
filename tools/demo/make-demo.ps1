@@ -1,6 +1,10 @@
 ﻿$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
+# 把產品自己畫的輪盤格子（--wheel-dump-raw，保 alpha）疊成一段示範動畫。
+# 輸入：%TEMP%\confern-anim\raw（fmt0..4、tool0..5）、%TEMP%\confern-anim\progress（五種進度列）
+# 輸出：%TEMP%\confern-anim\composed\f0000.png ...
+
 $w      = Join-Path $env:TEMP 'confern-anim'
 $rawDir = Join-Path $w 'raw'
 $prDir  = Join-Path $w 'progress'
@@ -10,12 +14,10 @@ New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $W = 720; $H = 860
 $fps = 25
-$totalFrames = 240
 
 $bg      = [System.Drawing.Color]::FromArgb(18, 20, 26)      # #12141A
 $ink     = [System.Drawing.Color]::FromArgb(242, 243, 245)
 $inkDim  = [System.Drawing.Color]::FromArgb(152, 160, 172)
-$chip    = [System.Drawing.Color]::FromArgb(38, 42, 50)
 $accent  = [System.Drawing.Color]::FromArgb(120, 220, 190)
 
 $fmt  = @(); for ($i = 0; $i -lt 5; $i++) { $fmt  += [System.Drawing.Image]::FromFile((Join-Path $rawDir ("fmt{0}.png"  -f $i))) }
@@ -25,25 +27,24 @@ foreach ($n in @('running','partial','success')) { $prog[$n] = [System.Drawing.I
 
 $fontTitle = New-Object System.Drawing.Font('Microsoft JhengHei', 21, [System.Drawing.FontStyle]::Bold)
 $fontSub   = New-Object System.Drawing.Font('Microsoft JhengHei', 13, [System.Drawing.FontStyle]::Regular)
-$fontChip  = New-Object System.Drawing.Font('Microsoft JhengHei', 12, [System.Drawing.FontStyle]::Regular)
-$fontKey   = New-Object System.Drawing.Font('Consolas', 15, [System.Drawing.FontStyle]::Bold)
+$fontSmall = New-Object System.Drawing.Font('Microsoft JhengHei', 12, [System.Drawing.FontStyle]::Regular)
 
 function New-Canvas { New-Object System.Drawing.Bitmap($W, $H, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb) }
 
 function Draw-Caption($g, [string]$title, [string]$sub) {
-    $fmt = New-Object System.Drawing.StringFormat
-    $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+    $sf = New-Object System.Drawing.StringFormat
+    $sf.Alignment = [System.Drawing.StringAlignment]::Center
     $brush = New-Object System.Drawing.SolidBrush($ink)
-    $g.DrawString($title, $fontTitle, $brush, (New-Object System.Drawing.RectangleF(40, 746, ($W - 80), 44)), $fmt)
+    $g.DrawString($title, $fontTitle, $brush, (New-Object System.Drawing.RectangleF(40, 746, ($W - 80), 44)), $sf)
     if ($sub) {
         $b2 = New-Object System.Drawing.SolidBrush($inkDim)
-        $g.DrawString($sub, $fontSub, $b2, (New-Object System.Drawing.RectangleF(40, 794, ($W - 80), 34)), $fmt)
+        $g.DrawString($sub, $fontSub, $b2, (New-Object System.Drawing.RectangleF(40, 794, ($W - 80), 34)), $sf)
         $b2.Dispose()
     }
-    $brush.Dispose(); $fmt.Dispose()
+    $brush.Dispose(); $sf.Dispose()
 }
 
-# 輪盤原圖 304x349；光標在圖內的 (24,24)。放大兩倍後畫在畫布上，讓光標落在 (160,170)。
+# 輪盤原圖 304x349；光標在圖內 (24,24)。放大兩倍後畫在畫布上。
 $scale = 2.0
 $wheelW = [int](304 * $scale); $wheelH = [int](349 * $scale)
 $wheelX = 56; $wheelY = 40
@@ -51,7 +52,7 @@ $cursorX = $wheelX + [int](24 * $scale)
 $cursorY = $wheelY + [int](24 * $scale)
 
 function Draw-Wheel($g, $img, [double]$alpha, [double]$scaleFactor) {
-    if ($alpha -le 0.01) { return }
+    if ($alpha -le 0.01 -or $img -eq $null) { return }
     $sw = [int]($wheelW * $scaleFactor); $sh = [int]($wheelH * $scaleFactor)
     $dx = $wheelX + [int](($wheelW - $sw) / 2); $dy = $wheelY + [int](($wheelH - $sh) / 2)
     $cm = New-Object System.Drawing.Imaging.ColorMatrix
@@ -71,31 +72,8 @@ function Draw-Cursor($g) {
     $b.Dispose()
 }
 
-function Draw-FileChip($g, [double]$x, [double]$y, [double]$alpha, [string]$label) {
-    if ($alpha -le 0.01) { return }
-    $rect = New-Object System.Drawing.RectangleF([float]$x, [float]$y, 168, 34)
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $r = 8
-    $path.AddArc($rect.X, $rect.Y, $r * 2, $r * 2, 180, 90)
-    $path.AddArc($rect.Right - $r * 2, $rect.Y, $r * 2, $r * 2, 270, 90)
-    $path.AddArc($rect.Right - $r * 2, $rect.Bottom - $r * 2, $r * 2, $r * 2, 0, 90)
-    $path.AddArc($rect.X, $rect.Bottom - $r * 2, $r * 2, $r * 2, 90, 90)
-    $path.CloseFigure()
-    $c = [System.Drawing.Color]::FromArgb([int](255 * $alpha), $chip.R, $chip.G, $chip.B)
-    $b = New-Object System.Drawing.SolidBrush($c)
-    $g.FillPath($b, $path)
-    $b.Dispose()
-    $tc = [System.Drawing.Color]::FromArgb([int](255 * $alpha), $ink.R, $ink.G, $ink.B)
-    $tb = New-Object System.Drawing.SolidBrush($tc)
-    $sf = New-Object System.Drawing.StringFormat
-    $sf.Alignment = [System.Drawing.StringAlignment]::Center
-    $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
-    $g.DrawString($label, $fontChip, $tb, $rect, $sf)
-    $tb.Dispose(); $sf.Dispose(); $path.Dispose()
-}
-
 function Draw-Pill($g, $img, [double]$alpha, [double]$scaleFactor) {
-    if ($alpha -le 0.01) { return }
+    if ($alpha -le 0.01 -or $img -eq $null) { return }
     $sw = [int]($img.Width * 2 * $scaleFactor); $sh = [int]($img.Height * 2 * $scaleFactor)
     $dx = [int](($W - $sw) / 2); $dy = [int](420 + (108 - $sh) / 2)
     $cm = New-Object System.Drawing.Imaging.ColorMatrix
@@ -106,9 +84,16 @@ function Draw-Pill($g, $img, [double]$alpha, [double]$scaleFactor) {
     $ia.Dispose()
 }
 
-# 時間軸（秒）
-$tDragStart = 0.00; $tHold = 0.92; $tSweep = 1.72; $tShift = 3.64; $tTools = 4.60
-$tRelease = 6.60; $tPartial = 7.28; $tSuccess = 8.20
+# 時間軸（秒）—— 影片直接從「輪盤出現」開始，沒有前面拖檔案的鋪陳。
+$tSweep   = 0.76
+$tShift   = 2.68
+$tTools   = 3.56
+$tRelease = 5.48
+$tPartial = 6.12
+$tSuccess = 7.00
+$tEnd     = 8.40
+
+$totalFrames = [int][Math]::Round($tEnd * $fps)
 
 for ($f = 0; $f -lt $totalFrames; $f++) {
     $t = $f / $fps
@@ -118,64 +103,48 @@ for ($f = 0; $f -lt $totalFrames; $f++) {
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
     $g.Clear($bg)
 
-    # 標題
     $ttl = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 96, 108))
-    $g.DrawString('Confern', $fontChip, $ttl, 40, 22)
+    $g.DrawString('Confern', $fontSmall, $ttl, 40, 22)
     $ttl.Dispose()
 
     $title = ''; $sub = ''
     $wheelImg = $null; $wheelAlpha = 1.0; $wheelScale = 1.0
     $pillName = $null; $pillAlpha = 0.0; $pillScale = 1.0
-    $chipAlpha = 0.0; $chipX = 470; $chipY = 96
     $showCursor = $true
 
-    if ($t -lt $tHold) {
-        $title = '① 把檔案拖到桌面空白處'
-        $sub = '拖一個 HEIC 檔到桌面'
-        $k = ($t - $tDragStart) / $tHold
-        $chipAlpha = [Math]::Min(1.0, $k * 3)
-        $chipX = 420 - 250 * [Math]::Min(1.0, $k * 1.15)
-        $chipY = 190 + 30 * [Math]::Min(1.0, $k * 1.15)
-        $wheelImg = $fmt[0]; $wheelAlpha = 0.0; $showCursor = $false
-        $chipAlpha = [Math]::Min(1.0, $chipAlpha)
-    }
-    elseif ($t -lt $tSweep) {
-        $title = '② 按住 Alt'
+    if ($t -lt $tSweep) {
+        $title = '① 按住 Alt'
         $sub = '觸發鍵可換成 Space／Tab／CapsLock／Escape／Shift'
-        $k = ($t - $tHold) / ($tSweep - $tHold)
+        $k = $t / $tSweep
         $wheelImg = $fmt[0]
-        $wheelAlpha = [Math]::Min(1.0, $k * 2.2)
-        $wheelScale = 0.18 + 0.82 * [Math]::Min(1.0, $k * 1.25)
-        $chipAlpha = 1.0 - [Math]::Min(1.0, $k * 2)
-        $chipX = 170; $chipY = 136
+        # 第一格就要看得到輪盤（alpha 從 0.55 起跳），否則開頭會像空白畫面
+        $wheelAlpha = 0.55 + 0.45 * [Math]::Min(1.0, $k * 2.0)
+        $wheelScale = 0.72 + 0.28 * [Math]::Min(1.0, $k * 1.4)
     }
     elseif ($t -lt $tShift) {
-        $title = '③ 移到想轉的格式'
+        $title = '② 移到想轉的格式'
         $sub = '停在你想轉的那一格，中央顯示結果'
         $k = ($t - $tSweep) / ($tShift - $tSweep)
         $idx = [Math]::Min(4, [int]($k * 5))
         $wheelImg = $fmt[$idx]
-        $chipAlpha = 0.0
     }
     elseif ($t -lt $tTools) {
-        $title = '④ 拖曳途中按 Shift'
+        $title = '③ 拖曳途中按 Shift'
         $sub = '切到工具輪盤'
         $k = ($t - $tShift) / ($tTools - $tShift)
-        $wheelAlpha = 1.0
         $wheelImg = $fmt[4]
         if ($k -gt 0.5) { $wheelImg = $tool[0] }
         $wheelScale = 1.0 - 0.06 * [Math]::Sin([Math]::PI * $k)
     }
     elseif ($t -lt $tRelease) {
-        $title = '⑤ 選工具'
+        $title = '④ 選工具'
         $sub = '旋轉／清除／壓縮／裁切／讀 QR／去背'
         $k = ($t - $tTools) / ($tRelease - $tTools)
         $idx = [Math]::Min(5, [int]($k * 6))
         $wheelImg = $tool[$idx]
-        $chipAlpha = 0.0
     }
     elseif ($t -lt $tPartial) {
-        $title = '⑥ 放開就開始轉檔'
+        $title = '⑤ 放開就開始轉檔'
         $sub = ''
         $k = ($t - $tRelease) / ($tPartial - $tRelease)
         $wheelImg = $tool[5]
@@ -185,13 +154,13 @@ for ($f = 0; $f -lt $totalFrames; $f++) {
         $showCursor = $false
     }
     elseif ($t -lt $tSuccess) {
-        $title = '⑥ 放開就開始轉檔'
+        $title = '⑤ 放開就開始轉檔'
         $sub = '3 個檔案'
         $pillName = 'partial'; $pillAlpha = 1.0; $pillScale = 1.0
         $showCursor = $false
     }
     else {
-        $title = '⑦ 完成'
+        $title = '⑥ 完成'
         $sub = '轉好的檔案就在來源檔旁邊，不會覆蓋既有檔'
         $pillName = 'success'; $pillAlpha = 1.0; $pillScale = 1.0
         $showCursor = $false
@@ -199,7 +168,6 @@ for ($f = 0; $f -lt $totalFrames; $f++) {
 
     if ($wheelImg -ne $null) { Draw-Wheel $g $wheelImg $wheelAlpha $wheelScale }
     if ($pillName) { Draw-Pill $g $prog[$pillName] $pillAlpha $pillScale }
-    if ($chipAlpha -gt 0.01) { Draw-FileChip $g $chipX $chipY $chipAlpha 'IMG_2417.HEIC' }
     if ($showCursor) { Draw-Cursor $g }
     Draw-Caption $g $title $sub
 
@@ -211,7 +179,6 @@ for ($f = 0; $f -lt $totalFrames; $f++) {
 foreach ($i in $fmt) { $i.Dispose() }
 foreach ($i in $tool) { $i.Dispose() }
 foreach ($k in $prog.Keys) { $prog[$k].Dispose() }
-$fontTitle.Dispose(); $fontSub.Dispose(); $fontChip.Dispose(); $fontKey.Dispose()
+$fontTitle.Dispose(); $fontSub.Dispose(); $fontSmall.Dispose()
 
-$made = @(Get-ChildItem $outDir -File -Filter '*.png').Count
-"frames: $made of $totalFrames in $outDir"
+"frames: $totalFrames in $outDir  ($([Math]::Round($tEnd,2)) s @ $fps fps)"
