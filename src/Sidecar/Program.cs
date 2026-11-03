@@ -324,7 +324,18 @@ internal static class Program
         {
             Native.AttachParentConsole();
             using var removeBgEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+#if CONFERN_FREE_EDITION
+            // 免費版**沒有這顆工具**，不是「有但不給用」。這個分別對使用者是看得見的：
+            // 「免費版沒有去背」是一句可以理解的話，「免費版有去背但次數用完了」則是在推銷。
+            // 所以這裡連模型都不載、連額度檔都不開，直接說清楚。（免費版的輪盤上也沒有這一顆。）
+            removeBgEvidence.Line($"--remove-bg: not in this build ({ProductInfo.Edition} edition " +
+                                  "has no cutout tool; the paid build adds it)");
+            Console.Error.WriteLine($"confern: the {ProductInfo.Edition} edition has no cutout tool " +
+                                    "(confern --help says what this build can do)");
+            return 2;
+#else
             return App.RemoveBgDiagnostic(removeBgEvidence, opt);
+#endif
         }
 
         // M3 第七顆扇形（2026-10-08）：`--remove-bg-inspect <png>`——**只讀**量一張圖的 alpha
@@ -5434,9 +5445,33 @@ internal static class App
     /// </summary>
     internal static int RunUsageCommand(Options opt, Evidence evidence)
     {
+#if CONFERN_FREE_EDITION
+        // 免費版沒有額度、也沒有授權可啟用：這裡只回答「你是哪一個版本」然後結束。
+        // 它刻意**不碰** usage.json／license.txt——免費版的使用者不該在 AppData 裡看到兩個
+        // 他用不到的檔案（那會讓人以為自己被計數了）。
+        evidence.Line($"edition: {ProductInfo.Edition} (no quota, no license; " +
+                      "this build has no cutout tool)");
+        if (opt.LicenseActivate.Length > 0)
+        {
+            evidence.Line($"--license-activate: REFUSED this is the {ProductInfo.Edition} edition; " +
+                          "it has no paid tools, so there is nothing a key could unlock");
+            return 2;
+        }
+        if (opt.UsageSet.Length > 0)
+        {
+            evidence.Line($"--usage-set: REFUSED this is the {ProductInfo.Edition} edition; " +
+                          "nothing is metered");
+            return 2;
+        }
+        evidence.Line("usage done: ok=True");
+        return 0;
+#else
         var store = UsageStore.Shared(evidence.Line);
         var licenses = LicenseStore.Shared(evidence.Line);
         LicenseInfo? active = licenses.Current(out string licenseWhy);
+        // 版本那一行先印：這是問「我手上這份到底是哪一版」時唯一該看的地方（免費版印的是它自己那一段，
+        // 見上面 #if）。兩版都印同一種形狀，驗收腳本（與安裝檔的 drill）因此可以共用一條斷言。
+        evidence.Line($"edition: {ProductInfo.Edition} (cutout tool, quota and licence are in this build)");
         evidence.Line($"license: file='{licenses.FilePath}' " +
                       (active != null ? active.Describe() : $"none ({licenseWhy})"));
 
@@ -5507,6 +5542,7 @@ internal static class App
         evidence.Line($"license state: {(active != null ? "active " + active.Describe() : "none")}");
         evidence.Line("usage done: ok=True");
         return 0;
+#endif
     }
 
     internal static int RunToolsList(Options opt, Evidence evidence)

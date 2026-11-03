@@ -18,6 +18,24 @@ internal static class ProductInfo
     public const string Name = "Confern";
 
     /// <summary>
+    /// 這一份建置是哪一個版本：<c>paid</c>（有去背與授權）或 <c>free</c>（開源免費版，沒有去背）。
+    ///
+    /// <para><b>為什麼是編譯期常數，而不是執行期設定</b>：可以切換的「付費功能開關」，等於把付費
+    /// 功能與關掉它的方法一起出貨——那不是開關，是說明書。兩個版本是**兩份成品**，各自編、各自驗。</para>
+    ///
+    /// <para><b>免費版拿掉的是「去背這一顆工具」，不是「去背的次數」</b>：免費版的使用者不該看到
+    /// 一顆按下去說「你該付錢了」的扇形。看得到的功能就該做得到（設定頁立下的規矩）。</para>
+    /// </summary>
+#if CONFERN_FREE_EDITION
+    public const string Edition = "free";
+#else
+    public const string Edition = "paid";
+#endif
+
+    /// <summary>這一份建置是不是免費版。</summary>
+    public static bool IsFreeEdition => Edition == "free";
+
+    /// <summary>
     /// 小寫識別字：日誌檔名、pipe 名、mutex 名、暫存檔名等技術用途。
     /// 由 <see cref="Name"/> 推導，不是第二份字面值——名字改一次就會全部跟著改。
     /// </summary>

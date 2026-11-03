@@ -38,7 +38,10 @@ param(
     [string]$Version = '',
     [string]$OutputDir = '',
     [string]$Iscc = '',
-    [switch]$SkipDrill
+    [switch]$SkipDrill,
+    # Paid (default) or Free: two builds of one product. The Free build has no cutout tool, no
+    # model, no quota and no licence -- it is the open source edition. See Sidecar.csproj.
+    [ValidateSet('Paid', 'Free')][string]$Edition = 'Paid'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,9 +81,11 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 # ---------------------------------------------------------------- 0. preconditions
 if (-not (Test-Path -LiteralPath $proj)) { Die "project not found: $proj" 1 }
 if (-not (Test-Path -LiteralPath $iss)) { Die "Inno script not found: $iss" 1 }
-$usageSource = Join-Path $payload 'usage.txt'
+# The manual has to match the build it ships with: a free build whose manual describes a cutout
+# tool would be exactly the "says one thing, does another" this project keeps failing on.
+$usageSource = Join-Path $payload $(if ($Edition -eq 'Free') { 'usage-free.txt' } else { 'usage.txt' })
 if (-not (Test-Path -LiteralPath $usageSource)) {
-    Die "payload\usage.txt is missing: $payload -- the installer ships it, so it has to exist" 1
+    Die "the payload manual is missing: $usageSource -- the installer ships it, so it has to exist" 1
 }
 
 if ($Version -eq '') {
@@ -129,6 +134,13 @@ Say '--- step 1/4: dotnet publish (no debug symbols) ---'
 $env:DOTNET_CLI_UI_LANGUAGE = 'en'
 $publishArgv = @('publish', $proj, '-c', 'Release', '--nologo', '-o', $staging,
                  '-p:DebugType=None', '-p:DebugSymbols=false')
+if ($Edition -eq 'Free') {
+    # -p:Edition=Free switches the compile. BaseOutputPath keeps the free binaries OUT of
+    # bin\Release, which is where every verification suite and the paid installer look: without
+    # this the free build would silently become "the product" until the next paid build.
+    $publishArgv += '-p:Edition=Free'
+    $publishArgv += '-p:BaseOutputPath=bin\Free\'
+}
 Say "dotnet $($publishArgv -join ' ')"
 $pub = Start-Process -FilePath $dotnet.Source -ArgumentList (Quote-Argv $publishArgv) -Wait -PassThru -WindowStyle Hidden
 if ($pub.ExitCode -ne 0) { Die "dotnet publish exited with $($pub.ExitCode)" 2 }
@@ -151,15 +163,27 @@ $stagingNotice = Join-Path $staging 'models\MODEL-LICENSE.txt'
 foreach ($need in @($stagingExe, $stagingDll)) {
     if (-not (Test-Path -LiteralPath $need)) { Die "the publish output has no $(Split-Path -Leaf $need): $staging" 1 }
 }
-if (-not (Test-Path -LiteralPath $stagingModel)) {
-    Die "the publish output has no model at models\model_fp16.onnx -- remove-bg would be dead on arrival ($staging)" 1
+# The model question is the WHOLE difference between the two builds, so it is asserted in both
+# directions: the paid build without a model is dead on arrival, and the free build WITH a model
+# would be shipping 13 MB of apache-2.0 weights for a tool it does not have.
+$modelSha = 'none'
+$modelLen = 0
+if ($Edition -eq 'Free') {
+    if (Test-Path -LiteralPath $stagingModel) {
+        Die "the FREE build must not ship the model, but $stagingModel is there -- the cutout tool is not in this edition" 1
+    }
+    Say 'staging: no model (expected: the free edition has no cutout tool)'
+} else {
+    if (-not (Test-Path -LiteralPath $stagingModel)) {
+        Die "the publish output has no model at models\model_fp16.onnx -- remove-bg would be dead on arrival ($staging)" 1
+    }
+    if (-not (Test-Path -LiteralPath $stagingNotice)) {
+        Die 'the publish output has no models\MODEL-LICENSE.txt -- apache-2.0 requires it to travel with the model' 1
+    }
+    $modelSha = Get-Sha $stagingModel
+    $modelLen = (Get-Item -LiteralPath $stagingModel).Length
+    Say "staging: model=$modelLen bytes sha256=$modelSha"
 }
-if (-not (Test-Path -LiteralPath $stagingNotice)) {
-    Die 'the publish output has no models\MODEL-LICENSE.txt -- apache-2.0 requires it to travel with the model' 1
-}
-$modelSha = Get-Sha $stagingModel
-$modelLen = (Get-Item -LiteralPath $stagingModel).Length
-Say "staging: model=$modelLen bytes sha256=$modelSha"
 
 # The docs the user reads. version.txt is generated per build, so it goes here and not into the repo.
 Copy-Item -LiteralPath $usageSource -Destination (Join-Path $staging 'usage.txt') -Force
@@ -179,8 +203,13 @@ $infoLines = @(
     '',
     'Confern.exe      ' + (Get-Item -LiteralPath $stagingExe).Length + ' bytes   sha256=' + (Get-Sha $stagingExe),
     'Confern.dll      ' + (Get-Item -LiteralPath $stagingDll).Length + ' bytes   sha256=' + (Get-Sha $stagingDll),
-    'model_fp16.onnx  ' + $modelLen + ' bytes   sha256=' + $modelSha,
-    '                 (MODNet, apache-2.0, licence text beside it)',
+$(if ($Edition -eq 'Free') {
+    'edition          : free (open source; no cutout tool, no model, no quota, no licence)'
+} else {
+    'edition          : paid'
+}),
+$(if ($Edition -eq 'Free') { '' } else { 'model_fp16.onnx  ' + $modelLen + ' bytes   sha256=' + $modelSha }),
+$(if ($Edition -eq 'Free') { '' } else { '                 (MODNet, apache-2.0, licence text beside it)' }),
     '',
     'needs: Windows 10/11 x64 + .NET 8 Desktop Runtime',
     '       (the installer checks for it and offers to install it when missing)'
@@ -192,14 +221,18 @@ Say ("staging: {0} files, {1:N2} MB" -f $stagingFiles.Count, (($stagingFiles | M
 
 # ---------------------------------------------------------------- 3. compile
 Say '--- step 3/4: compile the installer ---'
-$setup = Join-Path $OutputDir ("Confern-Setup-$Version.exe")
+# The free build gets its own file name so the two can sit side by side in dist\ without one
+# overwriting the other (they are different products from the user's point of view).
+$setupName = if ($Edition -eq 'Free') { "Confern-Free-Setup-$Version.exe" } else { "Confern-Setup-$Version.exe" }
+$setup = Join-Path $OutputDir $setupName
 if (Test-Path -LiteralPath $setup) { Remove-Item -LiteralPath $setup -Force }
 $isccArgv = @('/Qp', "/DAppVersion=$Version", "/DStagingDir=$staging", "/DOutputDir=$OutputDir", $iss)
+if ($Edition -eq 'Free') { $isccArgv = @('/Qp', "/DAppVersion=$Version", "/DStagingDir=$staging", "/DOutputDir=$OutputDir", '/DFreeEdition=1', $iss) }
 Say "iscc $($isccArgv -join ' ')"
 $comp = Start-Process -FilePath $Iscc -ArgumentList (Quote-Argv $isccArgv) -Wait -PassThru -WindowStyle Hidden
 if ($comp.ExitCode -ne 0) { Die "ISCC exited with $($comp.ExitCode) (the compiler prints the reason above)" 3 }
 if (-not (Test-Path -LiteralPath $setup)) {
-    $found = @(Get-ChildItem -LiteralPath $OutputDir -Filter 'Confern-Setup-*.exe' -ErrorAction SilentlyContinue)
+    $found = @(Get-ChildItem -LiteralPath $OutputDir -Filter 'Confern*Setup-*.exe' -ErrorAction SilentlyContinue)
     Die "ISCC reported success but $setup does not exist (found: $($found.Name -join ','))" 4
 }
 $setupItem = Get-Item -LiteralPath $setup
@@ -235,12 +268,36 @@ if ($SkipDrill) {
     $drillExe = Join-Path $drillDir 'Confern.exe'
     if (-not (Test-Path -LiteralPath $drillExe)) { Die "the install did not produce $drillExe" 5 }
     $drillModel = Join-Path $drillDir 'models\model_fp16.onnx'
-    if (-not (Test-Path -LiteralPath $drillModel)) { Die "the installed copy has no model: $drillModel" 5 }
-    if ((Get-Sha $drillModel) -ne $modelSha) {
-        Die "the installed model's sha256 does not match the source model ($modelSha)" 5
+    if ($Edition -eq 'Free') {
+        # Asserted in the negative: a free install that quietly gained a model would mean the
+        # publish flag was dropped somewhere between dotnet and Inno.
+        if (Test-Path -LiteralPath $drillModel) { Die "the FREE install contains a model ($drillModel)" 5 }
+    } else {
+        if (-not (Test-Path -LiteralPath $drillModel)) { Die "the installed copy has no model: $drillModel" 5 }
+        if ((Get-Sha $drillModel) -ne $modelSha) {
+            Die "the installed model's sha256 does not match the source model ($modelSha)" 5
+        }
     }
     $uninst = Join-Path $drillDir 'unins000.exe'
     if (-not (Test-Path -LiteralPath $uninst)) { Die 'the install registered no uninstaller (unins000.exe)' 5 }
+
+    # The edition boundary, read from the INSTALLED copy rather than from bin\ -- this is the only
+    # place where "the setup the stranger runs" and "the edition" are the same object.
+    $editionOut = Join-Path $drillRoot 'edition.out'
+    $editionErr = Join-Path $drillRoot 'edition.err'
+    $editionProbe = Start-Process -FilePath $drillExe -ArgumentList 'license' -Wait -PassThru -WindowStyle Hidden `
+                                  -RedirectStandardOutput $editionOut -RedirectStandardError $editionErr
+    # The product writes its evidence to STDERR when it has no console (measured here: stdout was
+    # empty and the 'edition:' line was in the .err file), so read both -- a check that reads only
+    # one of them fails for a reason that has nothing to do with the edition.
+    $editionText = ''
+    foreach ($ef in @($editionOut, $editionErr)) {
+        if (Test-Path -LiteralPath $ef) { $editionText += [System.IO.File]::ReadAllText($ef, [System.Text.Encoding]::UTF8) }
+    }
+    if (($editionProbe.ExitCode -ne 0) -or ($editionText -notmatch ("edition: " + $Edition.ToLower()))) {
+        Die "the installed exe does not report 'edition: $($Edition.ToLower())' (exit $($editionProbe.ExitCode))" 5
+    }
+    Say ("drill: the installed exe reports edition: $($Edition.ToLower())")
 
     # Every staged file must arrive. The two .txt documents are renamed at install time, so they are
     # compared by length instead of by name (this script cannot spell their Chinese names).

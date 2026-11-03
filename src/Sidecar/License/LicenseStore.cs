@@ -225,6 +225,14 @@ internal static class Entitlement
     /// <summary>去背（CUTOUT）現在能不能用。</summary>
     public static bool CutoutAllowed(Action<string>? log, out int remaining, out string why)
     {
+#if CONFERN_FREE_EDITION
+        // 免費版沒有這顆工具，所以答案是 false——但理由與額度無關，而且**不去讀任何檔案**
+        // （免費版不該在使用者的 AppData 裡留下一個額度檔）。
+        remaining = 0;
+        why = $"the {ProductInfo.Edition} edition does not include the cutout tool";
+        log?.Invoke($"entitlement: {TrialPolicy.Cutout} not available ({why})");
+        return false;
+#else
         LicenseInfo? license = LicenseStore.Shared(log).Current(out string licenseWhy);
         if (license != null)
         {
@@ -239,6 +247,7 @@ internal static class Entitlement
         bool allowed = usage.CanUse(TrialPolicy.Cutout, out remaining, out string usageWhy);
         why = usageWhy.Length > 0 ? usageWhy : licenseWhy;
         return allowed;
+#endif
     }
 
     /// <summary>
@@ -248,16 +257,25 @@ internal static class Entitlement
     /// </summary>
     public static bool RecordCutoutUse(Action<string>? log)
     {
+#if CONFERN_FREE_EDITION
+        _ = log;
+        return false;
+#else
         if (LicenseStore.Shared(log).Current(out _) != null) return false;
         UsageStore.Shared(log).RecordUse(TrialPolicy.Cutout);
         return true;
+#endif
     }
 
     /// <summary>現在還剩幾次（有授權時 -1＝無限）。給「跑完之後」印一行用。</summary>
     public static int CutoutRemaining()
     {
+#if CONFERN_FREE_EDITION
+        return 0;
+#else
         if (LicenseStore.Shared(null).Current(out _) != null) return -1;
         return UsageStore.Shared(null).Remaining(TrialPolicy.Cutout);
+#endif
     }
 
     /// <summary>人類看得懂的一行（`remaining=-1` 印成 unlimited）。</summary>

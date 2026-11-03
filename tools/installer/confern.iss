@@ -39,6 +39,13 @@
 #ifndef OutputDir
   #define OutputDir "dist"
 #endif
+; 2026-11-03: two builds of one product. FreeEdition=1 is the open source edition (no cutout tool,
+; no model, no quota, no licence). It gets its own file name so the two setups can sit in dist\
+; without overwriting each other -- but the SAME AppId, so upgrading one to the other is an
+; upgrade rather than a second copy of the app.
+#ifndef FreeEdition
+  #define FreeEdition 0
+#endif
 
 
 [Setup]
@@ -55,7 +62,11 @@ DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName} {#AppVersion}
 UninstallDisplayIcon={app}\Confern.exe
 OutputDir={#OutputDir}
+#if FreeEdition
+OutputBaseFilename=Confern-Free-Setup-{#AppVersion}
+#else
 OutputBaseFilename=Confern-Setup-{#AppVersion}
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

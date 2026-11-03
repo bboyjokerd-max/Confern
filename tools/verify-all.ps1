@@ -70,6 +70,10 @@ $suites = @(
     # runs the paid tool dozens of times can never eat the user's ten free uses.
     [pscustomobject]@{ Name = 'usage';      Script = 'verify-usage.ps1';           Extra = @() }
   [pscustomobject]@{ Name = 'license';    Script = 'verify-license.ps1';         Extra = @() }
+  # 2026-11-03: the two builds are two products. This is the ONLY suite that looks at a second
+  # artefact (the free edition, bin\Free\...): the sweep drives the paid exe and passes the free exe
+  # alongside it. When the free build has never been made the free-side checks are INCONCLUSIVE.
+  [pscustomobject]@{ Name = 'edition';    Script = 'verify-edition.ps1';         Extra = @('-FreeExe', (Join-Path $PSScriptRoot '..\src\Sidecar\bin\Free\Release\net8.0-windows\Confern.exe')) }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }

@@ -186,18 +186,30 @@ internal sealed class ToolCatalog : IToolCatalog
     /// 7 扇區的字級與標籤框寬見 <see cref="WheelDesign.LabelFontPx"/>/`LabelRadiusRatio`
     /// （7 顆走的是既有的 `_ =>` 那一格：11f／0.72f，與第 5、6 顆同一組數字）。
     /// </summary>
+#if !CONFERN_FREE_EDITION
+    // 免費版裡這個欄位不存在（連宣告都沒有）：一個「宣告了但沒人用」的常數會讓建置多一條
+    // 警告，而這個專案的建置門檻是 0 警告。
     private static readonly ToolDescriptor RemoveBg = new(
         Id: "remove-bg",
         Label: "CUTOUT",
         DescriptionKey: "tool.removeBg",
         Icon: ToolIcon.RemoveBg);
+#endif
 
     /// <summary>
     /// 扇區順序＝這個陣列的順序（自正上方起、順時針）。新增工具**只在這裡加一筆**，
     /// 輪盤與命中測試不必改一行。
+    ///
+    /// <para><b>免費版少一顆</b>（2026-11-03）：去背是付費功能，而免費版是**沒有這顆工具**，
+    /// 不是「有但不給用」。扇區數由這個陣列的長度決定（`WheelGeometry.SweepDeg(count)`），
+    /// 所以 6 扇區的輪盤不需要任何額外的版面程式碼——那正是「扇區順序＝陣列順序」這個設計的回報。</para>
     /// </summary>
     public IReadOnlyList<ToolDescriptor> Tools { get; } =
+#if CONFERN_FREE_EDITION
+        new[] { Rotate90, StripMetadata, Compress, Crop, ReadQr, MergePdf };
+#else
         new[] { Rotate90, StripMetadata, Compress, Crop, ReadQr, MergePdf, RemoveBg };
+#endif
 
     public IReadOnlyList<ToolDescriptor> ToolsFor(PayloadVerdict verdict)
     {

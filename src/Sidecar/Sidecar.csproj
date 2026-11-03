@@ -32,6 +32,20 @@
     -->
     <InvariantGlobalization>false</InvariantGlobalization>
     <Version>0.1.0</Version>
+    <!--
+      兩個版本，一份原始碼（2026-11-03 使用者要求「保留一份安裝檔是完全開源免費的」）：
+        dotnet build                  -> paid 版（有去背；免費 10 次之後要授權）
+        dotnet build -p:Edition=Free  -> free 版（開源免費：沒有去背這顆工具，也沒有額度與授權）
+
+      ⚠ 預設必須是 paid：既有的驗收套件、`tools\publish-confern.ps1`、安裝檔都假設「去背在裡面」。
+      把預設改成 free，會讓那些東西安靜地驗到一個不一樣的產品。
+
+      ⚠ 這個開關是**編譯期**的（DefineConstants），不是執行期的設定值。可以做執行期開關的付費功能，
+      等於把「怎麼關掉它」一起出貨——那不是開關，是說明書。
+    -->
+    <Edition Condition="'$(Edition)' == ''">Paid</Edition>
+    <DefineConstants Condition="'$(Edition)' == 'Free'">$(DefineConstants);CONFERN_FREE_EDITION</DefineConstants>
+    <DefineConstants Condition="'$(Edition)' != 'Free'">$(DefineConstants);CONFERN_PAID_EDITION</DefineConstants>
     <!-- 預設會把 git revision 併成 0.1.0+<sha>；對外顯示版本不要夾帶 commit -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <!--
@@ -182,7 +196,7 @@
       聲明不算聲明。
     -->
     <Content Include="$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx"
-             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx')">
+             Condition="'$(Edition)' != 'Free' And Exists('$(MSBuildThisFileDirectory)..\..\models\model_fp16.onnx')">
       <Link>models\model_fp16.onnx</Link>
       <TargetPath>models\model_fp16.onnx</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -190,7 +204,7 @@
       <Visible>false</Visible>
     </Content>
     <Content Include="$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt"
-             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt')">
+             Condition="'$(Edition)' != 'Free' And Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-LICENSE.txt')">
       <Link>models\MODEL-LICENSE.txt</Link>
       <TargetPath>models\MODEL-LICENSE.txt</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -203,7 +217,7 @@
       在另一台上跑 MODNet，而兩種情況都可能被散布。宣告檔本身不佔空間，漏掉它才是問題。
     -->
     <Content Include="$(MSBuildThisFileDirectory)..\..\models\MODEL-BIREFNET-LICENSE.txt"
-             Condition="Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-BIREFNET-LICENSE.txt')">
+             Condition="'$(Edition)' != 'Free' And Exists('$(MSBuildThisFileDirectory)..\..\models\MODEL-BIREFNET-LICENSE.txt')">
       <Link>models\MODEL-BIREFNET-LICENSE.txt</Link>
       <TargetPath>models\MODEL-BIREFNET-LICENSE.txt</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
