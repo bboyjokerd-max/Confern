@@ -47,9 +47,9 @@ internal static class CliArgs
         // ② 第一個字是裸字卻不是子命令 → 不要默默變成「啟動常駐程式」。
         //    這條是刻意加的安全網：以前 `confern typo` 會安靜地開一個托盤圖示。
         if (!args[0].StartsWith("-", StringComparison.Ordinal) && !Is(args[0], "convert") && !Is(args[0], "watch")
-            && !Is(args[0], "recent") && !Is(args[0], "preset"))
+            && !Is(args[0], "recent") && !Is(args[0], "preset") && !Is(args[0], "license"))
             return Error($"unknown command '{args[0]}' (try: confern formats, confern convert, confern watch, " +
-                         "confern recent, confern preset, or confern --help)");
+                         "confern recent, confern preset, confern license, or confern --help)");
 
         bool isConvert = Is(args[0], "convert");
         // `watch` 是第二個位置參數型子命令（2026-10-22）：`confern watch <folder>` 直接監看，
@@ -61,6 +61,9 @@ internal static class CliArgs
         // `preset` 是第四個子命令（2026-10-23）：「每種來源格式預設轉成什麼」。
         // 形狀是 `--set PNG=WEBP` 這種「旗標＋一個值」，所以只有 `--set/--remove` 要吃值。
         bool isPreset = Is(args[0], "preset");
+        // `license` 是第五個子命令（2026-11-03）：授權碼的狀態／啟用／停用。
+        // 形狀與 `preset` 相同（旗標＋一個值），所以只有 `--activate` 要吃值。
+        bool isLicense = Is(args[0], "license");
         string? watchFolder = null;
         // recent 沒有位置參數，但「有沒有多打東西」還是要看得出來，所以裸字自己收一份。
         // ⚠ 不能用「事後掃 rest 裡的裸字」代替：`recent --limit 5` 的那個 `5` 就長得像裸字，
@@ -68,6 +71,7 @@ internal static class CliArgs
         var recentExtra = new List<string>();
         // 同理：`preset --set PNG=WEBP` 的那個值不是裸字，它只是「不像旗標」。收在同一條規則裡。
         var presetExtra = new List<string>();
+        var licenseExtra = new List<string>();
 
         var rest = new List<string>();
         var files = new List<string>();
@@ -75,7 +79,7 @@ internal static class CliArgs
 
         // 子命令自己（`convert`／`watch`）要跳過，它是動詞不是參數。第一版的 watch 忘了這件事，
         // 於是 `confern watch --list` 被讀成「監看一個叫 watch 的資料夾」（實測 exit 4）。
-        for (int i = (isConvert || isWatch || isRecent || isPreset) ? 1 : 0; i < args.Length; i++)
+        for (int i = (isConvert || isWatch || isRecent || isPreset || isLicense) ? 1 : 0; i < args.Length; i++)
         {
             string a = args[i];
 
@@ -111,6 +115,27 @@ internal static class CliArgs
                     rest.Add(args[++i]);
                     continue;
                 }
+            }
+
+            // `license`（2026-11-03）：`--activate <key>` 吃一個值，`--show` 是預設行為，
+            // `--clear` 停用。與 preset 同一條規矩：裸字一律拒絕——金鑰要嘛太長、要嘛貼錯，
+            // 讓它悄悄變成位置參數只會變成「查無此檔」這種更難懂的錯。
+            if (!stopOptions && isLicense)
+            {
+                if (a == "--show" || a == "--status") { rest.Add("--license-show"); continue; }
+                if (a == "--clear" || a == "--deactivate") { rest.Add("--license-clear"); continue; }
+                if (a == "--activate")
+                {
+                    if (i + 1 >= args.Length)
+                        return Error("--activate needs the key you were given, e.g. " +
+                                     "confern license --activate CN1.eyJ2Ijox...");
+                    rest.Add("--license-activate");
+                    rest.Add(args[++i]);
+                    continue;
+                }
+                if (!a.StartsWith("-", StringComparison.Ordinal)) { licenseExtra.Add(a); continue; }
+                rest.Add(a);
+                continue;
             }
 
             if (!stopOptions && isRecent)
@@ -243,6 +268,19 @@ internal static class CliArgs
             return rest.ToArray();
         }
 
+        if (isLicense)
+        {
+            if (licenseExtra.Count > 0)
+                return Error($"license takes no bare words (got '{string.Join(" ", licenseExtra)}'); " +
+                             "try: confern license --activate CN1.eyJ2Ijox...");
+            // 同上：`confern license --log x.log` 也必須印狀態，而不是開一個托盤。
+            if (!rest.Contains("--license-show") && !rest.Contains("--license-clear") &&
+                !rest.Contains("--license-activate"))
+                rest.Insert(0, "--license-show");
+            rest.Add("--cli-subcommand");
+            return rest.ToArray();
+        }
+
         if (!isConvert) return rest.ToArray();
 
         if (files.Count == 0)
@@ -302,6 +340,7 @@ internal static class CliArgs
         "--settings-probe",
         "--settings-set",
         "--trigger-key-probe",
+        "--license-activate",
         "--usage-set",
         "--settings-ui-dump",
         "--settings-ui-dump-after-palette",

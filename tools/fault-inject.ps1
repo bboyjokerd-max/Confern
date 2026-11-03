@@ -160,6 +160,37 @@ $faults = @(
         Expected = 'FAIL  U1\.10 '
         Why      = 'the wheel is the product''s only real entry: gating just the CLI leaves it open'
     }
+    [pscustomobject]@{
+        Name     = 'license-signature-always-valid'
+        File     = 'src\Sidecar\License\License.cs'
+        Old      = '        if (!VerifySignature(payload, signature))'
+        New      = '        if (false && !VerifySignature(payload, signature))'
+        Suite    = 'verify-license.ps1'
+        Expected = 'FAIL  S1\.6 '
+        Why      = 'a verifier that says yes to everything is indistinguishable from one that works, unless a suite proves it says no'
+    }
+    [pscustomobject]@{
+        Name     = 'license-payload-not-covered'
+        File     = 'src\Sidecar\License\License.cs'
+        Old      = '        if (!VerifySignature(payload, signature))'
+        New      = '        if (!VerifySignature(System.Text.Encoding.UTF8.GetBytes("{""v"":1}"), signature))  // FAULT: signed bytes ignored'
+        Suite    = 'verify-license.ps1'
+        Expected = 'FAIL  S1\.7 '
+        Why      = 'if the signature is checked against a constant, the contents are free to edit'
+    }
+    [pscustomobject]@{
+        Name     = 'license-ignored-by-entitlement'
+        File     = 'src\Sidecar\License\LicenseStore.cs'
+        Old      = '        if (license != null)' + "`n" +
+                   '        {' + "`n" +
+                   '            remaining = -1;'
+        New      = '        if (license != null && false)  // FAULT: the license is verified and then ignored' + "`n" +
+                   '        {' + "`n" +
+                   '            remaining = -1;'
+        Suite    = 'verify-license.ps1'
+        Expected = 'FAIL  S1\.5 '
+        Why      = 'a license that verifies but does not unlock is the bug a paying buyer would find first'
+    }
 )
 
 if ($List) {

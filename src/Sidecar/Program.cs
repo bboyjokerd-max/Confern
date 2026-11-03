@@ -365,7 +365,8 @@ internal static class Program
         // 試用額度（2026-11-03）：`--usage-report` 與 `--usage-set feature=count`。
         // 兩條都在守衛之前——它們問的是「記帳本裡有什麼」，不是「現在能不能轉檔」，
         // 所以使用者開著托盤程式時也必須問得到（與 `--tools-list` 同一條理由）。
-        if (opt.UsageReport || opt.UsageSet.Length > 0)
+        if (opt.UsageReport || opt.UsageSet.Length > 0 || opt.LicenseShow ||
+            opt.LicenseActivate.Length > 0 || opt.LicenseClear)
         {
             Native.AttachParentConsole();
             using var usageEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
@@ -648,6 +649,15 @@ internal sealed class Options
                                     without running the tool ten times)
                                     (CONFERN_USAGE overrides the record path, for acceptance runs;
                                     deleting that file starts the trial over -- there is no DRM here)
+          license                   show the license state (same as --license-show)
+          --license-show            print whether a license is active, and its plan and dates
+          --license-activate <key>  activate the key you were given: it is verified OFFLINE against
+                                    the public key in the build, and stored only if the signature
+                                    holds (nothing is written when it does not)
+          --license-clear           forget the license on this machine (the free trial applies again)
+                                    a license is a plain text file, %LOCALAPPDATA%\Confern\license.txt,
+                                    so it can be copied to another machine; CONFERN_LICENSE overrides
+                                    the path for acceptance runs
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)
@@ -1128,6 +1138,12 @@ internal sealed class Options
     /// 驗收因此不必知道金鑰，也不必碰使用者真正的記帳本（`CONFERN_USAGE`）。
     /// </summary>
     public string UsageSet = "";
+    /// <summary>`--license-show`（`confern license`）：印出授權狀態然後結束。</summary>
+    public bool LicenseShow;
+    /// <summary>`--license-activate &lt;key&gt;`（`confern license --activate …`）：驗簽通過才存。</summary>
+    public string LicenseActivate = "";
+    /// <summary>`--license-clear`（`confern license --clear`）：停用授權（刪掉那個檔案）。</summary>
+    public bool LicenseClear;
     /// <summary>`--quality` 有沒有**明打**。決定「命令列 &gt; 預設 &gt; 設定頁」那個優先序。</summary>
     public bool ConvertQualityGiven;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
@@ -1474,6 +1490,11 @@ internal sealed class Options
                 case "--usage-set":
                     if (i + 1 < args.Length) { o.UsageSet = args[i + 1]; i++; }
                     break;
+                case "--license-show": o.LicenseShow = true; break;
+                case "--license-activate":
+                    if (i + 1 < args.Length) { o.LicenseActivate = args[i + 1]; i++; }
+                    break;
+                case "--license-clear": o.LicenseClear = true; break;
                 case "--recent-limit":
                     // 只給 --recent-limit 也是「印清單」：少了這一行，`confern recent --limit 5`
                     // 會因為 RecentList/Clear 都 false 而落到**常駐程式**那條路——程式開了托盤、
@@ -3428,9 +3449,10 @@ internal static class App
         // 試用額度（2026-11-03）：去背是收費功能，命令列這條路**也要擋**。
         // 只擋輪盤等於留一個後門——知道旗標的人一行命令就繞過去，而那正是最可能不付錢的人。
         // 順序刻意的：先確認來源與模型都在，才問額度（「模型不在」不該吃掉一次試用）。
-        var usage = UsageStore.Shared(evidence.Line);
-        bool quotaOk = usage.CanUse(TrialPolicy.Cutout, out int remainingBefore, out string quotaWhy);
-        evidence.Line($"usage gate: {TrialPolicy.Cutout} remaining={remainingBefore} " +
+        // 判斷本身在 Entitlement：**先問授權、再問額度**（有授權的人不該看到任何次數）。
+        bool quotaOk = Entitlement.CutoutAllowed(evidence.Line, out int remainingBefore, out string quotaWhy);
+        evidence.Line($"usage gate: {TrialPolicy.Cutout} " +
+                      $"remaining={Entitlement.RemainingText(remainingBefore)} " +
                       $"allowed={quotaOk}" + (quotaOk ? "" : $" reason='{quotaWhy}'"));
         if (!quotaOk)
         {
@@ -3519,9 +3541,16 @@ internal static class App
                 return 3;
             }
             evidence.Line($"remove-bg summary: ✓ 1 png from 1 source, source untouched");
-            // 額度只在**真的產出**時才扣（上面的拒絕路徑全部不扣）。
-            usage.RecordUse(TrialPolicy.Cutout);
-            evidence.Line($"usage after: {TrialPolicy.Cutout} remaining={usage.Remaining(TrialPolicy.Cutout)}" +
+            // 額度只在**真的產出**時才扣（上面的拒絕路徑全部不扣）。有授權時不記（那個人不必被計數）。
+            // 這兩種結果各印各的一行：把「花了 1 次」與「有授權所以不計數」印成同一句，
+            // 會讓之後翻日誌的人以為授權沒有生效。
+            bool counted = Entitlement.RecordCutoutUse(evidence.Line);
+            evidence.Line(counted
+                ? $"usage: {TrialPolicy.Cutout} succeeded -> spent one trial use, " +
+                  $"remaining={Entitlement.CutoutRemaining()}"
+                : $"usage: {TrialPolicy.Cutout} succeeded -> a license is active, so nothing is counted");
+            evidence.Line($"usage after: {TrialPolicy.Cutout} " +
+                          $"remaining={Entitlement.RemainingText(Entitlement.CutoutRemaining())}" +
                           $" (limit {TrialPolicy.LimitFor(TrialPolicy.Cutout)}, free trial)");
             return 0;
         }
@@ -4344,9 +4373,9 @@ internal static class App
         // 「模型不在」「找不到人像」都要能免費重試，否則額度會莫名其妙少掉。
         if (toolOp == WorkerProtocol.OpRemoveBg)
         {
-            var usageStore = UsageStore.Shared(evidence.Line);
-            bool allowed = usageStore.CanUse(TrialPolicy.Cutout, out int remaining, out string why);
-            evidence.Line($"ENTER: usage gate {TrialPolicy.Cutout} remaining={remaining} allowed={allowed}" +
+            bool allowed = Entitlement.CutoutAllowed(evidence.Line, out int remaining, out string why);
+            evidence.Line($"ENTER: usage gate {TrialPolicy.Cutout} " +
+                          $"remaining={Entitlement.RemainingText(remaining)} allowed={allowed}" +
                           (allowed ? "" : $" reason='{why}'"));
             if (!allowed)
             {
@@ -4551,12 +4580,18 @@ internal static class App
 
         _pendingQuotaFeature = null;
         var store = UsageStore.Shared(evidence.Line);
+        bool licensed = LicenseStore.Shared(evidence.Line).Current(out _) != null;
         if (snapshot.Ok <= 0)
         {
             // 拒絕（缺模型／沒有人像／worker 起不來）**不扣**：使用者什麼都沒拿到。
             evidence.Line($"usage: {feature} produced nothing (ok=0 failed={snapshot.Failed} " +
                           $"error='{snapshot.Error ?? "-"}') -> no trial use is spent; " +
-                          $"remaining={store.Remaining(feature)}");
+                          $"remaining={(licensed ? "unlimited" : store.Remaining(feature).ToString())}");
+            return;
+        }
+        if (licensed)
+        {
+            evidence.Line($"usage: {feature} succeeded -> a license is active, so nothing is counted");
             return;
         }
         store.RecordUse(feature);
@@ -5400,9 +5435,35 @@ internal static class App
     internal static int RunUsageCommand(Options opt, Evidence evidence)
     {
         var store = UsageStore.Shared(evidence.Line);
-        evidence.Line($"usage: file='{store.FilePath}' " +
-                      (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONFERN_USAGE"))
-                          ? "(the user file)" : "(CONFERN_USAGE)"));
+        var licenses = LicenseStore.Shared(evidence.Line);
+        LicenseInfo? active = licenses.Current(out string licenseWhy);
+        evidence.Line($"license: file='{licenses.FilePath}' " +
+                      (active != null ? active.Describe() : $"none ({licenseWhy})"));
+
+        // 授權的三個動作排在額度之前：它們改的是「以後還要不要計數」，
+        // 而下面的報告要反映改完之後的狀態（先報告再啟用會讓使用者看到舊答案）。
+        if (opt.LicenseClear)
+        {
+            if (!licenses.Clear(out bool deleted))
+            {
+                evidence.Line("--license-clear: FAILED the file could not be deleted");
+                return 3;
+            }
+            evidence.Line($"--license-clear: ok (deleted the file: {deleted}); " +
+                          $"the free trial applies again");
+            active = null;
+        }
+        if (opt.LicenseActivate.Length > 0)
+        {
+            if (!licenses.TryActivate(opt.LicenseActivate, out LicenseInfo? info, out string why))
+            {
+                // 驗不過就**什麼都不寫**：一份存起來的壞金鑰比沒有金鑰更難查（見 License.TryVerify）。
+                evidence.Line($"--license-activate: REFUSED {why}");
+                return 2;
+            }
+            evidence.Line($"--license-activate: ok -> {info!.Describe()}");
+            active = info;
+        }
 
         if (opt.UsageSet.Length > 0)
         {
@@ -5436,9 +5497,14 @@ internal static class App
         evidence.Line($"usage report: {store.Describe()}");
         foreach (string feature in TrialPolicy.Features)
         {
+            // 有授權時「還剩幾次」這個問題就不存在了，所以印 unlimited 而不是一個大數字
+            // （一個看起來像上限的數字會讓人以為授權沒有生效）。
+            int remaining = active != null ? -1 : store.Remaining(feature);
             evidence.Line($"usage feature: {feature} used={store.Used(feature)} " +
-                          $"limit={TrialPolicy.LimitFor(feature)} remaining={store.Remaining(feature)}");
+                          $"limit={TrialPolicy.LimitFor(feature)} " +
+                          $"remaining={Entitlement.RemainingText(remaining)}");
         }
+        evidence.Line($"license state: {(active != null ? "active " + active.Describe() : "none")}");
         evidence.Line("usage done: ok=True");
         return 0;
     }

@@ -89,6 +89,10 @@ function Run([string[]]$argv, [string]$tag, [bool]$resident = $false) {
 # The meter this suite writes. Without it every run below would spend the USER's ten free uses
 # (and, after ten, this suite would start failing on exit 12 - a self-inflicted red).
 $env:CONFERN_USAGE = Join-Path $Work 'usage.json'
+# The license path must be isolated too: if this machine has a real license activated, nothing
+# is counted and every assertion in this suite flips. A path that does not exist means "no license".
+# (This file must stay pure ASCII: see the header.)
+$env:CONFERN_LICENSE = Join-Path $Work 'license-absent.txt'
 $meterPath = $env:CONFERN_USAGE
 
 if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }

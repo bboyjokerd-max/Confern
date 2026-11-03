@@ -69,6 +69,7 @@ $suites = @(
     # the file fails closed". The sweep points CONFERN_USAGE at its own file (below), so a suite that
     # runs the paid tool dozens of times can never eat the user's ten free uses.
     [pscustomobject]@{ Name = 'usage';      Script = 'verify-usage.ps1';           Extra = @() }
+  [pscustomobject]@{ Name = 'license';    Script = 'verify-license.ps1';         Extra = @() }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }
@@ -98,6 +99,7 @@ Remove-Item $env:CONFERN_PRESETS -Force -ErrorAction SilentlyContinue
 # runs it would otherwise spend the user's own uses and, after ten, start failing on exit 12.
 # The sweep starts from a full meter; verify-usage moves it around inside its own run.
 $env:CONFERN_USAGE = Join-Path $Work 'usage.json'
+$env:CONFERN_LICENSE = Join-Path $Work 'license.txt'
 "usage meter: $env:CONFERN_USAGE (the user's own free uses are not touched)"
 Remove-Item $env:CONFERN_USAGE -Force -ErrorAction SilentlyContinue
 
