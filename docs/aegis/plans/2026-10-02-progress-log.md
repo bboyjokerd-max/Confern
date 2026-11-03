@@ -4179,8 +4179,10 @@ Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11�
   m1f 57 → **60 條全綠**。
 - 假故障注入 `strings-table-misses-alt`（英文字串表拿掉 Alt 標籤）→ **S14.37e 紅**，日誌自己說出原因：
   `aligned=False missing=2 … requiredKeys=6 missingRequired=1 … en=209`；跑完重建＋重跑回復全綠。
-- 全套：16 支全綠（**642 條**＝上一輪 639 ＋ m1f 的 3 條）；安裝檔重打 18.45 MB
-  sha256 `9767277F16C5FD1E76FC0C973AEADCEBAAE2A759B3A177F4C1C07BBEE59FB78B`，鑽孔全過。
+- 全套：16 支全綠（**642 條**：cli 46、watch 39、m1a 48、m1b 52、m1c 20、m1d 72、m1f 60、m1g 25、
+  m1h 62、m3c 20、m3d 39、orientation 8、merge 26、folder-drop 42、recent 43、presets 40；
+  616 pass ＋ 26 inconclusive）。標籤簡化後重打安裝檔 **18.50 MB**
+  sha256 `9861B60B0A3500AD9FA3B82DEF1AF0FE986D92F852B5D6A3879437CC0D8D1A5B`，鑽孔全過。
 - 畫面上的證據（產品自己的離屏 dump，不是桌面截圖）：`selected='Alt'`、`settings ui layout …
   scrollbar=False rowOverflow=0 overlaps=0`——Alt 那一條很長的規格警告**不會把頁面撐出捲軸**。
 
