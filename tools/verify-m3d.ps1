@@ -1,4 +1,4 @@
-# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
+﻿# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
 #
 #   -Exe <path to Confern.exe>   -Section S18   -LogDir <dir>
 #   [-FaultInjection <name>]   the full set is documented at the switch below; S22 adds
