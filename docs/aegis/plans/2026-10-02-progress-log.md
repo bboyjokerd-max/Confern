@@ -4181,7 +4181,7 @@ Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11�
   `aligned=False missing=2 … requiredKeys=6 missingRequired=1 … en=209`；跑完重建＋重跑回復全綠。
 - 全套：16 支全綠（**642 條**＝上一輪 639 ＋ m1f 的 3 條）；安裝檔重打 18.45 MB
   sha256 `9767277F16C5FD1E76FC0C973AEADCEBAAE2A759B3A177F4C1C07BBEE59FB78B`，鑽孔全過。
-- 畫面上的證據（產品自己的離屏 dump，不是桌面截圖）：`selected='Alt 鍵'`、`settings ui layout …
+- 畫面上的證據（產品自己的離屏 dump，不是桌面截圖）：`selected='Alt'`、`settings ui layout …
   scrollbar=False rowOverflow=0 overlaps=0`——Alt 那一條很長的規格警告**不會把頁面撐出捲軸**。
 
 ### 誠實缺口
