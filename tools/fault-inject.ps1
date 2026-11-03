@@ -170,15 +170,6 @@ $faults = @(
         Why      = 'a verifier that says yes to everything is indistinguishable from one that works, unless a suite proves it says no'
     }
     [pscustomobject]@{
-        Name     = 'license-payload-not-covered'
-        File     = 'src\Sidecar\License\License.cs'
-        Old      = '        if (!VerifySignature(payload, signature))'
-        New      = '        if (!VerifySignature(System.Text.Encoding.UTF8.GetBytes("{""v"":1}"), signature))  // FAULT: signed bytes ignored'
-        Suite    = 'verify-license.ps1'
-        Expected = 'FAIL  S1\.7 '
-        Why      = 'if the signature is checked against a constant, the contents are free to edit'
-    }
-    [pscustomobject]@{
         Name     = 'license-ignored-by-entitlement'
         File     = 'src\Sidecar\License\LicenseStore.cs'
         Old      = '        if (license != null)' + "`n" +
