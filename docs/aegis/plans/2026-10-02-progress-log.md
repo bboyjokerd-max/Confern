@@ -4205,4 +4205,19 @@ Shift→0xA0／0xA1），而設定檔與命令列寫的是通用值 0x12／0x11�
   所以「只收左 Alt」這件事其實做不到，要另外做）。
 - 設定頁那句 `key.captureHintModifier`（「修飾鍵不能單獨當觸發鍵」）現在只服務 Win 這一種情況，
   文字沒改（要改就得動五種語言的表）；下次動字串表時順手改寫。
+## 2026-11-03 · 動畫演示：用產品自己的離屏畫面做成影片
 
+使用者問「有辦法做一個動畫演示嗎」。答案是可以，而且不必截圖桌面——`--wheel-dump-raw` 每格都是產品
+真的畫出來的輪盤（含 alpha），`--progress-dump` 給進度列的五種狀態。做法：
+
+1. 用 `--wheel-demo 400 400 --wheel-dump-raw` 產 11 格：格式層 5 格（`--wheel-selected 0..4`）、
+   工具層 6 格（`--wheel-tools`），全部加 `--trigger-key Alt` ⇒ 鍵帽上真的是 `alt`。
+2. `tools\demo\make-demo.ps1` 把這些格子用 System.Drawing 疊成 240 格（25fps、9.6 秒）720×860：
+   拖檔案 → 按住 alt（輪盤 0.18→1.0 縮放淡入）→ 掃過五個格式 → Shift 切工具層 → 掃過六個工具 →
+   放開、輪盤縮小淡出、進度列 running→partial→success。
+3. ffmpeg 出 `docs\demo\confern-demo.mp4`（258 KB h264 720×860 25fps）與 `confern-demo.gif`
+   （417 KB 360×430 12fps）。
+
+★學到的：`--wheel-dump` 會把畫面壓在 #202226 上（有暈影），直接貼到別的畫布會露出接縫；要疊圖一律用
+`--wheel-dump-raw`（保 alpha）。★鍵帽會跟著 `--trigger-key` 走，所以演示可以跟新功能一致。
+★240 格 × System.Drawing 逐格畫約 20 秒；GIF 用 `palettegen=max_colors=96:stats_mode=diff` 才壓得下來。
