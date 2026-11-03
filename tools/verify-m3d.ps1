@@ -1,4 +1,4 @@
-﻿# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
+# M3d verification: the crop tool (spec 9.4, the FOURTH tool sector).
 #
 #   -Exe <path to Confern.exe>   -Section S18   -LogDir <dir>
 #   [-FaultInjection <name>]   the full set is documented at the switch below; S22 adds
@@ -84,6 +84,12 @@ Add-Type -AssemblyName WindowsBase
 if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
 
 $Work = Join-Path $LogDir 'm3d'
+# The trial meter (2026-11-03). CUTOUT became a paid tool with ten free uses, and S22 runs it more
+# often than that; without this override a standalone run of this suite would spend the USER's own
+# ten uses and then start failing on exit 12 - a red that says nothing about the code. The file is
+# absent at the start of every run, i.e. exactly the behaviour before the feature existed.
+# (verify-all.ps1 sets the same variable for the whole sweep; this line makes the suite safe alone.)
+$env:CONFERN_USAGE = Join-Path $Work 'usage.json'
 $results = New-Object System.Collections.ArrayList
 $inconclusive = New-Object System.Collections.ArrayList
 

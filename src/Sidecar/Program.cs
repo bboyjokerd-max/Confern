@@ -362,6 +362,16 @@ internal static class Program
             return App.RunToolsList(opt, toolEvidence);
         }
 
+        // 試用額度（2026-11-03）：`--usage-report` 與 `--usage-set feature=count`。
+        // 兩條都在守衛之前——它們問的是「記帳本裡有什麼」，不是「現在能不能轉檔」，
+        // 所以使用者開著托盤程式時也必須問得到（與 `--tools-list` 同一條理由）。
+        if (opt.UsageReport || opt.UsageSet.Length > 0)
+        {
+            Native.AttachParentConsole();
+            using var usageEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunUsageCommand(opt, usageEvidence);
+        }
+
         // ③ 診斷（2026-10-16）：`--payload-expand <p1;p2;…>`——**只展開，什麼都不做**。
         //
         // 為什麼需要它：資料夾展開的結果（收了幾個、跳過幾個、有沒有撞到 1000 個上限、
@@ -543,7 +553,11 @@ internal sealed class Options
                                     corrupt or half-downloaded (ModelCorrupt - a DIFFERENT message),
                                     and "no portrait subject in this picture" (NoSubjectFound: the
                                     model is a PORTRAIT model, so a QR code or a landscape gives an
-                                    almost empty mask); the source is never touched
+                                    almost empty mask); the source is never touched.
+                                    CUTOUT is the paid tool: the free trial allows 10 successful
+                                    runs (see --usage-report). Exit 12 = the trial is used up and
+                                    NOTHING ran; a refused run (any of the three states above)
+                                    does not spend a use
           --remove-bg-model <file>  with --remove-bg: which model file to use (default: models\
                                     model_fp16.onnx beside the executable). This is the seam that
                                     lets the suite walk the missing and the corrupt state for real;
@@ -627,6 +641,13 @@ internal sealed class Options
           --preset-remove SRC       forget that format's preset
           --preset-clear            forget all presets
                                     (CONFERN_PRESETS overrides the store path, for acceptance runs)
+          --usage-report            print the free-trial meter for the paid tools (CUTOUT) and exit:
+                                    how many uses each one has had, its limit and what is left
+          --usage-set FEATURE=N     set that meter to N (a diagnostic seam: it writes a properly
+                                    signed record, so a suite can test "the trial is used up"
+                                    without running the tool ten times)
+                                    (CONFERN_USAGE overrides the record path, for acceptance runs;
+                                    deleting that file starts the trial over -- there is no DRM here)
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)
@@ -1091,6 +1112,22 @@ internal sealed class Options
     public string PresetRemove = "";
     /// <summary>`--preset-clear`：清空全部預設。</summary>
     public bool PresetClear;
+    /// <summary>
+    /// `--usage-report`：印出試用額度（每個收費功能用過幾次、還剩幾次）然後結束。
+    ///
+    /// 存在的理由：額度是**使用者會問、驗收要斷言**的東西（「我還剩幾次去背？」）。
+    /// 讓它變成一個可以隨時問出口的事實，比藏在 `usage.json` 裡好——
+    /// 也讓驗收不必去讀那份帶簽章的檔案（讀了也只證明檔案長什麼樣，不證明程式怎麼算）。
+    /// </summary>
+    public bool UsageReport;
+    /// <summary>
+    /// `--usage-set &lt;feature=count&gt;`：診斷接縫，直接把某個功能的次數設成 count。
+    ///
+    /// 為什麼需要它：驗收要驗「用完之後會擋」，而真的跑 10 次去背要 15 秒以上、
+    /// 還會真的寫檔。這條路**照樣透過 <see cref="UsageStore"/> 寫入**（所以簽章是真的），
+    /// 驗收因此不必知道金鑰，也不必碰使用者真正的記帳本（`CONFERN_USAGE`）。
+    /// </summary>
+    public string UsageSet = "";
     /// <summary>`--quality` 有沒有**明打**。決定「命令列 &gt; 預設 &gt; 設定頁」那個優先序。</summary>
     public bool ConvertQualityGiven;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
@@ -1432,6 +1469,10 @@ internal sealed class Options
                     break;
                 case "--preset-remove":
                     if (i + 1 < args.Length) { o.PresetRemove = args[i + 1]; i++; }
+                    break;
+                case "--usage-report": o.UsageReport = true; break;
+                case "--usage-set":
+                    if (i + 1 < args.Length) { o.UsageSet = args[i + 1]; i++; }
                     break;
                 case "--recent-limit":
                     // 只給 --recent-limit 也是「印清單」：少了這一行，`confern recent --limit 5`
@@ -1804,6 +1845,9 @@ internal static class App
         // （開瀏覽器／開文字視窗）都必須在主執行緒上發生，而這一顆工具**沒有進度藥丸**
         // 可以掛（見 ConversionRunner.Start）——週期回呼是唯一不必新增計時器擁有者的落點。
         visual.TickRequested += () => DrainQrResult(evidence, runner);
+        // 收費功能（去背）的額度扣抵接在同一個 tick：它要讀 worker 快照才知道「成功了沒有」，
+        // 而在這個行程裡問得到快照的只有週期回呼（ConversionRunner 沒有完成回呼）。
+        visual.TickRequested += () => DrainQuotaRecord(evidence, runner);
         visual.StartTick(SettingsUiLogDrainIntervalMs);
         // 這一行刻意**不**以 `settings ui:` 開頭：那個前綴的意思是「設定頁那條執行緒排過來的行」，
         // 而這一行是主執行緒自己說的（而且驗收要用 `settings ui:` 的行數來判斷抽乾有沒有生效）。
@@ -3381,6 +3425,19 @@ internal static class App
         var beforeFiles = FilesWithStem(source);
         evidence.Line($"remove-bg dir state before: {DescribeDirState(beforeFiles)}");
 
+        // 試用額度（2026-11-03）：去背是收費功能，命令列這條路**也要擋**。
+        // 只擋輪盤等於留一個後門——知道旗標的人一行命令就繞過去，而那正是最可能不付錢的人。
+        // 順序刻意的：先確認來源與模型都在，才問額度（「模型不在」不該吃掉一次試用）。
+        var usage = UsageStore.Shared(evidence.Line);
+        bool quotaOk = usage.CanUse(TrialPolicy.Cutout, out int remainingBefore, out string quotaWhy);
+        evidence.Line($"usage gate: {TrialPolicy.Cutout} remaining={remainingBefore} " +
+                      $"allowed={quotaOk}" + (quotaOk ? "" : $" reason='{quotaWhy}'"));
+        if (!quotaOk)
+        {
+            evidence.Line("--remove-bg REFUSED: " + quotaWhy);
+            return 12;
+        }
+
         string exePath = Environment.ProcessPath ?? $"{ProductInfo.Name}.exe";
         var client = new ConversionClient(exePath, evidence.Line);
         try
@@ -3462,6 +3519,10 @@ internal static class App
                 return 3;
             }
             evidence.Line($"remove-bg summary: ✓ 1 png from 1 source, source untouched");
+            // 額度只在**真的產出**時才扣（上面的拒絕路徑全部不扣）。
+            usage.RecordUse(TrialPolicy.Cutout);
+            evidence.Line($"usage after: {TrialPolicy.Cutout} remaining={usage.Remaining(TrialPolicy.Cutout)}" +
+                          $" (limit {TrialPolicy.LimitFor(TrialPolicy.Cutout)}, free trial)");
             return 0;
         }
         finally
@@ -4274,12 +4335,35 @@ internal static class App
                           $"{EdgeRefine.RadiusMax}, eps={EdgeRefine.Epsilon:G}; " +
                           "the model runs once, the refinement is pixels only)");
         }
-        runner.Start(paths,
+
+        // 試用額度（2026-11-03）：去背是收費功能，免費 10 次。用完就**不執行**——
+        // 與「認不出工具就不執行」同一條規格語意（§4.3）：寧可什麼都沒發生，
+        // 也不要按下去了卻偷偷做別的事。輪盤留在畫面上，使用者可以改選別的工具或按 Esc。
+        //
+        // ⚠ 扣次數的時機在**成功之後**（runner 完成那條路），不是這裡：
+        // 「模型不在」「找不到人像」都要能免費重試，否則額度會莫名其妙少掉。
+        if (toolOp == WorkerProtocol.OpRemoveBg)
+        {
+            var usageStore = UsageStore.Shared(evidence.Line);
+            bool allowed = usageStore.CanUse(TrialPolicy.Cutout, out int remaining, out string why);
+            evidence.Line($"ENTER: usage gate {TrialPolicy.Cutout} remaining={remaining} allowed={allowed}" +
+                          (allowed ? "" : $" reason='{why}'"));
+            if (!allowed)
+            {
+                evidence.Line("ENTER: remove-bg refused by the trial quota (the wheel stays up; " +
+                              "pick another tool or press Esc)");
+                return false;
+            }
+        }
+
+        bool started = runner.Start(paths,
                      toolOp == null ? target : "",
                      toolOp == null ? PresetQuality(settings.QualityFor(target), target, evidence) : 100,
                      centerX, centerY,
                      toolOp: toolOp, outputDir: outputDir, compression: compression,
                      removeBgModel: removeBgModel, removeBgRefine: removeBgRefine);
+        // 額度要在**工作真的產出之後**才扣（見 DrainQuotaRecord）：這裡只記「有一個去背工作在跑」。
+        if (started && toolOp == WorkerProtocol.OpRemoveBg) _pendingQuotaFeature = TrialPolicy.Cutout;
         PendingPaths = Array.Empty<string>();
         PendingTools = Array.Empty<ToolDescriptor>();
         return true;
@@ -4453,11 +4537,52 @@ internal static class App
     }
 
     /// <summary>
+    /// 收費工作的額度扣抵：工作結束且**真的產出**時才扣一次（見 <see cref="_pendingQuotaFeature"/>）。
+    ///
+    /// 為什麼判定必須在這裡：<see cref="ConversionRunner"/> 沒有完成回呼——常駐路徑是靠
+    /// 進度藥丸每 80 ms 讀一次快照。所以「結束了沒有」只有週期回呼問得到，而那個回呼已經存在。
+    /// </summary>
+    private static void DrainQuotaRecord(Evidence evidence, ConversionRunner? runner)
+    {
+        string? feature = _pendingQuotaFeature;
+        if (feature == null || runner == null) return;
+        ConversionSnapshot snapshot = runner.Snapshot;
+        if (!snapshot.Finished) return;
+
+        _pendingQuotaFeature = null;
+        var store = UsageStore.Shared(evidence.Line);
+        if (snapshot.Ok <= 0)
+        {
+            // 拒絕（缺模型／沒有人像／worker 起不來）**不扣**：使用者什麼都沒拿到。
+            evidence.Line($"usage: {feature} produced nothing (ok=0 failed={snapshot.Failed} " +
+                          $"error='{snapshot.Error ?? "-"}') -> no trial use is spent; " +
+                          $"remaining={store.Remaining(feature)}");
+            return;
+        }
+        store.RecordUse(feature);
+        int left = store.Remaining(feature);
+        evidence.Line($"usage: {feature} succeeded -> spent one trial use, remaining={left}" +
+                      (left == 0 ? " (the free trial is now used up)" : ""));
+    }
+
+    /// <summary>
     /// 這一輪讀 QR 的來源檔名（文字視窗的標題列要它）。與 <see cref="PendingPaths"/> 同一種作法：
     /// 提交時寫、抽乾時清。刻意不從快照反推——快照上的 <c>Current</c> 是進度訊息的一部分，
     /// 拿排版欄位當資料用正是本專案一直在防的那件事。
     /// </summary>
     private static string _qrSourceName = "";
+
+    /// <summary>
+    /// 「有一個收費工作在跑，成功之後要扣一次額度」（目前只有去背）。
+    ///
+    /// <para><b>為什麼不在 <see cref="CommitWheel"/> 當場扣</b>：那裡還不知道結果。
+    /// 缺模型、模型損壞、找不到人像主體——這三種都是**正確的拒絕**，一個檔案都沒寫出來，
+    /// 卻會讓使用者白白少掉一次試用。額度是使用者會記得的東西，錯扣一次比不扣更傷。</para>
+    ///
+    /// <para>抽乾點是**既有**的視覺層週期回呼（與 <see cref="DrainQrResult"/> 同一個 tick），
+    /// 不新增第二個計時器擁有者。</para>
+    /// </summary>
+    private static string? _pendingQuotaFeature;
 
     /// <summary>
     /// 顯示第二層時那一份工具清單（Enter 要靠它把「選中的索引」換成工具 id）。
@@ -5266,6 +5391,58 @@ internal static class App
                       $"last={lastLine}");
         return 0;
     }
+    /// <summary>
+    /// `--usage-report`／`--usage-set &lt;feature=count&gt;`：試用額度的問與答。
+    ///
+    /// <para>兩件事都走 <see cref="UsageStore"/>：報告是「它算出來的剩餘次數」，設定是「透過它寫一份
+    /// 帶正確簽章的檔案」。驗收因此可以驗真的那一條路，而不是另外做一個驗收專用的假 store。</para>
+    /// </summary>
+    internal static int RunUsageCommand(Options opt, Evidence evidence)
+    {
+        var store = UsageStore.Shared(evidence.Line);
+        evidence.Line($"usage: file='{store.FilePath}' " +
+                      (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CONFERN_USAGE"))
+                          ? "(the user file)" : "(CONFERN_USAGE)"));
+
+        if (opt.UsageSet.Length > 0)
+        {
+            string spec = opt.UsageSet.Trim();
+            int eq = spec.IndexOf('=');
+            if (eq <= 0 || eq == spec.Length - 1)
+            {
+                evidence.Line($"--usage-set: FAILED '{spec}' is not <feature>=<count>");
+                return 2;
+            }
+            string feature = TrialPolicy.Canonical(spec.Substring(0, eq));
+            if (feature.Length == 0)
+            {
+                evidence.Line($"--usage-set: FAILED '{spec.Substring(0, eq)}' is not one of " +
+                              $"{string.Join("/", TrialPolicy.Features)}");
+                return 2;
+            }
+            if (!int.TryParse(spec.Substring(eq + 1), out int count) || count < 0)
+            {
+                evidence.Line($"--usage-set: FAILED '{spec.Substring(eq + 1)}' is not a count");
+                return 2;
+            }
+            if (!store.SetUsed(feature, count))
+            {
+                evidence.Line("--usage-set: FAILED the file could not be written");
+                return 3;
+            }
+            evidence.Line($"--usage-set: {feature} used={count} limit={TrialPolicy.LimitFor(feature)}");
+        }
+
+        evidence.Line($"usage report: {store.Describe()}");
+        foreach (string feature in TrialPolicy.Features)
+        {
+            evidence.Line($"usage feature: {feature} used={store.Used(feature)} " +
+                          $"limit={TrialPolicy.LimitFor(feature)} remaining={store.Remaining(feature)}");
+        }
+        evidence.Line("usage done: ok=True");
+        return 0;
+    }
+
     internal static int RunToolsList(Options opt, Evidence evidence)
     {
         PayloadVerdict verdict;

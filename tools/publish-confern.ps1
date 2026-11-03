@@ -103,6 +103,12 @@ $store   = Join-Path $repo 'models\model_fp16.onnx'
 $notice  = Join-Path $repo 'models\MODEL-LICENSE.txt'
 if ($Fixture -eq '') { $Fixture = Join-Path $repo 'fixtures\rembg\real-512.png' }
 if ($OutputDir -eq '') { $OutputDir = Join-Path $repo "src\Sidecar\bin\$Configuration\net8.0-windows\publish" }
+# CUTOUT is a paid tool with ten free uses per machine (2026-11-03). Step 4 runs the published
+# exe for real, which would spend one of the USER's free uses - and on a machine that has already
+# used all ten it would make this release drill fail on exit 12 for a reason that has nothing to do
+# with the release. The meter is an environment variable for exactly this: it is inherited by the
+# published exe and by the worker it starts, and nothing else in this script has to know.
+$env:CONFERN_USAGE = Join-Path $LogDir 'usage.json'
 if ($OptionalDir -eq '') { $OptionalDir = $OutputDir + '-birefnet' }
 
 # The model's identity, as measured. Both numbers are asserted against the file that is published.

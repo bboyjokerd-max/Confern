@@ -36,6 +36,11 @@ if (-not (Test-Path $Image))    { throw "image not found: $Image" }
 if (-not $Work) { $Work = Join-Path $env:TEMP ('cutout-diagnose-' + [guid]::NewGuid().ToString('N').Substring(0,8)) }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
+# CUTOUT is a paid tool with ten free uses per machine (2026-11-03). This diagnose script runs it
+# several times per invocation, so it points the meter at its own work folder instead of spending
+# the user's free uses (and instead of stopping with exit 12 halfway through a diagnosis).
+$env:CONFERN_USAGE = Join-Path $Work 'usage.json'
+
 $Image = (Resolve-Path -LiteralPath $Image).Path
 $ext   = [IO.Path]::GetExtension($Image)
 $stem  = [IO.Path]::GetFileNameWithoutExtension($Image)

@@ -64,6 +64,11 @@ $suites = @(
     # 2026-10-23: per-source-format presets (the wheel's initial sector, plus the preset quality).
     # It points CONFERN_PRESETS at its own file and asserts the real one is byte-identical afterwards.
     [pscustomobject]@{ Name = 'presets';    Script = 'verify-presets.ps1';         Extra = @() }
+    # 2026-11-03: the free-trial meter for the paid tool (CUTOUT, 10 uses). Both doors are covered -
+    # `--remove-bg` and the wheel's own commit - plus "a failed run spends nothing" and "editing
+    # the file fails closed". The sweep points CONFERN_USAGE at its own file (below), so a suite that
+    # runs the paid tool dozens of times can never eat the user's ten free uses.
+    [pscustomobject]@{ Name = 'usage';      Script = 'verify-usage.ps1';           Extra = @() }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }
@@ -88,6 +93,13 @@ Remove-Item $env:CONFERN_RECENT -Force -ErrorAction SilentlyContinue
 $env:CONFERN_PRESETS = Join-Path $Work 'presets.json'
 "preset store: $env:CONFERN_PRESETS (no presets, the user file is not touched)"
 Remove-Item $env:CONFERN_PRESETS -Force -ErrorAction SilentlyContinue
+
+# And for the trial meter (2026-11-03): CUTOUT is a paid tool with 10 free uses, so every suite that
+# runs it would otherwise spend the user's own uses and, after ten, start failing on exit 12.
+# The sweep starts from a full meter; verify-usage moves it around inside its own run.
+$env:CONFERN_USAGE = Join-Path $Work 'usage.json'
+"usage meter: $env:CONFERN_USAGE (the user's own free uses are not touched)"
+Remove-Item $env:CONFERN_USAGE -Force -ErrorAction SilentlyContinue
 
 $rows = @()
 foreach ($s in $suites) {

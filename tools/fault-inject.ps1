@@ -119,6 +119,47 @@ $faults = @(
         Expected = 'FAIL  S2\.3 '
         Why      = 'a successful conversion must be remembered (the tray submenu depends on it)'
     }
+    [pscustomobject]@{
+        Name     = 'usage-cli-gate-removed'
+        File     = 'src\Sidecar\Program.cs'
+        Old      = '            evidence.Line("--remove-bg REFUSED: " + quotaWhy);' +
+                   "`n            return 12;"
+        New      = '            evidence.Line("--remove-bg REFUSED: " + quotaWhy);  // FAULT: says no, then goes ahead'
+        Suite    = 'verify-usage.ps1'
+        Expected = 'FAIL  U1\.7 '
+        Why      = 'the CLI must REFUSE (exit 12, no file) when the CUTOUT trial is used up'
+    }
+    [pscustomobject]@{
+        Name     = 'usage-spends-nothing'
+        File     = 'src\Sidecar\Usage\UsageStore.cs'
+        Old      = '            _used[key] = used + 1;'
+        New      = '            _used[key] = used;  // FAULT: a success is counted as zero'
+        Suite    = 'verify-usage.ps1'
+        Expected = 'FAIL  U1\.9 '
+        Why      = 'one successful CUTOUT must spend exactly one free use, or the trial is endless'
+    }
+    [pscustomobject]@{
+        Name     = 'usage-tamper-fails-open'
+        File     = 'src\Sidecar\Usage\UsageStore.cs'
+        Old      = '            if (Tampered) return 0;'
+        New      = '            if (Tampered) { }  // FAULT: an edited file quietly counts as untouched'
+        Suite    = 'verify-usage.ps1'
+        Expected = 'FAIL  U1\.6 '
+        Why      = 'editing the number breaks the signature and must leave the trial used up'
+    }
+    [pscustomobject]@{
+        Name     = 'usage-wheel-gate-removed'
+        File     = 'src\Sidecar\Program.cs'
+        Old      = '            if (!allowed)' + "`n" +
+                   '            {' + "`n" +
+                   '                evidence.Line("ENTER: remove-bg refused by the trial quota (the wheel stays up; " +'
+        New      = '            if (!allowed && false)' + "`n" +
+                   '            {' + "`n" +
+                   '                evidence.Line("ENTER: remove-bg refused by the trial quota (the wheel stays up; " +'
+        Suite    = 'verify-usage.ps1'
+        Expected = 'FAIL  U1\.10 '
+        Why      = 'the wheel is the product''s only real entry: gating just the CLI leaves it open'
+    }
 )
 
 if ($List) {
