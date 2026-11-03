@@ -80,11 +80,10 @@ $faults = @(
     [pscustomobject]@{
         Name     = 'strings-table-misses-alt'
         File     = 'src\Sidecar\Strings\UiStrings.cs'
-        Old      = '        ["vk.Shift"] = "Shift",' + "`n" +
-                   '        ["vk.Alt"] = "Alt",' + "`n" +
-                   '        ["vk.Ctrl"] = "Ctrl",'
-        New      = '        ["vk.Shift"] = "Shift",' + "`n" +
-                   '        // FAULT: the English table lost the label the settings page asks for'
+        Old      = '        ["vk.Alt"] = "Alt",' + "`n" +
+                   '        ["vk.Ctrl"] = "Strg",'
+        New      = '        // FAULT: the German table lost the Alt label (the page would show !vk.Alt!)' + "`n" +
+                   '        ["vk.Ctrl"] = "Strg",'
         Suite    = 'verify-m1f.ps1'
         Expected = 'FAIL  S14.37e '
         Why      = 'table-to-table alignment is green even when a key is missing from ALL tables'

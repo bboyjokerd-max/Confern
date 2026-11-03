@@ -728,7 +728,7 @@ Check 'S14.37f the trigger dropdown renders six labelled entries, none of them a
   ($tkDone -and $tkp.ExitCode -eq 0 -and $tkItems.Count -eq 6 -and $tkMissingMarker.Count -eq 0 `
    -and (Test-Path -LiteralPath $tkPng)) `
   "exit=$($tkp.ExitCode) items=$($tkItems.Count) markers=$($tkMissingMarker.Count)"
-$tkAltLabel = (($tkText -split "`r?`n") | Where-Object { $_ -match "text='Alt " } | Select-Object -First 1)
+$tkAltLabel = (($tkText -split "`r?`n") | Where-Object { $_ -match "text='Alt'" } | Select-Object -First 1)
 Check 'S14.37g Alt has a real localized label in the dropdown (zh-Hant)' `
   ($null -ne $tkAltLabel) "altLine=$tkAltLabel"
 Expect 7
