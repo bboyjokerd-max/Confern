@@ -111,6 +111,12 @@ Source: "{#StagingDir}\usage.txt"; DestDir: "{app}"; DestName: "使用說明.txt
 Source: "{#StagingDir}\version.txt"; DestDir: "{app}"; DestName: "版本資訊.txt"; Flags: ignoreversion
 ; MIT: the notice travels with every copy. Kept under its ASCII name because tools read it.
 Source: "{#StagingDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+; 2026-11-04: the update endpoint, seeded as the user's settings file ONCE (first install only).
+; It has to be settings.json -- that is the file the product already reads -- and it must never
+; overwrite an existing one: an upgrade must not reset the user's trigger key or quality.
+#ifdef HasUpdateSeed
+Source: "{#StagingDir}\settings-seed.json"; DestDir: "{localappdata}\Confern"; DestName: "settings.json"; Flags: onlyifdoesntexist uninsneveruninstall
+#endif
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\Confern.exe"; Tasks: startmenuicon

@@ -1,100 +1,105 @@
 {
-  "vaultSubPath": "DSH 4070/Tangerine Converter Windows",
-  "files": [
-    {
-      "source": "tools/obsidian/00-index.md",
-      "banner": null,
-      "dest": "00 索引與決策.md"
-    },
-    {
-      "source": "00-teardown-and-windows-port.md",
-      "banner": "tools/obsidian/01-banner.md",
-      "dest": "01 解構與移植路線.md"
-    },
-    {
-      "source": "docs/aegis/specs/2026-09-30-sidecar-drag-convert-design.md",
-      "banner": "tools/obsidian/02-banner.md",
-      "dest": "02 設計規格 - 權威.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-09-30-m05-feasibility.md",
-      "banner": "tools/obsidian/03-banner.md",
-      "dest": "03 實作計畫 - M0.5 生死線.md"
-    },
-    {
-      "source": "docs/aegis/work/2026-09-30-m05-feasibility/90-evidence.md",
-      "banner": "tools/obsidian/04-banner.md",
-      "dest": "04 證據與判定 - M0.5 生死線.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-09-30-m1-roadmap.md",
-      "banner": "tools/obsidian/05-banner.md",
-      "dest": "05 M1 切片路線圖.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-09-30-m1a-lifecycle.md",
-      "banner": "tools/obsidian/06-banner.md",
-      "dest": "06 實作計畫 - M1a 生命週期.md"
-    },
-    {
-      "source": "docs/aegis/work/2026-09-30-m1a-lifecycle/90-evidence.md",
-      "banner": "tools/obsidian/07-banner.md",
-      "dest": "07 證據 - M1a 生命週期.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-09-30-m1b-wheel.md",
-      "banner": "tools/obsidian/08-banner.md",
-      "dest": "08 實作計畫 - M1b 輪盤.md"
-    },
-    {
-      "source": "docs/aegis/work/2026-09-30-m1b-wheel/90-evidence.md",
-      "banner": "tools/obsidian/09-banner.md",
-      "dest": "09 證據 - M1b 輪盤.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-01-m1c-formats.md",
-      "banner": "tools/obsidian/10-banner.md",
-      "dest": "10 實作計畫 - M1c 格式與編解碼.md"
-    },
-    {
-      "source": "docs/aegis/work/2026-10-01-m1c-formats/90-evidence.md",
-      "banner": "tools/obsidian/11-banner.md",
-      "dest": "11 證據 - M1c 格式與編解碼.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-01-m1def-first-release.md",
-      "banner": "tools/obsidian/12-banner.md",
-      "dest": "12 實作計畫 - M1def 首發轉檔.md"
-    },
-    {
-      "source": "docs/aegis/work/2026-10-01-m1def-conversion/90-evidence.md",
-      "banner": "tools/obsidian/13-banner.md",
-      "dest": "13 證據 - M1def 首發轉檔.md"
-    },
-    {
-      "source": "docs/TEST-PLAN-M1-first-run.md",
-      "banner": "tools/obsidian/14-banner.md",
-      "dest": "14 人工測試清單 - 初版.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-01-ui-redesign.md",
-      "banner": "tools/obsidian/15-banner.md",
-      "dest": "15 UI 重設計 - 方向與凍結決策.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-02-feature-handoff.md",
-      "banner": "tools/obsidian/16-banner.md",
-      "dest": "16 功能接手 - 順序與現況.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-02-progress-log.md",
-      "banner": "tools/obsidian/17-banner.md",
-      "dest": "17 最新進度（每次收工更新）.md"
-    },
-    {
-      "source": "docs/aegis/plans/2026-10-02-falsifiability-audit.md",
-      "banner": "tools/obsidian/18-banner.md",
-      "dest": "18 假故障稽核 - 哪些斷言不會紅.md"
-    }
-  ]
+    "vaultSubPath":  "DSH 4070/Tangerine Converter Windows",
+    "files":  [
+                  {
+                      "source":  "tools/obsidian/00-index.md",
+                      "banner":  null,
+                      "dest":  "00 索引與決策.md"
+                  },
+                  {
+                      "source":  "00-teardown-and-windows-port.md",
+                      "banner":  "tools/obsidian/01-banner.md",
+                      "dest":  "01 解構與移植路線.md"
+                  },
+                  {
+                      "source":  "docs/aegis/specs/2026-09-30-sidecar-drag-convert-design.md",
+                      "banner":  "tools/obsidian/02-banner.md",
+                      "dest":  "02 設計規格 - 權威.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-09-30-m05-feasibility.md",
+                      "banner":  "tools/obsidian/03-banner.md",
+                      "dest":  "03 實作計畫 - M0.5 生死線.md"
+                  },
+                  {
+                      "source":  "docs/aegis/work/2026-09-30-m05-feasibility/90-evidence.md",
+                      "banner":  "tools/obsidian/04-banner.md",
+                      "dest":  "04 證據與判定 - M0.5 生死線.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-09-30-m1-roadmap.md",
+                      "banner":  "tools/obsidian/05-banner.md",
+                      "dest":  "05 M1 切片路線圖.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-09-30-m1a-lifecycle.md",
+                      "banner":  "tools/obsidian/06-banner.md",
+                      "dest":  "06 實作計畫 - M1a 生命週期.md"
+                  },
+                  {
+                      "source":  "docs/aegis/work/2026-09-30-m1a-lifecycle/90-evidence.md",
+                      "banner":  "tools/obsidian/07-banner.md",
+                      "dest":  "07 證據 - M1a 生命週期.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-09-30-m1b-wheel.md",
+                      "banner":  "tools/obsidian/08-banner.md",
+                      "dest":  "08 實作計畫 - M1b 輪盤.md"
+                  },
+                  {
+                      "source":  "docs/aegis/work/2026-09-30-m1b-wheel/90-evidence.md",
+                      "banner":  "tools/obsidian/09-banner.md",
+                      "dest":  "09 證據 - M1b 輪盤.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-01-m1c-formats.md",
+                      "banner":  "tools/obsidian/10-banner.md",
+                      "dest":  "10 實作計畫 - M1c 格式與編解碼.md"
+                  },
+                  {
+                      "source":  "docs/aegis/work/2026-10-01-m1c-formats/90-evidence.md",
+                      "banner":  "tools/obsidian/11-banner.md",
+                      "dest":  "11 證據 - M1c 格式與編解碼.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-01-m1def-first-release.md",
+                      "banner":  "tools/obsidian/12-banner.md",
+                      "dest":  "12 實作計畫 - M1def 首發轉檔.md"
+                  },
+                  {
+                      "source":  "docs/aegis/work/2026-10-01-m1def-conversion/90-evidence.md",
+                      "banner":  "tools/obsidian/13-banner.md",
+                      "dest":  "13 證據 - M1def 首發轉檔.md"
+                  },
+                  {
+                      "source":  "docs/TEST-PLAN-M1-first-run.md",
+                      "banner":  "tools/obsidian/14-banner.md",
+                      "dest":  "14 人工測試清單 - 初版.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-01-ui-redesign.md",
+                      "banner":  "tools/obsidian/15-banner.md",
+                      "dest":  "15 UI 重設計 - 方向與凍結決策.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-02-feature-handoff.md",
+                      "banner":  "tools/obsidian/16-banner.md",
+                      "dest":  "16 功能接手 - 順序與現況.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-02-progress-log.md",
+                      "banner":  "tools/obsidian/17-banner.md",
+                      "dest":  "17 最新進度（每次收工更新）.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-10-02-falsifiability-audit.md",
+                      "banner":  "tools/obsidian/18-banner.md",
+                      "dest":  "18 假故障稽核 - 哪些斷言不會紅.md"
+                  },
+                  {
+                      "source":  "docs/aegis/plans/2026-11-04-github-and-release.md",
+                      "banner":  "tools/obsidian/19-banner.md",
+                      "dest":  "19 發版與 GitHub - 一次就好.md"
+                  }
+              ]
 }

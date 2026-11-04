@@ -5509,7 +5509,13 @@ internal static class App
     /// </summary>
     internal static int RunUpdateCheck(Options opt, Evidence evidence)
     {
-        string url = opt.UpdateUrl.Length > 0 ? opt.UpdateUrl : (_settings?.UpdateUrl ?? "");
+        // `--check-updates` 是最早執行的一條命令（在設定載入之前就 return），所以 `_settings` 可能
+        // 還是 null。這條命令仍然必須看得見 settings.json 裡的 UpdateUrl——否則「安裝檔種進去的
+        // 網址」只有常駐讀得到、診斷讀不到，而那正是使用者回報問題時會跑的那條命令。
+        // 只在需要時讀，而且失敗不致命（Load 自己會把原因寫進證據）。
+        Settings settings = _settings ?? SettingsStore.Load(
+            string.IsNullOrEmpty(opt.SettingsFile) ? null : opt.SettingsFile, evidence.Line);
+        string url = opt.UpdateUrl.Length > 0 ? opt.UpdateUrl : (settings.UpdateUrl ?? "");
         int timeout = opt.UpdateTimeoutMs > 0 ? opt.UpdateTimeoutMs : UpdateChecker.DefaultTimeoutMs;
 
         evidence.Line($"update: current={Program.VersionText()} edition={ProductInfo.Edition} " +

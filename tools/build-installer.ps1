@@ -41,7 +41,12 @@ param(
     [switch]$SkipDrill,
     # Paid (default) or Free: two builds of one product. The Free build has no cutout tool, no
     # model, no quota and no licence -- it is the open source edition. See Sidecar.csproj.
-    [ValidateSet('Paid', 'Free')][string]$Edition = 'Paid'
+    [ValidateSet('Paid', 'Free')][string]$Edition = 'Paid',
+  # 2026-11-04: the update manifest url this EDITION should ask. Empty = do not seed anything, and
+  # the product stays silent (its own default is "no url configured"). This is a DEPLOYMENT value,
+  # not a source constant: the same source produces the artefact, the release decides where the
+  # manifest lives (see tools/release.ps1).
+  [string]$UpdateUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -195,6 +200,24 @@ if (-not (Test-Path -LiteralPath $licenseSource)) {
     Die "no LICENSE at $licenseSource -- the product is MIT, so every copy has to carry the notice" 1
 }
 Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $staging 'LICENSE.txt') -Force
+
+# The update endpoint, if this release has one. It becomes %LOCALAPPDATA%\Confern\settings.json on
+# FIRST install only (the .iss uses Flags: onlyifdoesntexist), so an existing user's settings -- their
+# trigger key, their quality, their watch folders -- are never rewritten by an upgrade.
+#
+# Why seed a settings FILE instead of baking the url into the binary: the url belongs to the release
+# (it changes when the repo is renamed, and paid/free point at different manifests), while the binary
+# should stay the same bytes regardless of where it is published. A url in the source means every
+# move of the manifest needs a rebuild of the product itself.
+if ($UpdateUrl -ne '') {
+    if ($UpdateUrl -notmatch '^https?://') { Die "the update url must be http(s): '$UpdateUrl'" 1 }
+    $seed = '{"UpdateUrl":"' + $UpdateUrl.Replace('\', '\\').Replace('"', '\"') + '"}' + "`r`n"
+    [System.IO.File]::WriteAllText((Join-Path $staging 'settings-seed.json'), $seed,
+                                   (New-Object System.Text.UTF8Encoding($false)))
+    Say "staging: settings-seed.json (UpdateUrl=$UpdateUrl; seeded only when the user has no settings yet)"
+} else {
+    Say "staging: no update url for this build (the product will not check for updates)"
+}
 Say 'staging: LICENSE.txt (MIT) shipped beside the exe'
 $sample = Join-Path $repo 'fixtures\rembg\real-512.png'
 if (Test-Path -LiteralPath $sample) {
@@ -237,6 +260,13 @@ $setup = Join-Path $OutputDir $setupName
 if (Test-Path -LiteralPath $setup) { Remove-Item -LiteralPath $setup -Force }
 $isccArgv = @('/Qp', "/DAppVersion=$Version", "/DStagingDir=$staging", "/DOutputDir=$OutputDir", $iss)
 if ($Edition -eq 'Free') { $isccArgv = @('/Qp', "/DAppVersion=$Version", "/DStagingDir=$staging", "/DOutputDir=$OutputDir", '/DFreeEdition=1', $iss) }
+# /DHasUpdateSeed tells the .iss whether the seed file exists this time. Inno has no way to test for
+# a [Files] Source that is allowed to be absent, so a define is the honest way to say "not this build".
+# /DHasUpdateSeed is passed ONLY when there is a seed this time, and it is passed with no value:
+# Inno's /Dname=value defines name as the STRING "0", and a non-empty string is TRUE to #if -- the
+# first version of this line passed =0 and the .iss compiled the seed line anyway, which fails the
+# build when no seed exists. `#ifdef` plus "define it or do not" has no such ambiguity.
+if ($UpdateUrl -ne '') { $isccArgv = $isccArgv[0..($isccArgv.Length - 2)] + @('/DHasUpdateSeed', $iss) }
 Say "iscc $($isccArgv -join ' ')"
 $comp = Start-Process -FilePath $Iscc -ArgumentList (Quote-Argv $isccArgv) -Wait -PassThru -WindowStyle Hidden
 if ($comp.ExitCode -ne 0) { Die "ISCC exited with $($comp.ExitCode) (the compiler prints the reason above)" 3 }

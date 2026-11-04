@@ -293,8 +293,28 @@ Check 'U1.10 the resident announces the cached newer version exactly once, via t
     ($resident.Text -match 'update: state=newer' -and $resident.Text -match 'update: balloon shown=True') `
     ("expected state=newer and 'balloon shown=True'`n" + $resident.Text)
 
+# ----------------------------------------------------------------------------------------- U1.11
+# 2026-11-04: `--check-updates` runs BEFORE the settings load (it has to: it must work on a machine
+# with no tray, no monitors, nothing), so the url it uses came from `_settings`, which was still
+# null -- meaning the ONLY thing that ever reads the url the installer seeds into settings.json was
+# the resident, and the diagnostic command said "no url configured" while pointing at a file that
+# clearly had one. That is worse than broken: it is a diagnostic that lies in the direction of
+# "nothing is set up", which is exactly what a user runs it to find out.
+$seedSrv = Start-ManifestServer -Body (Manifest $newerVersion)
+$seedSettings = Join-Path $Work 'U1.11-settings.json'
+$seedJson = '{"UpdateUrl":"' + $seedSrv.Url + '"}'
+[System.IO.File]::WriteAllText($seedSettings, $seedJson, (New-Object System.Text.UTF8Encoding($false)))
+$fromSettings = Invoke-Build @('--check-updates', '--settings-file', $seedSettings) 'U1.11-from-settings'
+$missingSettings = Invoke-Build @('--check-updates', '--settings-file', (Join-Path $Work 'U1.11-does-not-exist.json')) 'U1.11-missing-settings'
+Check 'U1.11 the url is read from the settings file (and an absent one is not invented)' `
+    ($fromSettings.Exit -eq 0 -and $fromSettings.Text.Contains("update: url='$($seedSrv.Url)'") -and
+     $missingSettings.Exit -eq 4) `
+    ("settings-file run: exit=$($fromSettings.Exit) (want 0 and url='$($seedSrv.Url)'), " +
+     "missing-file run: exit=$($missingSettings.Exit) (want 4)`n" + $fromSettings.Text)
+Stop-ManifestServer $seedSrv
+
 # ----------------------------------------------------------------------------------- what was not touched
-Expect 10
+Expect 11
 $realCacheAfter = Get-FileFingerprint $realCachePath
 if ($realCacheAfter -ne $realCacheBefore) {
     Write-Host "FATAL: the user's own update cache changed during this suite" -ForegroundColor Red

@@ -4563,3 +4563,93 @@ fixture，與這一刀無關）。`update` 10/10、`edition` 12/12、`license` 1
 - **氣泡點了沒有動作**：現在只有「有新版」這句話，點托盤圖示仍然是原本的選單。
   下一步是托盤選單多一列（`MenuItemCount` 4→5，會動到 `LabelsMatchSpec` 自測）開啟下載頁。
 - `sha256` 只是印出來給人核對，產品**沒有**下載安裝檔，所以也還沒有驗簽的路徑。
+
+---
+
+## 2026-11-04（下午）· 發版這條路：把「有更新」變成「有人拿得到」
+
+### 為什麼是這個切片
+
+上午做完 D1（更新檢查），它會問一句話——但那個問題的答案要有人放在網路上。使用者的原話是
+「我還不太會用 github」。所以這一刀不是加功能，是**把發版這件事變得不需要懂 git**。
+
+### 決定：網址屬於「發版」，不屬於「原始碼」
+
+`UpdateUrl` **沒有**編進程式（`UpdateChecker.DefaultManifestUrl` 保持空字串），它由**安裝檔**種進
+使用者的 `%LOCALAPPDATA%\Confern\settings.json`：
+
+```
+build-installer.ps1 -Edition Paid -UpdateUrl https://raw.githubusercontent.com/<你>/confern/main/update-paid.json
+```
+
+三個理由：
+1. 同一份原始碼可以產出指向不同網址的安裝檔（付費版、免費版各一份清單）。
+2. 搬家／改 repo 名字時不必重編產品——重跑一次 `release.ps1` 就好。
+3. 「程式碼裡不該有部署常識」。位址是部署參數，不是行為。
+
+種子檔的旗標是 `onlyifdoesntexist`（Inno），所以**只在第一次安裝**時寫，而且只帶 `UpdateUrl`
+一個欄位；升級不會動到使用者調過的觸發鍵或畫質。使用者自己的 `settings.json` 在整段驗證前後
+**位元相同**（`9E55D0F90A6B75AF`）。
+
+### 兩份清單，不是一份清單兩個欄位
+
+`update-paid.json` 與 `update-free.json` 各自指到自己那一版的安裝檔。理由很直白：**免費版永遠
+不該被指到付費安裝檔**。一個網址只服務一種版本，就沒有「點了下載拿到要付錢的東西」這種事。
+
+### `tools\release.ps1`：一支指令，而且不上傳
+
+做七件事：讀 `release.config.json` → 建付費版安裝檔（種付費清單網址）→ 建免費版（種免費清單
+網址）→ 算大小與 sha256 → 寫兩份 manifest → 寫 `RELEASE-NOTES.md` 與 `SHA256SUMS.txt` → 把
+「接下來要下的指令」印出來（檔名與雜湊都填好了）。
+
+**它刻意不上傳**：會上傳的建置腳本就是一個握著憑證的建置腳本，可以在沒人看的時候把錯的東西推
+出去。上傳是 `git push` ＋ `gh release create`（或瀏覽器上八次點擊），而指令由它印出來。
+
+它拒絕三件事：猜版本號（讀 csproj）、沒有 changelog 就發（`-Notes` 或 `dist\release\notes.txt`）、
+manifest 指向一個不在旁邊的檔案（會自己 hash 比對，不符就 `Die`）。
+
+### 順序：清單要先推，安裝檔才能掛
+
+manifest 裡的 `url` 是可以**事先算出來**的（`releases/download/v0.1.0/<檔名>`），但那個網址要
+等 release 建好才通。先掛檔案、後推清單會有空窗期：那幾分鐘檢查的人看到「有新版本」卻點不到。
+反過來最壞只是「還沒有人收到通知」。
+
+### 驗證（都是產品自己的輸出）
+
+| 驗什麼 | 怎麼驗 | 結果 |
+|---|---|---|
+| 種子檔真的會寫進使用者的設定位置 | 把真實 `settings.json` 移開（模擬全新使用者）→ 跑安裝檔 drill → 讀檔案 → **還原並比對 hash** | `{"UpdateUrl":"https://raw.githubusercontent.com/CHANGE-ME/confern/main/update-paid.json"}` 91 bytes，原檔還原後 `9E55D0F9…` 相同 |
+| 產品會不會拿它去問 | `--check-updates`（**不給** `--update-url`，只靠那份檔案） | `update: url='https://raw.githubusercontent.com/CHANGE-ME/…'` → `state=failed … HTTP 404 Not Found`（CHANGE-ME 不存在，所以這是**真網路**的回應） |
+| 使用者自己的檔案有沒有被動 | 整段前後的 sha256 | 相同 |
+| 種子檔沒被讀到時會不會假裝有網址 | 給一個不存在的 `--settings-file` | exit 4（拒絕，不猜） |
+
+### 這一刀抓到的產品 bug（自己寫的探針抓的）
+
+`--check-updates` 在**設定載入之前**就 return（它必須能在沒有托盤、沒有螢幕的機器上跑），所以
+它讀的 `_settings` 還是 null——結果就是：唯一讀得到「安裝檔種進去的網址」的地方是常駐，
+而使用者回報問題時會跑的那條診斷命令卻說「沒有網址」。**一個往「什麼都沒設定」方向說謊的診斷，
+比壞掉更糟**。修法是在需要時才 `SettingsStore.Load`（尊重 `--settings-file`），並加
+`verify-update.ps1` U1.11 當回歸檢查（套件從 10 檢查長到 11）。
+
+### 現在卡在哪
+
+**卡在一個帳號。** `tools\release.config.json` 的 `owner` 還是 `CHANGE-ME`。使用者註冊 GitHub、
+建一個 public repo（名字 `confern`）之後：填 `owner`、重跑 `release.ps1`、`git push`、
+按一次 release 頁面的「Attach binaries」。這四步之後，更新檢查就真的活了。
+
+在那之前：`dist\` 裡的安裝檔**沒有**任何更新網址（重新建置過，避免有人拿到指向 `CHANGE-ME` 的
+成品——它會靜默地永遠收不到通知）。
+
+### 這一刀踩到的坑（發版機制）
+
+1. **Inno 的 `/DName=0` 不是 false**：`/D` 的 value 一律是**字串**，而字串 `"0"` 對 `#if` 是**真**。
+   第一版寫 `/DHasUpdateSeed=0` ＋ `#if HasUpdateSeed`，於是「沒有種子檔」的那次建置仍然編進
+   `Source: ...settings-seed.json` → ISCC 說 `Source file ... does not exist` → 安裝檔建不起來。
+   改成「**要就定義、不要就不定義**」（build-installer 只在有網址時傳 `/DHasUpdateSeed`，iss 用
+   `#ifdef`），沒有第三種狀態。
+2. **`--check-updates` 讀不到設定檔的網址**（前面那條 bug）：它是最早 return 的命令，`_settings`
+   還是 null。修好之後 U1.11 是回歸檢查。
+3. **一次「以為種子檔沒寫進去」的假警報**：`dist\_staging` 在建置結束就被刪掉，所以事後去那個
+   資料夾找 `settings-seed.json` 一定找不到。真相要在**安裝後的使用者資料夾**看（而且必須先把
+   真實的 `settings.json` 移開，否則 `onlyifdoesntexist` 讓你看不到任何東西）。
+   教訓：驗證「安裝會寫 A」，就要去**A 的實際位置**看，不是去建置的中繼資料夾看。
