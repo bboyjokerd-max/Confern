@@ -187,6 +187,15 @@ if ($Edition -eq 'Free') {
 
 # The docs the user reads. version.txt is generated per build, so it goes here and not into the repo.
 Copy-Item -LiteralPath $usageSource -Destination (Join-Path $staging 'usage.txt') -Force
+
+# MIT requires the notice to travel with every copy, so the licence ships inside BOTH editions and is
+# installed beside the exe (the Inno script renames LICENSE.txt -- see its [Files] section).
+$licenseSource = Join-Path $repo 'LICENSE'
+if (-not (Test-Path -LiteralPath $licenseSource)) {
+    Die "no LICENSE at $licenseSource -- the product is MIT, so every copy has to carry the notice" 1
+}
+Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $staging 'LICENSE.txt') -Force
+Say 'staging: LICENSE.txt (MIT) shipped beside the exe'
 $sample = Join-Path $repo 'fixtures\rembg\real-512.png'
 if (Test-Path -LiteralPath $sample) {
     Copy-Item -LiteralPath $sample -Destination (Join-Path $staging 'sample.png') -Force

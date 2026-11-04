@@ -106,9 +106,11 @@ Name: "desktopicon"; Description: "在桌面建立捷徑"; GroupDescription: "�
 ; build script that drives this file is PURE ASCII (Windows PowerShell 5.1 reads a BOM-less .ps1 as
 ; ANSI, so a CJK literal in it is silently mangled -- measured). This file is UTF-8 with BOM, so the
 ; Chinese names belong here, where they are read correctly.
-Source: "{#StagingDir}\*"; DestDir: "{app}"; Excludes: "usage.txt,version.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StagingDir}\*"; DestDir: "{app}"; Excludes: "usage.txt,version.txt,LICENSE.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StagingDir}\usage.txt"; DestDir: "{app}"; DestName: "使用說明.txt"; Flags: ignoreversion
 Source: "{#StagingDir}\version.txt"; DestDir: "{app}"; DestName: "版本資訊.txt"; Flags: ignoreversion
+; MIT: the notice travels with every copy. Kept under its ASCII name because tools read it.
+Source: "{#StagingDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\Confern.exe"; Tasks: startmenuicon

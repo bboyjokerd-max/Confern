@@ -4413,8 +4413,8 @@ dotnet build -p:Edition=Free  -> free
 
 | 檔案 | 大小 | sha256 |
 |---|---|---|
-| `dist\Confern-Setup-0.1.0.exe`（付費） | 18.46 MB | `9E6744F9583F61E65B7CB03FDAC284958A1316D08EB52CDAF69727ED9A08F6FD` |
-| `dist\Confern-Free-Setup-0.1.0.exe`（免費開源） | 7.38 MB | `587D53429070E16BCD513A40D572E8B44B8D23F99527823030E7D26342098C67` |
+| `dist\Confern-Setup-0.1.0.exe`（付費） | 18.46 MB | `D82362FCEB93B748F05FBE032365DFB98C1C117ACD42D595AD9B599105899CFA` |
+| `dist\Confern-Free-Setup-0.1.0.exe`（免費開源） | 7.38 MB | `63F8DABDDD180F54B4DB5805332C550194C73518F69908324D633E84A2E30762` |
 
 兩份都跑完完整 drill（靜默安裝 → 逐檔比對 → 跑安裝後的 exe → 靜默解除安裝 → exe 消失），
 而且 drill 會讀**安裝後那一份**的 `edition:` 行（`paid`／`free`）——那是唯一一個「陌生人跑的東西」
@@ -4437,7 +4437,17 @@ dotnet build -p:Edition=Free  -> free
 5. **扇區數不是常數**：合併 PDF 對 PNG 不適用，所以 PNG 來源時付費版是 6、免費版是 5。
    斷言寫死「6」會紅，要寫「比付費版少一顆」。
 
-### 授權（LICENSE）還是空的——這件事需要你決定
+### 授權：MIT（2026-11-03 你選的）
+
+repo 根目錄多了 `LICENSE`（MIT，`Copyright (c) 2026 the Confern authors`——要改成你的名字或公司名
+只要改那一行）。兩個安裝檔都會把 `LICENSE.txt` 裝在 exe 旁邊：MIT 要求著作權聲明**隨每一份拷貝走**，
+所以它同時進了兩版（`build-installer.ps1` 會找不到就 Die，不是「有就複製」）。
+
+**代價照實說**：MIT 之下任何人都可以自己編一份「有去背、且沒有限制」的版本並散布。付費版從此是
+**信任制**——賣的是方便（打包好、簽好、會自動更新）與支援，不是程式碼本身。
+這不是 MIT 造成的漏洞：任何在本機執行的次數限制本來就擋不住有心人，AGPL 也一樣。
+
+### 授權決策當時的三個選項（留給未來的我）
 
 免費版是「免費」，但**還不是法律意義上的開源**：repo 裡沒有 LICENSE 檔，沒有授權＝默認保留所有權利，
 別人不能合法再散布。我沒有替你選，因為這是你的商業決定，而且兩種選法差很多：
