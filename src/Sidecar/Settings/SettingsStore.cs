@@ -19,6 +19,19 @@ internal sealed record Settings
     public bool Diagnostics { get; init; } = false;
 
     /// <summary>
+    /// 更新清單的網址（2026-11-03）。<b>預設空字串 ＝ 不檢查</b>，因為目前沒有任何網址在託管
+    /// 更新清單——一個猜的網址會讓每一台機器每次啟動都連一個不存在的地方。
+    ///
+    /// <para>它**刻意沒有**設定頁的那一列：這個開關的擁有者是「誰發布這個版本」而不是使用者，
+    /// 使用者要關掉它有一個更直接的理由（把字串清空）。要讓使用者看得到再開那一列，是設定頁
+    /// 視覺的決定（UI 已凍結，先不碰）。</para>
+    /// </summary>
+    public string UpdateUrl { get; init; } = "";
+
+    /// <summary>常駐時要不要自動檢查更新（前提是 <see cref="UpdateUrl"/> 不是空的）。</summary>
+    public bool CheckUpdates { get; init; } = true;
+
+    /// <summary>
     /// 配色 id（2026-10-16 使用者：「可以提供基本五種配色」）。合法值＝
     /// <see cref="Palettes.SelectableIds"/>；數值在 <see cref="Palette"/>。
     ///
@@ -237,7 +250,11 @@ internal static class SettingsStore
         nameof(Settings.CompressionMode), nameof(Settings.CompressionTargetKb),
         nameof(Settings.RemoveBgRefine),
         nameof(Settings.Palette),
-        nameof(Settings.WatchFolders)
+        nameof(Settings.WatchFolders),
+        // 2026-11-03：更新檢查的兩個欄位。**加欄位就要加這裡**——上面那段註解說的假警報，
+        // 剛剛就真的發生過一次（產品警告 Unknown key 卻照樣讀進去了，比靜默更糟：它讓
+        // 「這一行警告是真的」變成不可信）。
+        nameof(Settings.UpdateUrl), nameof(Settings.CheckUpdates)
     };
 
     public static string DefaultPath() => Path.Combine(

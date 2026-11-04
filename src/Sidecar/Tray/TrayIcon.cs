@@ -382,6 +382,51 @@ internal sealed class TrayIcon : IDisposable
 
     // ================= shell 註冊 =================
 
+    /// <summary>
+    /// 彈一則氣泡提示（Windows 通知中心會收下它）。<b>回傳「shell 收下了沒有」</b>，因為
+    /// 通知被使用者關掉、或 shell 不在，都讓這件事靜靜失敗——那個 true/false 會被寫進日誌，
+    /// 是「提示有沒有發生」的唯一證據。
+    ///
+    /// <para>為什麼是 NIF_INFO 而不是另一套 Windows 通知 API：這個專案**沒有 WinRT 相依**
+    /// （見檔案開頭那一段），而 Shell_NotifyIcon 的氣泡是同一個圖示、同一個身分的原生做法。
+    /// 它與 win10/11 的通知中心相容，不需要註冊 AppUserModelID。</para>
+    /// </summary>
+    public bool Balloon(string title, string text)
+    {
+        if (!IsCreated)
+        {
+            _evidence.Line("tray: balloon skipped (the icon is not in the shell)");
+            return false;
+        }
+
+        // szInfo 上限 256、szInfoTitle 上限 64（含結尾的 NUL）。超長會被截斷**而不是**失敗，
+        // 所以截斷這件事要在這裡明講，不要讓使用者以為整句都送到了。
+        string safeTitle = Truncate(string.IsNullOrWhiteSpace(title) ? ProductInfo.Name : title, 63);
+        string safeText = Truncate(text ?? "", 255);
+        if (safeText.Length == 0)
+        {
+            _evidence.Line("tray: balloon skipped (empty text)");
+            return false;
+        }
+
+        var data = BuildData();
+        data.uFlags = Native.NIF_INFO;
+        data.szInfo = safeText;
+        data.szInfoTitle = safeTitle;
+        data.dwInfoFlags = Native.NIIF_INFO;
+        data.uVersion = 0;
+
+        bool ok = Native.Shell_NotifyIconW(Native.NIM_MODIFY, ref data);
+        _evidence.Line($"tray: balloon shown={ok} title='{safeTitle}' chars={safeText.Length} " +
+                       (ok ? "" : $"(lastError={Marshal.GetLastWin32Error()})"));
+        return ok;
+    }
+
+    private static string Truncate(string text, int max)
+    {
+        string s = text.Replace("\r", " ").Replace("\n", " ").Trim();
+        return s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+    }
     private Native.NOTIFYICONDATAW BuildData() => new()
     {
         cbSize = (uint)Marshal.SizeOf<Native.NOTIFYICONDATAW>(),

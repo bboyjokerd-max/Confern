@@ -263,6 +263,11 @@ internal static class Native
     public const uint NIF_MESSAGE = 0x00000001;
     public const uint NIF_ICON = 0x00000002;
     public const uint NIF_TIP = 0x00000004;
+    /// <summary>szInfo + szInfoTitle 有效（氣泡提示）。只有 NIM_MODIFY 用它才有意義。</summary>
+    public const uint NIF_INFO = 0x00000010;
+
+    /// <summary>氣泡提示的圖示：藍色資訊。</summary>
+    public const uint NIIF_INFO = 0x00000001;
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);

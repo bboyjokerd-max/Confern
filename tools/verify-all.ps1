@@ -74,6 +74,9 @@ $suites = @(
   # artefact (the free edition, bin\Free\...): the sweep drives the paid exe and passes the free exe
   # alongside it. When the free build has never been made the free-side checks are INCONCLUSIVE.
   [pscustomobject]@{ Name = 'edition';    Script = 'verify-edition.ps1';         Extra = @('-FreeExe', (Join-Path $PSScriptRoot '..\src\Sidecar\bin\Free\Release\net8.0-windows\Confern.exe')) }
+  # 2026-11-03: the update check. It is the only suite that runs a real HTTP server (a raw
+  # TcpListener on 127.0.0.1) so the product's actual network path is what gets measured.
+  [pscustomobject]@{ Name = 'update';     Script = 'verify-update.ps1';          Extra = @() }
 )
 
 if (-not (Test-Path $Exe)) { "FATAL: exe not found: $Exe"; exit 2 }

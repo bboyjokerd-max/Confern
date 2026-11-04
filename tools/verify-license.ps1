@@ -258,7 +258,16 @@ if ($key) {
     # not trust the file just because it is there.
     $parts = $key.Split('.')
     $json = [System.Text.Encoding]::UTF8.GetString((From-B64Url $parts[1]))
-    $widened = $json.Replace('2027-11-03', '2099-11-03')
+    # The date to widen is READ FROM THE PAYLOAD, not hardcoded: a literal here is a time bomb.
+    # This exact line said '2027-11-03' and stopped matching on 2026-11-04 (the suite mints its key
+    # one year from today), so the "tamper" became a no-op, the file still verified, and the check
+    # went red for a reason that had nothing to do with the product.
+    $updField = [regex]::Match($json, '"updatesUntil"\s*:\s*"([^"]+)"')
+    if (-not $updField.Success) {
+        Write-Host "FATAL: the minted key has no expiry field to widen (~$json)" -ForegroundColor Red
+        exit 2
+    }
+    $widened = $json.Replace($updField.Groups[1].Value, '2099-11-03')
     $forged = 'CN1.' + (To-B64Url ([System.Text.Encoding]::UTF8.GetBytes($widened))) + '.' + $parts[2]
     [System.IO.File]::WriteAllText($licensePath, $forged + "`n")
     $r = Invoke-Confern @('license') 'S1-show-hand-edited'

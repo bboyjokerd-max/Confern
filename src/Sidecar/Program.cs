@@ -376,6 +376,15 @@ internal static class Program
         // 試用額度（2026-11-03）：`--usage-report` 與 `--usage-set feature=count`。
         // 兩條都在守衛之前——它們問的是「記帳本裡有什麼」，不是「現在能不能轉檔」，
         // 所以使用者開著托盤程式時也必須問得到（與 `--tools-list` 同一條理由）。
+        // 更新檢查（2026-11-03）：`--check-updates`。同樣在守衛之前——它問的是「外面有沒有
+        // 新版本」，與這個行程現在要不要轉檔無關，所以托盤開著時也必須問得到。
+        if (opt.CheckUpdates)
+        {
+            Native.AttachParentConsole();
+            using var updateEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            return App.RunUpdateCheck(opt, updateEvidence);
+        }
+
         if (opt.UsageReport || opt.UsageSet.Length > 0 || opt.LicenseShow ||
             opt.LicenseActivate.Length > 0 || opt.LicenseClear)
         {
@@ -669,6 +678,15 @@ internal sealed class Options
                                     a license is a plain text file, %LOCALAPPDATA%\Confern\license.txt,
                                     so it can be copied to another machine; CONFERN_LICENSE overrides
                                     the path for acceptance runs
+          --check-updates           ask the update manifest whether a newer build exists, print the
+                                    answer and exit (state=newer/current/older/failed). Exit 0 even
+                                    when the network says nothing: a failed check is not an error.
+                                    Needs a url (--update-url or UpdateUrl in settings.json); with
+                                    no url it says so and exits 4. Nothing is downloaded or run.
+          --update-url <url>        the manifest url for this run (http/https; a static JSON file:
+                                    {version, url, sha256, notes, mandatory, published})
+          --update-timeout-ms <ms>  connect+read budget for that one request (default 5000)
+                                    (CONFERN_UPDATE_CHECK overrides the cached-answer path)
           --list-formats            print what this build can read and write, then exit (same as
                                     `confern formats`; unlike --codecs it reads the declaration table
                                     and returns at once instead of probing the machine)
@@ -1155,6 +1173,20 @@ internal sealed class Options
     public string LicenseActivate = "";
     /// <summary>`--license-clear`（`confern license --clear`）：停用授權（刪掉那個檔案）。</summary>
     public bool LicenseClear;
+
+    /// <summary>
+    /// `--check-updates`：**只問一次「有沒有新版本」然後結束**（2026-11-03）。
+    ///
+    /// <para>它與常駐路徑的差別只有一個：常駐路徑會看快取（24 小時內不重問），這一條**永遠問**。
+    /// 使用者手動問的時候，他要知道的是「現在」，不是「今天早上」。</para>
+    /// </summary>
+    public bool CheckUpdates;
+
+    /// <summary>`--update-url &lt;url&gt;`：清單網址。空字串＝用設定檔的 <c>UpdateUrl</c>。</summary>
+    public string UpdateUrl = "";
+
+    /// <summary>`--update-timeout-ms &lt;ms&gt;`：連線與讀取的共用上限（預設 5000）。</summary>
+    public int UpdateTimeoutMs;
     /// <summary>`--quality` 有沒有**明打**。決定「命令列 &gt; 預設 &gt; 設定頁」那個優先序。</summary>
     public bool ConvertQualityGiven;
     /// <summary>--worker <pipeName>：以 worker 行程啟動，連回 UI 建立的具名管道（規格 §9.1）。</summary>
@@ -1501,7 +1533,17 @@ internal sealed class Options
                 case "--usage-set":
                     if (i + 1 < args.Length) { o.UsageSet = args[i + 1]; i++; }
                     break;
-                case "--license-show": o.LicenseShow = true; break;
+                case "--check-updates": o.CheckUpdates = true; break;
+        case "--update-url":
+            if (i + 1 < args.Length) { o.UpdateUrl = args[i + 1]; i++; }
+            break;
+        case "--update-timeout-ms":
+            if (i + 1 < args.Length && int.TryParse(args[i + 1], out int updMs) && updMs > 0)
+            {
+                o.UpdateTimeoutMs = updMs; i++;
+            }
+            break;
+        case "--license-show": o.LicenseShow = true; break;
                 case "--license-activate":
                     if (i + 1 < args.Length) { o.LicenseActivate = args[i + 1]; i++; }
                     break;
@@ -1880,6 +1922,10 @@ internal static class App
         // 收費功能（去背）的額度扣抵接在同一個 tick：它要讀 worker 快照才知道「成功了沒有」，
         // 而在這個行程裡問得到快照的只有週期回呼（ConversionRunner 沒有完成回呼）。
         visual.TickRequested += () => DrainQuotaRecord(evidence, runner);
+        // 更新檢查的結果要在**主執行緒**上落地（氣泡提示要動托盤視窗，日誌也要在同一個執行緒寫）。
+        // 背景執行緒只做一件會阻塞的事：連外、讀 JSON；結果排進佇列，由這個 tick 抽乾。
+        // 與上面六條同一個理由：不新增第二個計時器擁有者。
+        visual.TickRequested += () => DrainUpdateResult(evidence);
         visual.StartTick(SettingsUiLogDrainIntervalMs);
         // 這一行刻意**不**以 `settings ui:` 開頭：那個前綴的意思是「設定頁那條執行緒排過來的行」，
         // 而這一行是主執行緒自己說的（而且驗收要用 `settings ui:` 的行數來判斷抽乾有沒有生效）。
@@ -1889,6 +1935,11 @@ internal static class App
         // M1g：開機自動啟動的擁有者（規格 §8，待辦 4）。整個常駐路徑只有這一個實例，
         // 而且只有它會寫 Run 機碼。
         _startup = Autostart.Default(evidence.Line);
+
+        // 更新檢查（2026-11-03）：**唯一一個主動連外的地方**，所以它有三條自我約束——
+        // ① 沒設定網址就不連（預設就是不連）② 24 小時內不重問（看快取）
+        // ③ 永遠在背景執行緒、失敗只寫一行日誌，絕不擋啟動也絕不彈對話框。
+        StartUpdateCheck(evidence, _settings ?? new Settings());
 
         if (opt.SettingsUiLive)
         {
@@ -1944,6 +1995,10 @@ internal static class App
             // 點一列＝用使用者的預設程式打開它（打不開會寫一行日誌，不會靜靜沒反應）。
             onOpenRecent: path => RecentStore.OpenWithShell(path, evidence.Line),
             onClearRecent: () => RecentStore.Shared(evidence.Line).Clear());
+
+        // 更新檢查的氣泡提示要碰到這個視窗，而抽乾者是一個靜態方法（它是 tick 的訂閱者，
+        // 拿不到區域變數）。記在這裡而不是把它們綁在一起：托盤的擁有者仍然是這個 using。
+        _residentTray = tray;
 
         // 驗收用的「請它自己結束」：計時器在執行緒池上，所以只**張貼**托盤命令，不直接呼叫回呼
         // （直接呼叫會從錯誤的執行緒碰到托盤的視窗與選單）。關機路徑因此與選單的「結束」完全同一條。
@@ -5443,6 +5498,173 @@ internal static class App
     /// <para>兩件事都走 <see cref="UsageStore"/>：報告是「它算出來的剩餘次數」，設定是「透過它寫一份
     /// 帶正確簽章的檔案」。驗收因此可以驗真的那一條路，而不是另外做一個驗收專用的假 store。</para>
     /// </summary>
+    /// <summary>
+    /// `--check-updates`：問一次「有沒有新版本」然後結束。
+    ///
+    /// <para><b>失敗也是 exit 0</b>：斷網、公司防火牆、上游清單壞掉——這三件事都不是使用者的錯，
+    /// 也不該讓一個排程腳本或安裝程式把它當成錯誤。要判定「問到了沒有」看的是那一行
+    /// `update: state=…`。</para>
+    ///
+    /// <para>唯一的 exit 4 是**這一條命令本身不成立**：要問，卻沒有任何網址可問。</para>
+    /// </summary>
+    internal static int RunUpdateCheck(Options opt, Evidence evidence)
+    {
+        string url = opt.UpdateUrl.Length > 0 ? opt.UpdateUrl : (_settings?.UpdateUrl ?? "");
+        int timeout = opt.UpdateTimeoutMs > 0 ? opt.UpdateTimeoutMs : UpdateChecker.DefaultTimeoutMs;
+
+        evidence.Line($"update: current={Program.VersionText()} edition={ProductInfo.Edition} " +
+                      $"timeout={timeout}ms");
+        if (url.Length == 0)
+        {
+            evidence.Line("update: no url configured (pass --update-url <url> or set UpdateUrl in settings.json)");
+            Console.Error.WriteLine("confern: no update url is configured; nothing was checked");
+            return 4;
+        }
+
+        evidence.Line($"update: url='{url}'");
+        UpdateResult result = UpdateChecker.Check(url, Program.VersionText(), timeout);
+        evidence.Line($"update: {result.Describe()}");
+        if (result.Notes.Length > 0) evidence.Line($"update: notes='{result.Notes}'");
+
+        // 快取只有「真的問到東西」時才寫：一次失敗的檢查不該把上一次的好答案蓋掉。
+        if (result.State != UpdateState.Failed)
+        {
+            UpdateCacheEntry previous = UpdateCache.Read();
+            bool wrote = UpdateCache.Write(new UpdateCacheEntry(
+                Latest: result.Latest,
+                Url: result.Url,
+                Sha256: result.Sha256,
+                Notes: result.Notes,
+                Mandatory: result.Mandatory,
+                CheckedUtc: DateTimeOffset.UtcNow,
+                NotifiedVersion: previous.NotifiedVersion));
+            evidence.Line($"update cache: {(wrote ? "written" : "NOT written")} " +
+                          $"path='{UpdateCache.DefaultPath()}'");
+        }
+
+        evidence.Line("update done: ok=True");
+        return 0;
+    }
+    /// <summary>更新檢查的結果從背景執行緒交到主執行緒的那一條佇列（抽乾者是既有的 resident tick）。</summary>
+    private static readonly ConcurrentQueue<UpdateResult> PendingUpdateResults = new();
+
+    /// <summary>常駐路徑的托盤（只有它一個實例）。抽乾者靠它彈氣泡提示；沒有它時一切照常，只是不提示。</summary>
+    private static TrayIcon? _residentTray;
+
+    /// <summary>
+    /// 起一次背景更新檢查（常駐路徑）。<b>它一定馬上回來</b>：連外發生在另一條執行緒上。
+    ///
+    /// <para>四個「不」：</para>
+    /// <list type="number">
+    ///   <item>沒設定網址就不連（<c>UpdateUrl</c> 預設空字串）。</item>
+    ///   <item>關掉開關就不連（<c>CheckUpdates=false</c>）。</item>
+    ///   <item>24 小時內不重問（快取還新鮮就用快取，只寫一行日誌）。</item>
+    ///   <item>失敗**不寫快取**、不提示、不打擾——斷網不是使用者要處理的事。</item>
+    /// </list>
+    /// </summary>
+    private static void StartUpdateCheck(Evidence evidence, Settings settings)
+    {
+        string url = (settings.UpdateUrl ?? "").Trim();
+        if (!settings.CheckUpdates)
+        {
+            evidence.Line("update: check disabled in settings (CheckUpdates=false)");
+            return;
+        }
+        if (url.Length == 0)
+        {
+            evidence.Line("update: no url configured, nothing to check " +
+                          $"(cache: {UpdateCache.Describe(UpdateCache.Read())})");
+            return;
+        }
+
+        UpdateCacheEntry cached = UpdateCache.Read();
+        if (UpdateCache.IsFresh(cached, out int ageMinutes))
+        {
+            evidence.Line($"update: using a cached answer ({ageMinutes}m old, < {UpdateCache.MaxAgeHours}h), " +
+                          $"not asking again: {UpdateCache.Describe(cached)}");
+            // 快取裡如果已經有一個「沒為它彈過」的新版本，還是要提示——否則使用者昨天沒開機、
+            // 今天才打開，那個提示就永遠不會出現。
+            if (cached.Latest.Length > 0 && UpdateVersion.Compare(cached.Latest, Program.VersionText()) > 0 &&
+                cached.NotifiedVersion != cached.Latest)
+            {
+                PendingUpdateResults.Enqueue(new UpdateResult(
+                    UpdateState.Newer, Program.VersionText(), cached.Latest, cached.Url,
+                    cached.Sha256, cached.Notes, cached.Mandatory, ""));
+            }
+            return;
+        }
+
+        string current = Program.VersionText();
+        int timeout = UpdateChecker.DefaultTimeoutMs;
+        var worker = new Thread(() =>
+        {
+            UpdateResult result = UpdateChecker.Check(url, current, timeout);
+            PendingUpdateResults.Enqueue(result);
+        })
+        {
+            IsBackground = true,
+            Name = "confern-update-check"
+        };
+        worker.Start();
+        evidence.Line($"update: checking '{url}' in the background (timeout={timeout}ms, cache={UpdateCache.Describe(cached)})");
+    }
+
+    /// <summary>
+    /// 把背景檢查的結果落地（**主執行緒**：日誌與氣泡提示都只在這裡發生）。
+    /// 每次 tick 最多處理一筆——正常情況下一整天只有一筆。
+    /// </summary>
+    private static void DrainUpdateResult(Evidence evidence)
+    {
+        if (!PendingUpdateResults.TryDequeue(out UpdateResult? result)) return;
+        evidence.Line($"update: {result.Describe()}");
+        if (result.Notes.Length > 0) evidence.Line($"update: notes='{result.Notes}'");
+
+        if (result.State == UpdateState.Failed)
+        {
+            // 失敗**不寫快取**：一次斷網不該把上一次的好答案蓋掉，也不該讓下一次啟動以為問過了。
+            evidence.Line("update: check failed; this is not an error and nothing is shown to the user");
+            return;
+        }
+
+        UpdateCacheEntry previous = UpdateCache.Read();
+        bool wrote = UpdateCache.Write(new UpdateCacheEntry(
+            Latest: result.Latest,
+            Url: result.Url,
+            Sha256: result.Sha256,
+            Notes: result.Notes,
+            Mandatory: result.Mandatory,
+            CheckedUtc: DateTimeOffset.UtcNow,
+            NotifiedVersion: previous.NotifiedVersion));
+        evidence.Line($"update cache: {(wrote ? "written" : "NOT written")} path='{UpdateCache.DefaultPath()}'");
+
+        if (!result.IsNewer)
+        {
+            evidence.Line("update: nothing to announce (the running build is not older than the published one)");
+            return;
+        }
+
+        if (previous.NotifiedVersion == result.Latest)
+        {
+            evidence.Line($"update: {result.Latest} was already announced; not asking again");
+            return;
+        }
+
+        // 氣泡提示：托盤是純 Win32 視窗，這裡走 Shell_NotifyIconW 的 NIF_INFO。
+        // 它**只是提示**——不下載、不執行、不開啟任何東西（開下載頁是使用者自己按的事）。
+        bool shown = _residentTray?.Balloon($"Confern {result.Latest}", "A newer version is available. Click the tray icon to open the download page.") == true;
+        evidence.Line($"update: balloon shown={shown} version={result.Latest} url='{result.Url}'");
+        if (shown)
+        {
+            UpdateCache.Write(new UpdateCacheEntry(
+                Latest: result.Latest,
+                Url: result.Url,
+                Sha256: result.Sha256,
+                Notes: result.Notes,
+                Mandatory: result.Mandatory,
+                CheckedUtc: DateTimeOffset.UtcNow,
+                NotifiedVersion: result.Latest));
+        }
+    }
     internal static int RunUsageCommand(Options opt, Evidence evidence)
     {
 #if CONFERN_FREE_EDITION

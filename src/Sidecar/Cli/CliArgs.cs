@@ -342,6 +342,11 @@ internal static class CliArgs
         "--trigger-key-probe",
         "--license-activate",
         "--usage-set",
+        // 2026-11-03: the update check. Both take a value, so both must be listed here -- the suite
+        // (verify-cli S8.1) compares this table against what Options.Parse actually consumes, and a
+        // missing entry means the normalisation pass never recognises the flag.
+        "--update-timeout-ms",
+        "--update-url",
         "--settings-ui-dump",
         "--settings-ui-dump-after-palette",
         "--settings-ui-dump-popup",
