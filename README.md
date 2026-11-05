@@ -4,6 +4,10 @@
 
 [**下載最新版**](https://github.com/bboyjokerd-max/confern/releases/latest) · [授權 MIT](LICENSE) · [回報問題](https://github.com/bboyjokerd-max/confern/issues)
 
+![拖到輪盤上就開始轉檔](docs/demo/confern-demo.gif)
+
+<sub>↑ 實際操作畫面（[高畫質 mp4](docs/demo/confern-demo.mp4)）　錄製於 2026-11-03，內容就是這個版本的行為。</sub>
+
 ---
 
 ## 這是什麼
