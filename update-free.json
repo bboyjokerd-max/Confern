@@ -1,10 +1,10 @@
 {
-  "version": "0.1.0",
-  "url": "https://github.com/bboyjokerd-max/confern/releases/download/v0.1.0/Confern-Free-Setup-0.1.0.exe",
-  "sha256": "BD478F8D8CC696DBFD10A3BFAFD23C875B6D241EC2984308272AB86A32AA4294",
-  "notes": "第一個公開版本。拖到輪盤上就轉檔；付費版多一顆 CUTOUT（去背），免費開源版沒有那一顆。授權 MIT。",
-  "mandatory": false,
-  "published": "2026-11-05",
-  "edition": "free",
-  "size": "7.38 MB"
+    "version":  "0.1.0",
+    "url":  "https://github.com/bboyjokerd-max/confern/releases/download/v0.1.0/Confern-Free-Setup-0.1.0.exe",
+    "sha256":  "BD478F8D8CC696DBFD10A3BFAFD23C875B6D241EC2984308272AB86A32AA4294",
+    "notes":  "第一個公開版本。  把圖片或影片拖到輪盤上就開始轉檔；付費版多一顆 CUTOUT（AI 去背），免費開源版沒有那一顆工具。  授權：MIT。付費版是信任制——任何人都能自己編一個無限制的去背版，我們選擇這樣。",
+    "mandatory":  false,
+    "published":  "2026-11-05",
+    "edition":  "free",
+    "size":  "7.38 MB"
 }
