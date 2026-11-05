@@ -4,9 +4,9 @@
 
 [**⬇ Download for Windows**](https://github.com/bboyjokerd-max/Confern/releases/latest) · [繁體中文](README.zh-Hant.md) · [Full details](docs/README.technical.md) · [Report a bug](https://github.com/bboyjokerd-max/Confern/issues)
 
-![Drag a file onto the wheel to convert it](docs/demo/confern-demo.gif)
+![Drag a file onto the wheel to convert it](docs/demo/confern-demo-en.gif)
 
-<sub>Real interaction, recorded 2026-11-03 ([higher quality mp4](docs/demo/confern-demo.mp4)).</sub>
+<sub>Real interaction, recorded 2026-11-03 ([higher quality mp4](docs/demo/confern-demo-en.mp4)).</sub>
 
 ---
 
