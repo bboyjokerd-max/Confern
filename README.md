@@ -16,12 +16,12 @@ First layer: what the file can become. Second layer: what to do with it.
 
 <table>
 <tr>
-<td align="center"><img src="docs/images/wheel-paid.png" width="320"><br><sub><b>1st layer</b> — drop an image, the slices are its target formats</sub></td>
-<td align="center"><img src="docs/images/wheel-tools-paid.png" width="320"><br><sub><b>2nd layer</b> — convert, crop, merge, <b>CUTOUT</b></sub></td>
+<td align="center"><img src="docs/images/en/wheel-paid.png" width="320"><br><sub><b>1st layer</b> — drop an image, the slices are its target formats</sub></td>
+<td align="center"><img src="docs/images/en/wheel-tools-paid.png" width="320"><br><sub><b>2nd layer</b> — convert, crop, merge, <b>CUTOUT</b></sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/images/wheel-video.png" width="320"><br><sub>Drop a video and the slices change with it</sub></td>
-<td align="center"><img src="docs/images/wheel-tools-free.png" width="320"><br><sub>2nd layer in the <b>free</b> build — no CUTOUT slice</sub></td>
+<td align="center"><img src="docs/images/en/wheel-video.png" width="320"><br><sub>Drop a video and the slices change with it</sub></td>
+<td align="center"><img src="docs/images/en/wheel-tools-free.png" width="320"><br><sub>2nd layer in the <b>free</b> build — no CUTOUT slice</sub></td>
 </tr>
 </table>
 
@@ -29,12 +29,12 @@ The two second-layer images are genuinely different files (sha256 `42F6A236…` 
 
 <table>
 <tr>
-<td align="center"><img src="docs/images/wheel-paid-dark.png" width="320"><br><sub>Same wheel over a dark background</sub></td>
-<td align="center"><img src="docs/images/settings.png" width="320"><br><sub>Settings — right-click the tray icon</sub></td>
+<td align="center"><img src="docs/images/en/wheel-paid-dark.png" width="320"><br><sub>Same wheel over a dark background</sub></td>
+<td align="center"><img src="docs/images/en/settings.png" width="320"><br><sub>Settings — right-click the tray icon</sub></td>
 </tr>
 </table>
 
-![Crop window](docs/images/crop.png)
+![Crop window](docs/images/en/crop.png)
 
 <sub>Crop: drag to decide what to keep. Every image is the product's own offscreen render, not a screenshot of a desktop.</sub>
 
