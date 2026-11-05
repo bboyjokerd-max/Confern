@@ -4697,3 +4697,16 @@ free  HTTP 200  version=0.1.0  edition=free  size=7.38 MB
    產品寫壞了。產品寫的是 UTF-8，是我的讀取方式錯。**驗證工具本身也要驗證。**
 5. `gh release view --jq` 的運算式被 PowerShell 拆成多個參數（`accepts at most 1 arg(s)`）⇒ 改用
    `Invoke-WebRequest -Method Head` 直接驗下載連結，反而更接近使用者實際會發生的事。
+
+### 補：首頁說明（2026-11-05 使用者反映「github頁面都沒有專案說明嗎?」）
+
+確實沒有。第一次推送只送了 305 個檔案，**根目錄沒有 README.md**，所以 GitHub 首頁一片空白、
+描述欄也是空的。已補：
+
+- `README.md`（4.1 KB）：這是什麼、兩個版本的差異表、系統需求、安裝、五個常用動作、命令列、
+  從原始碼建置、專案狀態、授權（含「任何人都能自編無限制去背版」的誠實說明），末尾一段英文摘要。
+- repo 描述（一句話）＋ 14 個主題標籤（file-converter、drag-and-drop、wpf、background-removal…）。
+
+**截圖還沒放**：現有的輪盤 dump 是 2026-10-01／09-30 的舊版視覺（方向 D 之前），而
+`--wheel-dump` 這次在無參數下卡住（逾時 5 分鐘沒產檔）。寧可沒有圖，也不要放一張跟現在不一樣的
+畫面。下一版再補一張當下的離屏 dump。
