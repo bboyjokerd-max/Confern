@@ -1,128 +1,124 @@
 # Confern
 
-**把檔案拖到輪盤上，就開始轉檔。** Windows 10/11 x64 的桌面轉檔工具：拖進來、轉一下、選格式，不用開任何視窗。
+**Hold Alt, drag a file, drop it on the format you want.** A Windows 10/11 desktop converter with no main window: a radial menu appears next to your cursor, you pick a target format, it converts.
 
-[**下載最新版**](https://github.com/bboyjokerd-max/confern/releases/latest) · [授權 MIT](LICENSE) · [回報問題](https://github.com/bboyjokerd-max/confern/issues)
+[**Download**](https://github.com/bboyjokerd-max/confern/releases/latest) · [MIT licence](LICENSE) · [Report a bug](https://github.com/bboyjokerd-max/confern/issues) · **English** | [繁體中文](README.zh-Hant.md)
 
-![拖到輪盤上就開始轉檔](docs/demo/confern-demo.gif)
+![Drag a file onto the wheel to convert it](docs/demo/confern-demo.gif)
 
-<sub>↑ 實際操作畫面（[高畫質 mp4](docs/demo/confern-demo.mp4)）　錄製於 2026-11-03，內容就是這個版本的行為。</sub>
+<sub>↑ Real interaction, recorded 2026-11-03 ([higher quality mp4](docs/demo/confern-demo.mp4)).</sub>
 
 ---
 
-## 畫面
+## What it is
 
-拖什麼檔案，輪盤就長什麼樣子。
+While you drag a file with the trigger key held down (Alt by default), a wheel appears beside the cursor. Its slices are **the formats that file can become**. Drop on a slice to convert; drop on the centre to do nothing. The result lands next to the original.
 
-<table>
-<tr>
-<td align="center"><img src="docs/images/wheel-paid.png" width="300"><br><sub>拖的是圖片：扇形就是這張圖能變成的格式</sub></td>
-<td align="center"><img src="docs/images/wheel-video.png" width="300"><br><sub>拖的是影片，扇形跟著換一批</sub></td>
-</tr>
-<tr>
-<td align="center"><img src="docs/images/wheel-paid-dark.png" width="300"><br><sub>深色桌布下的同一顆輪盤</sub></td>
-<td align="center"><img src="docs/images/settings.png" width="300"><br><sub>設定頁（右鍵托盤圖示）</sub></td>
-</tr>
-</table>
-
-![裁切：拖曳決定要留下哪一塊](docs/images/crop.png)
-
-<sub>裁切視窗：決定要留下哪一塊</sub>
-
-
-<sub>以上都是產品自己的離屏渲染（`--wheel-demo --wheel-dump`、`--settings-ui-dump`、`--crop-ui-dump`），不是螢幕截圖。</sub>
-
-## 這是什麼
-
-按住觸發鍵（預設 Alt）拖著檔案移動時，一個圓形輪盤會出現在游標旁邊，上面是**這個檔案可以轉成的格式**。
-拖到要的扇形上放開，就開始轉；拖到中心，什麼都不做。轉好的檔案出現在原檔旁邊。
-
-沒有主視窗、沒有佇列、沒有要學的介面。它是一個拖曳手勢，不是一個應用程式。
+No main window. No queue. No interface to learn. It is a drag gesture, not an application.
 
 | | |
 |---|---|
-| 影像 | PNG · JPG · BMP · TIF · PDF · WebP（含透明背景） |
-| 影片 | 常見格式互轉、抽音訊 |
-| 文件 | 影像轉 PDF |
-| AI 去背 | **CUTOUT**：拖進來，拿走只剩主角的透明 PNG（付費版） |
+| Images | PNG · JPG · BMP · TIF · PDF · WebP (transparency preserved) |
+| Video | common formats both ways, audio extraction |
+| Documents | images to PDF |
+| AI cutout | **CUTOUT**: drop a photo, get a transparent PNG of the subject (paid edition) |
 
-## 兩個版本，同一份原始碼
+## Two editions, one source
 
-這不是「閹割版 vs 完整版」的行銷話術，是**少一顆工具**。
+This is not "crippled vs complete". The free edition is simply **one tool short**.
 
-| | 免費開源版 | 付費版 |
+| | Free / open source | Paid |
 |---|---|---|
-| 拖曳輪盤轉檔 | ✓ | ✓ |
-| 影片、PDF、批次 | ✓ | ✓ |
-| **CUTOUT（AI 去背）** | — 沒有這顆工具 | ✓ 附 10 次免費額度 |
-| 價格 | 免費 | 授權金鑰，離線驗證 |
+| Wheel conversions | yes | yes |
+| Video, PDF, batch | yes | yes |
+| **CUTOUT (AI background removal)** | does not exist in this build | 10 free uses included |
+| Price | free | licence key, verified offline |
 
-免費版**沒有**去背功能，不是鎖住。少一顆扇形，其餘完全一樣。
+The free edition does not have a locked cutout feature; it has one fewer slice on the wheel.
 
-## 系統需求
+## Screens
 
-- Windows 10 或 11，x64
-- [.NET 8 桌面執行階段](https://dotnet.microsoft.com/download/dotnet/8.0)（安裝程式會檢查，沒有會提示）
+The wheel shows what the dragged file can become. Choose a format and the wheel turns again — **the second layer is what to do with it**.
 
-## 安裝
+<table>
+<tr>
+<td align="center"><img src="docs/images/wheel-paid.png" width="300"><br><sub><b>First layer</b>: an image was dragged, so the slices are its target formats</sub></td>
+<td align="center"><img src="docs/images/wheel-tools-paid.png" width="300"><br><sub><b>Second layer</b>: convert, crop, merge, <b>CUTOUT</b>…</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/wheel-video.png" width="300"><br><sub>Drag a video and the slices change with it</sub></td>
+<td align="center"><img src="docs/images/wheel-tools-free.png" width="300"><br><sub>Second layer in the <b>free</b> build — no CUTOUT slice</sub></td>
+</tr>
+</table>
 
-1. 到 [Releases](https://github.com/bboyjokerd-max/confern/releases/latest) 下載安裝檔
-2. 執行，**不需要管理員權限**（裝在使用者資料夾）
-3. 開始拖檔案
+The two second-layer images are genuinely different files (sha256 `42F6A236…` vs `23750A7D…`): that is what "one tool short" looks like.
 
-解除安裝時會問你：要不要一起刪掉設定與授權（預設保留）。
+<table>
+<tr>
+<td align="center"><img src="docs/images/wheel-paid-dark.png" width="300"><br><sub>Same wheel over a dark background</sub></td>
+<td align="center"><img src="docs/images/settings.png" width="300"><br><sub>Settings (right-click the tray icon)</sub></td>
+</tr>
+</table>
 
-## 使用
+![Crop window](docs/images/crop.png)
 
-| 動作 | 怎麼做 |
+<sub>Crop: drag to decide what to keep. Every image above is the product's own offscreen render (`--wheel-demo --wheel-dump`, `--wheel-tools`, `--settings-ui-dump`, `--crop-ui-dump`), not a screenshot of a desktop.</sub>
+
+## Requirements
+
+- Windows 10 or 11, x64
+- [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (the installer checks and tells you)
+
+## Install
+
+1. Get the installer from [Releases](https://github.com/bboyjokerd-max/confern/releases/latest)
+2. Run it — **no administrator rights needed** (it installs per user)
+3. Start dragging files
+
+Uninstalling asks whether to remove your settings and licence too (kept by default).
+
+## Using it
+
+| Action | How |
 |---|---|
-| 叫出輪盤 | 按住 **Alt**，拖著檔案移動 |
-| 選格式 | 拖到對應的扇形上放開 |
-| 取消 | 拖到圓盤中心放開，或按 `Esc` |
-| 監看資料夾 | 設定某個資料夾，丟進去的檔案自動轉 |
-| 批次 | 一次拖多個檔案進來 |
-| 設定 | 右鍵托盤圖示 |
+| Show the wheel | hold **Alt** and drag a file |
+| Pick a format | drop on that slice |
+| Cancel | drop on the centre disc, or press `Esc` |
+| Watch a folder | point the setting at it and forget about it |
+| Batch | drag several files at once |
+| Settings | right-click the tray icon |
 
-轉好的檔案放在**原檔旁邊**，檔名相同、副檔名不同。原檔不會被動到。
+Converted files are written **next to the original** with the same name and a new extension. The original is never modified.
 
-## 命令列
+## Command line
 
-產品自己就是一支可診斷的命令列工具（GUI 沒有主控台，證據寫在日誌與 stderr）：
-
-```
-Confern.exe formats                     列出這台機器支援的格式
-Confern.exe convert in.png -o out.jpg   轉一個檔案
-Confern.exe check-updates               問一次有沒有新版本
-Confern.exe license                     授權狀態
-Confern.exe --help                      全部旗標
-```
-
-## 從原始碼建置
+The product is its own diagnostic tool (it is a GUI process, so evidence goes to stderr and the log file):
 
 ```
-dotnet build src\Sidecar\Sidecar.csproj -c Release                 # 付費版
-dotnet build src\Sidecar\Sidecar.csproj -c Release -p:Edition=Free # 免費版
+Confern.exe formats                     list the formats this machine supports
+Confern.exe convert in.png -o out.jpg   convert one file
+Confern.exe check-updates               ask once whether a newer build exists
+Confern.exe license                     licence state and remaining uses
+Confern.exe --help                      every flag
 ```
 
-需要 .NET 8 SDK。安裝檔用 Inno Setup：`powershell -File tools\build-installer.ps1`。
+## Build from source
 
-## 專案狀態
+```
+dotnet build src\Sidecar\Sidecar.csproj -c Release                 # paid edition
+dotnet build src\Sidecar\Sidecar.csproj -c Release -p:Edition=Free # free edition
+```
 
-早期但可用（`0.1.0`）。驗收是 20 套自動化套件、687 個檢查，跑在真實的視窗與檔案上——
-包括「拖曳途中才拿得到酬載」這種只有實際拖過才知道的事。
+Requires the .NET 8 SDK. Installers: `powershell -File tools\build-installer.ps1` (Inno Setup).
 
-`docs/` 裡有完整的設計規格、逐日進度與一次「假故障稽核」（哪些斷言其實永遠不會紅）。
+## Status
 
-## 授權
+Early but usable (`0.1.0`). Verification is 20 automated suites and 687 checks running against real windows and real files — including things you only learn by actually dragging, like "the payload is only reachable mid-drag".
 
-[MIT](LICENSE)。你可以自由使用、修改、再散布，包含商業用途。
+`docs/` holds the design spec, a daily progress log, and a falsifiability audit (which assertions could never fail).
 
-**誠實說明**：授權是 MIT，所以任何人都能自己編一個沒有 10 次限制的去背版。
-付費版是信任制——我們選擇這樣，因為擋不住的事寫在文件裡比寫在程式裡誠實。
+## Licence
 
----
+[MIT](LICENSE). Use it, modify it, redistribute it, sell it.
 
-<sub>English: Confern is a drag-and-drop file converter for Windows. Hold Alt, drag a file, and a
-radial menu appears with the formats that file can become; drop on a slice to convert. No main
-window. The paid edition adds CUTOUT (AI background removal); the free, open-source edition simply
-does not have that one tool. MIT licensed.</sub>
+**Plainly**: MIT means anyone can build a cutout with no 10-use limit. The paid edition is an honour system — we would rather write that here than pretend a lock exists.
