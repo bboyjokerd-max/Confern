@@ -4710,3 +4710,14 @@ free  HTTP 200  version=0.1.0  edition=free  size=7.38 MB
 **截圖還沒放**：現有的輪盤 dump 是 2026-10-01／09-30 的舊版視覺（方向 D 之前），而
 `--wheel-dump` 這次在無參數下卡住（逾時 5 分鐘沒產檔）。寧可沒有圖，也不要放一張跟現在不一樣的
 畫面。下一版再補一張當下的離屏 dump。
+
+### 補：演示動畫（2026-11-05 使用者問「之前做的演示動畫沒放?」）
+
+`docs/demo/confern-demo.gif`（360×430、101 格、415 KB、2026-11-03 錄製）**一直都在 repo 裡，只是
+沒有出現在 README**——等於只有知道路徑的人看得到。已放進 README 第一屏，附 mp4 高畫質連結。
+
+兩個事實：GitHub 的 Markdown **會**內嵌 GIF，但**不會**播 mp4（要嘛轉 GIF、要嘛把 mp4 掛成
+release 資產再連）；驗證方式是抓 `raw.githubusercontent.com/.../confern-demo.gif` 看 HTTP 200。
+
+這和「README 是一片空白」是同一個毛病：**檔案存在 ≠ 別人看得到**。以後加素材，驗收看「渲染後的
+第一屏」而不是「git ls-files 裡有沒有」。
