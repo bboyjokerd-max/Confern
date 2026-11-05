@@ -73,9 +73,25 @@ Say "version $Version (from $(if ($Version) { 'the request or Sidecar.csproj' })
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { Die "the version must be major.minor.patch (got '$Version')" 2 }
 
 # ------------------------------------------------------------------------------------- 2b. the notes
+if ($Notes -match '[^\x00-\x7F]') {
+    # 2026-11-05: PowerShell 5.1 hands -File arguments over in the system ANSI code page, so a
+    # Traditional Chinese -Notes arrived as mojibake and was published that way. The manifest is a
+    # UTF-8 file, so the fix is to keep the prose in dist\release\notes.txt and pass no -Notes.
+    Write-Host "release: WARNING: -Notes contains non-ASCII text. Windows passes it in the ANSI code" -ForegroundColor Yellow
+    Write-Host "release:          page, which mangles it. Put the notes in dist\release\notes.txt (UTF-8)" -ForegroundColor Yellow
+    Write-Host "release:          and run without -Notes instead." -ForegroundColor Yellow
+}
 if ($Notes -eq '') {
     $notesFile = Join-Path $root 'dist\release\notes.txt'
     if (Test-Path -LiteralPath $notesFile) { $Notes = (Get-Content -LiteralPath $notesFile -Raw -Encoding UTF8).Trim() }
+}
+if ($Notes -match '[^\x00-\x7F]') {
+    # 2026-11-05: PowerShell 5.1 hands -File arguments over in the system ANSI code page, so a
+    # Traditional Chinese -Notes arrived as mojibake and was published that way. The manifest is a
+    # UTF-8 file, so the fix is to keep the prose in dist\release\notes.txt and pass no -Notes.
+    Write-Host "release: WARNING: -Notes contains non-ASCII text. Windows passes it in the ANSI code" -ForegroundColor Yellow
+    Write-Host "release:          page, which mangles it. Put the notes in dist\release\notes.txt (UTF-8)" -ForegroundColor Yellow
+    Write-Host "release:          and run without -Notes instead." -ForegroundColor Yellow
 }
 if ($Notes -eq '') {
     Die "no release notes. Pass -Notes 'what changed' or write dist\release\notes.txt first (a release whose notes say nothing is worse than no release)" 2

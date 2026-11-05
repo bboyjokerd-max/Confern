@@ -4653,3 +4653,47 @@ manifest 裡的 `url` 是可以**事先算出來**的（`releases/download/v0.1.
    資料夾找 `settings-seed.json` 一定找不到。真相要在**安裝後的使用者資料夾**看（而且必須先把
    真實的 `settings.json` 移開，否則 `onlyifdoesntexist` 讓你看不到任何東西）。
    教訓：驗證「安裝會寫 A」，就要去**A 的實際位置**看，不是去建置的中繼資料夾看。
+
+---
+
+## 2026-11-05 · 上線了：第一個公開版本
+
+**`https://github.com/bboyjokerd-max/confern`** · 下載頁 **`https://github.com/bboyjokerd-max/confern/releases/tag/v0.1.0`**
+
+| 項目 | 內容 |
+|---|---|
+| repo | `bboyjokerd-max/confern`（public、MIT） |
+| release | `v0.1.0`：`Confern-Setup-0.1.0.exe` 18.52 MB、`Confern-Free-Setup-0.1.0.exe` 7.38 MB |
+| 更新清單 | `update-paid.json` / `update-free.json` 放在 **main 分支根目錄**（commit `cf858b6`） |
+| 授權 | GitHub CLI 裝置碼流程（`gh auth login --web`），憑證在 `%LOCALAPPDATA%\GitHubCli`，可隨時撤銷 |
+| git 身分 | `bboyjokerd-max <269755816+bboyjokerd-max@users.noreply.github.com>`（不外洩真信箱） |
+| 分支 | 本機 `master` 改名 `main`，與 GitHub 預設一致 |
+
+### 端到端驗證（不是「應該可以」，是實際抓了）
+
+```
+paid  HTTP 200  version=0.1.0  edition=paid  size=18.52 MB
+free  HTTP 200  version=0.1.0  edition=free  size=7.38 MB
+下載連結 Confern-Setup-0.1.0.exe       HTTP 200  18.52 MB
+下載連結 Confern-Free-Setup-0.1.0.exe  HTTP 200   7.38 MB
+產品自己問（用安裝檔種進去的網址）：
+  update: url='https://raw.githubusercontent.com/bboyjokerd-max/confern/main/update-paid.json'
+  update: state=current current=0.1.0 latest=0.1.0
+  update: notes='第一個公開版本。 …'   ← 中文完好
+```
+
+`state=current` 正是「同一版」該有的答案：清單通了、版本比對正確、中文沒壞、而且**沒有打擾任何人**。
+
+### 這一段踩到的坑
+
+1. **PowerShell 5.1 的 `-File` 參數是系統 ANSI 碼頁**：我用 `-Notes "第一個公開版本…"` 傳中文，
+   進到腳本裡已經變成亂碼，於是**第一版清單的 `notes` 是亂碼**（`蝚砌???`）。修法：備註一律寫進
+   `dist\release\notes.txt`（UTF-8）再跑，並在 `release.ps1` 偵測到非 ASCII 的 `-Notes` 時印警告。
+2. **`gh` 的 `-ErrorAction`**：那是 PowerShell 的參數，傳給 `gh` 會被當成旗標 → `unknown shorthand
+   flag: 'E'`。呼叫外部程式時不要把 PowerShell 參數混進去。
+3. **`gh repo create --source=.` 的「.」是**進程的當前目錄**，不是 repo**：第一次建 repo 失敗
+   （`current directory is not a git repository`）。工具呼叫的 workdir 與腳本假設的工作目錄是兩回事。
+4. **我自己讀錯編碼**：驗證時用 `Get-Content` 沒指定 `-Encoding UTF8` 讀產品的日誌，看到亂碼就以為
+   產品寫壞了。產品寫的是 UTF-8，是我的讀取方式錯。**驗證工具本身也要驗證。**
+5. `gh release view --jq` 的運算式被 PowerShell 拆成多個參數（`accepts at most 1 arg(s)`）⇒ 改用
+   `Invoke-WebRequest -Method Head` 直接驗下載連結，反而更接近使用者實際會發生的事。
