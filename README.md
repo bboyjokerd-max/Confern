@@ -12,25 +12,23 @@
 
 ## 畫面
 
-**兩個輪盤，同一支程式。** 差別只有一顆扇形——免費開源版沒有 CUTOUT（去背）。
+拖什麼檔案，輪盤就長什麼樣子。
 
 <table>
 <tr>
-<td align="center"><img src="docs/images/wheel-paid.png" width="300"><br><sub><b>付費版</b>：多一顆 CUTOUT（AI 去背）</sub></td>
-<td align="center"><img src="docs/images/wheel-free.png" width="300"><br><sub><b>免費開源版</b>：同一支程式，少那一顆</sub></td>
+<td align="center"><img src="docs/images/wheel-paid.png" width="300"><br><sub>拖的是圖片：扇形就是這張圖能變成的格式</sub></td>
+<td align="center"><img src="docs/images/wheel-video.png" width="300"><br><sub>拖的是影片，扇形跟著換一批</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/images/wheel-video.png" width="300"><br><sub>拖的是影片，扇形就變成影音格式</sub></td>
 <td align="center"><img src="docs/images/wheel-paid-dark.png" width="300"><br><sub>深色桌布下的同一顆輪盤</sub></td>
+<td align="center"><img src="docs/images/settings.png" width="300"><br><sub>設定頁（右鍵托盤圖示）</sub></td>
 </tr>
 </table>
 
-<table>
-<tr>
-<td align="center"><img src="docs/images/settings.png" width="360"><br><sub>設定頁（右鍵托盤圖示）</sub></td>
-<td align="center"><img src="docs/images/crop.png" width="360"><br><sub>裁切：拖曳決定要留下哪一塊</sub></td>
-</tr>
-</table>
+![裁切：拖曳決定要留下哪一塊](docs/images/crop.png)
+
+<sub>裁切視窗：決定要留下哪一塊</sub>
+
 
 <sub>以上都是產品自己的離屏渲染（`--wheel-demo --wheel-dump`、`--settings-ui-dump`、`--crop-ui-dump`），不是螢幕截圖。</sub>
 
