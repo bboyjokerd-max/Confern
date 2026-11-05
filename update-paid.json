@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "url": "https://github.com/bboyjokerd-max/confern/releases/download/v0.1.0/Confern-Setup-0.1.0.exe",
+  "sha256": "2FC7FBB38698BA5F2F7C0A4960E0A6E60DEEF9D82269EA3A7D32F679E81A554D",
+  "notes": "第一個公開版本。拖到輪盤上就轉檔；付費版多一顆 CUTOUT（去背），免費開源版沒有那一顆。授權 MIT。",
+  "mandatory": false,
+  "published": "2026-11-05",
+  "edition": "paid",
+  "size": "18.52 MB"
+}
