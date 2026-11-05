@@ -4762,3 +4762,24 @@ release 資產再連）；驗證方式是抓 `raw.githubusercontent.com/.../conf
   ⇒ 判準：精簡頁面先砍文字、後砍圖。
 - **兩張一樣的圖不能當對比**：免費／付費第一層 dump 的 sha256 完全相同（`21C4D0B0…`），我原本要寫「免費版少一顆」，
   發現後撤掉宣稱；改用第二層（`42F6A236…` vs `23750A7D…`）才有真差異。
+
+### 補：`轉檔逾時` 已改成跟著語言（2026-11-05 晚）
+
+上一段記的「仍未英文的產品字串」修好了，而且**根因不只一個**：
+
+1. `Program.cs` 的 `--progress-dump` 第五種變體**寫死字面值**，沒走 `UiStrings`；`svc.timeout` 這個鍵其實八種語言都有。
+2. 只改那一行**不夠**：這條 dump 路徑在**載入設定之前就 return**，所以 `UiStrings.Current` 還是系統語言。
+   （和先前 `--check-updates` 看不到種進去網址的 bug 是同一種形狀：診斷路徑跑在正常啟動流程之前。）
+   ⇒ 新增 `LoadSettingsForDump(opt, evidence)`，載入設定（`SettingsStore.Load` 會順便套用 Language），設定壞掉只記一行不讓診斷失敗。
+
+驗證（同一支 exe，只換 settings 檔的 `Language`）：
+
+```
+en      -> PASS progress 'Conversion timed out'   hash F4FD904629
+zh-Hant -> PASS progress '轉檔逾時'               hash 45DFFE7932
+```
+
+全套掃描：**20 套件、688 檢查、662 通過、0 失敗、26 未定**——與改動前同一組數字，m1h（progress dump 那個套件）62 檢查 0 失敗。
+
+**刻意沒有重建安裝檔**：`v0.1.0` 的 release 資產已被兩份 `update-*.json` 綁住 sha256，現在重打會讓清單與成品不一致。
+這個修正會跟著下一個版本發佈。

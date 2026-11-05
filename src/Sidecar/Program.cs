@@ -112,7 +112,27 @@ internal static class Program
         {
             Native.AttachParentConsole();
             using var dumpEvidence = new Evidence(opt.LogPath ?? Evidence.DefaultPath(), opt.Quiet);
+            // 這個 dump 會在載入設定之前就 return，而設定檔裡有 Language。不先載入的話，
+            // `UiStrings.Current` 還是系統語言，於是英文介面下 dump 出來的字仍是中文——
+            // 那正是這張圖存在的目的（視覺證據要跟介面一致），所以先載入再畫。
+            LoadSettingsForDump(opt, dumpEvidence);
             return App.RunProgressDump(opt.ProgressDump, dumpEvidence);
+        }
+
+        /// <summary>
+        /// 給「在正常啟動流程之前就 return」的診斷路徑用：把設定讀進來，`SettingsStore.Load`
+        /// 會順便套用 <c>Language</c>（見 <c>UiStrings.SetLanguage</c>）。設定壞掉不該讓診斷失敗。
+        /// </summary>
+        static void LoadSettingsForDump(Options opt, Evidence evidence)
+        {
+            try
+            {
+                SettingsStore.Load(string.IsNullOrEmpty(opt.SettingsFile) ? null : opt.SettingsFile, evidence.Line);
+            }
+            catch (Exception ex)
+            {
+                evidence.Line($"settings: cannot load for dump, keeping {UiStrings.Current}: {ex.Message}");
+            }
         }
 
         // 規格 §7.3 的失敗清單 dump。放在 `--convert` **之前**：清單的列資料要能來自
@@ -7854,7 +7874,7 @@ internal static class App
             ("running",  "3/8",        3, 8, false, 0, 255),
             ("success",  "✓ 8",        8, 8, true,  0, 255),
             ("partial",  "✓ 8 / ✗ 2",  10, 10, true, 2, 255),
-            ("error",    "轉檔逾時",    1, 3, true,  2, 255),
+            ("error",    UiStrings.Get("svc.timeout"), 1, 3, true,  2, 255),
             ("faded",    "✓ 8",        8, 8, true,  0, 80),
         };
 
