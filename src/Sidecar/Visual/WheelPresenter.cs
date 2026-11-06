@@ -620,16 +620,38 @@ internal sealed class WheelPresenter
         switch (icon)
         {
             case ToolIcon.Rotate90:
-                // 順時針 90 度的開放弧 ＋ 箭頭。弧從左側 180° 起、順時針走到 12 點方向。
-                var box = new RectangleF(cx - s / 2f, cy - s / 2f, s, s);
-                g.DrawArc(pen, box, 200f, -250f);
-                // 箭頭接在弧的終點（約 -50° ＝右上）並指向切線方向。
-                float ax = cx + (float)(Math.Cos(-50.0 * Math.PI / 180) * s / 2f);
-                float ay = cy + (float)(Math.Sin(-50.0 * Math.PI / 180) * s / 2f);
-                float a = s * 0.22f;
-                g.DrawLine(pen, ax, ay, ax - a, ay - a * 0.2f);
-                g.DrawLine(pen, ax, ay, ax + a * 0.2f, ay + a);
-                return true;
+                // 開放圓弧 ＋ **實心三角箭頭**，箭頭停在 1:30 指向右下（＝螢幕上的順時針方向）。
+                //
+                // 兩個決定，都是實測挑出來的：
+                //  · 箭頭**填滿**而不是兩條短線：舊版的兩條線在 17px、筆寬 max(1.4, s/9) ≈ 1.9px 之下
+                //    糊成一個小勾，看起來像「壞掉的環長出一個突起」。填滿的三角形是同一個線稿語言
+                //    （與 StripMetadata 的穿孔、ReadQr 的資料點一樣用扇區墨水筆刷），端點有明確方向。
+                //  · 弧要用**正掃角**（GDI+ 的正掃角＝螢幕上順時針）畫，箭頭的切線才會順著走勢。
+                //    用負掃角畫、箭頭卻用順時針切線，箭頭就會指向弧的來向——那是上一版看起來
+                //    「方向不對」的原因，光看程式碼不容易發現。
+                //
+                // 幾何：終點固定在 -45°（1:30），自該點往回 240° 取起點，順時針掃過去；弧實際只畫
+                //  232°（端點往後收 8°）讓箭頭底邊蓋住接縫。箭頭長 0.44s、底半寬 0.22s——
+                //  17px 下仍然讀得出是一支箭頭的最大值，再大就會撞到扇區邊界。
+                {
+                    const float endDeg = -45f, sweepDeg = 240f, seamDeg = -8f;
+                    var box = new RectangleF(cx - s / 2f, cy - s / 2f, s, s);
+                    g.DrawArc(pen, box, endDeg - sweepDeg, sweepDeg + seamDeg);
+
+                    float endRad = endDeg * (float)Math.PI / 180f;
+                    float ex = cx + (float)Math.Cos(endRad) * (s / 2f);
+                    float ey = cy + (float)Math.Sin(endRad) * (s / 2f);
+                    float tx = -(float)Math.Sin(endRad), ty = (float)Math.Cos(endRad);   // 切線（順時針走勢）
+                    float nx = (float)Math.Cos(endRad), ny = (float)Math.Sin(endRad);    // 法線
+                    float len = s * 0.44f, half = s * 0.22f;
+                    g.FillPolygon(ink, new[]
+                    {
+                        new PointF(ex + tx * len, ey + ty * len),
+                        new PointF(ex + nx * half, ey + ny * half),
+                        new PointF(ex - nx * half, ey - ny * half),
+                    });
+                    return true;
+                }
 
             case ToolIcon.StripMetadata:
                 // 標籤（tag）＋ 斜線：**被劃掉的標籤**。標籤的尖角朝左、右邊是矩形，
