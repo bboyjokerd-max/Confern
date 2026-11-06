@@ -148,7 +148,7 @@ function Write-Manifest([string]$Path, [string]$EditionLabel, $Info, [string]$No
     # One file per edition, each self-contained. Two files rather than one file with two sections:
     # a single URL per build means a build can only ever be pointed at the manifest that describes
     # ITSELF, and a free build can never be handed an exe that costs money.
-    $escapedNotes = $Notes.Replace('\', '\\').Replace('"', '\"').Replace("`r", ' ').Replace("`n", ' ').Trim()
+    $escapedNotes = ($Notes.Replace('\', '\\').Replace('"', '\"') -replace '\s+', ' ').Trim()
     $json = @'
 {
   "version": "__VERSION__",

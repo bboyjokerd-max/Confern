@@ -113,7 +113,7 @@ Requires the .NET 8 SDK. Installers: `powershell -File tools\build-installer.ps1
 
 ## Status
 
-Early but usable (`0.1.0`). Verification is 20 automated suites and 687 checks running against real windows and real files — including things you only learn by actually dragging, like "the payload is only reachable mid-drag".
+Early but usable (`0.1.1`). Verification is 20 automated suites and 688 checks running against real windows and real files — including things you only learn by actually dragging, like "the payload is only reachable mid-drag".
 
 `docs/` holds the design spec, a daily progress log, and a falsifiability audit (which assertions could never fail).
 
