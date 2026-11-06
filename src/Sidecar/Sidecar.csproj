@@ -31,7 +31,7 @@
       使用者語言本來就是走 Win32 的 GetUserDefaultUILanguage（見 SettingsStrings）。
     -->
     <InvariantGlobalization>false</InvariantGlobalization>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <!--
       兩個版本，一份原始碼（2026-11-03 使用者要求「保留一份安裝檔是完全開源免費的」）：
         dotnet build                  -> paid 版（有去背；免費 10 次之後要授權）

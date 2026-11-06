@@ -1,10 +1,10 @@
 {
-    "version":  "0.1.0",
-    "url":  "https://github.com/bboyjokerd-max/confern/releases/download/v0.1.0/Confern-Free-Setup-0.1.0.exe",
-    "sha256":  "BD478F8D8CC696DBFD10A3BFAFD23C875B6D241EC2984308272AB86A32AA4294",
-    "notes":  "第一個公開版本。  把圖片或影片拖到輪盤上就開始轉檔；付費版多一顆 CUTOUT（AI 去背），免費開源版沒有那一顆工具。  授權：MIT。付費版是信任制——任何人都能自己編一個無限制的去背版，我們選擇這樣。",
-    "mandatory":  false,
-    "published":  "2026-11-05",
-    "edition":  "free",
-    "size":  "7.38 MB"
+  "version": "0.1.1",
+  "url": "https://github.com/bboyjokerd-max/confern/releases/download/v0.1.1/Confern-Free-Setup-0.1.1.exe",
+  "sha256": "E349D50E60463C8D58DE949CEB05FB4079F939F417A0CD440DFCFD9F32D47CFE",
+  "notes": "Confern 0.1.1    這一版只有兩件事，都是上一次發佈之後才發現的。    新的「旋轉」圖示  上一版的箭頭是兩條短線，縮到實際大小（17px）時會糊成一個小勾，看起來像「壞掉的環長了一個突起」。  現在改成實心三角形，而且修掉一個真正的錯誤：圓弧是用逆時針畫的，箭頭卻用順時針的公式算，  所以箭頭指著弧的來向。現在弧與箭頭同向，箭頭停在 1:30、指向右下。    介面語言會跟著設定走  「轉檔逾時」這類進度提示原本固定用系統語言，即使你把介面切成英文也一樣。  現在它跟著介面語言。    安裝：直接執行新的安裝檔即可，設定與授權會保留。  已經安裝舊版的人，程式啟動後會看到「有新版本可用」。",
+  "mandatory": false,
+  "published": "2026-11-06",
+  "edition": "free",
+  "size": "7.39 MB"
 }
