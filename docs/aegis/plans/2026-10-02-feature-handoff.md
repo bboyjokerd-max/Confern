@@ -1,11 +1,22 @@
-  OK 新增「使用者現在可以做的事」   OK 常指令加 --trigger-key-probe # 接手起點：功能開發（2026-10-02）
+# 接手起點：功能開發（2026-10-02）
 
 這份是**換 session 後的起點**。UI 設計已暫定，這一輪回到功能開發。
 
-## 現況（2026-10-22 更新）
+## 現況（2026-11-06 更新）
 
-- `HEAD = a5f1d33`（下拉選單白底白字修好）之後再加一筆進度記錄、分支 `master`、單一 worktree、
-  **工作樹乾淨**。
+- **已公開發佈**：`v0.1.1`（2026-11-06）在
+  <https://github.com/bboyjokerd-max/Confern/releases/tag/v0.1.1>，repo 公開、MIT、`main` 分支。
+  兩個安裝檔：`Confern-Setup-0.1.1.exe`（18.46 MB）與 `Confern-Free-Setup-0.1.1.exe`（7.39 MB）。
+  更新清單在 repo 根目錄（`update-paid.json`／`update-free.json`），由 `tools\release.ps1` 產生。
+- `HEAD = 92b9e1f`、分支 `main`、單一 worktree、**工作樹乾淨**、本機與 origin 同步。
+- **回歸現況（2026-11-06 實測，0.1.1 的 exe）**：20 支套件 **688 條：662 pass、0 fail、
+  26 inconclusive**（`m1a` 20 條、`m1h` 6 條需要真人滑鼠鍵盤，套件以 exit=3 表示「綠的但未定」）。
+  逐套數字見 `docs/aegis/plans/2026-10-02-progress-log.md` 的「驗收數字」表。
+  - 指令：`powershell -File tools\verify-all.ps1 -Exe src\Sidecar\bin\Release\net8.0-windows\Confern.exe`
+  - ⚠️ 這支掃描需要**寫入 `%LOCALAPPDATA%\Confern`**（產品的證據、設定、recent 清單）。
+    若在只允許寫工作區的沙箱裡跑，會有 13 支套件變成 0 檢查或大量失敗——那是**環境**，不是程式。
+- 下面的「2026-10-22 更新」一節保留為歷史（當時 `HEAD = a5f1d33`、12 支套件 462 條）。
+
 - UI 方向 D（玻璃輪盤）已落地並驗收；設計**暫定**，日後要調再說。
 - 設計側已定案、**不要重做**的兩件事：
   - 光暈**關閉**（`WheelDesign.GlowEnabled = false`；強度/厚度/圈數參數全部保留，改 `true` 即還原）。

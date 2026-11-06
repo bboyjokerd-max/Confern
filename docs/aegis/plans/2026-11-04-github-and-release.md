@@ -93,3 +93,56 @@ release 建好才會通。順序反過來（先掛檔案、後推清單）會有
 
 **「release 頁面一定要公開嗎」**
 安裝檔要能被下載，就得公開（或至少讓下載連結可用）。這與授權一致：收費靠的是金鑰，不是藏檔案。
+
+## 六、真的發過一次之後補的（v0.1.1，2026-11-06）
+
+上面那些是設計；以下是實際按下去之後才知道的。**目前線上的版本是 `v0.1.1`**。
+
+### 完整順序（照這個貼就好，四步）
+
+```powershell
+# 0. 先殺掉常駐的 Confern，否則安裝演練會被自己的托盤行程干擾
+Get-Process Confern -EA SilentlyContinue | Stop-Process -Force
+
+# 1. 改版本：src\Sidecar\Sidecar.csproj 的 <Version>0.1.1</Version>
+#    說明寫進 dist\release\notes.txt（UTF-8），不要用 -Notes 傳中文（PowerShell 5.1 會用 ANSI 碼頁傳參數）
+powershell -File tools\release.ps1 -Version 0.1.1
+
+# 2. 清單先推（複製 dist\release\update-*.json 到 repo 根目錄）
+git add -A; git commit -m "release: v0.1.1"
+git tag v0.1.1
+git push origin main
+git push origin refs/tags/v0.1.1        # ← 這一行不能省，見下面第 1 點
+
+# 3. 掛安裝檔
+gh release create v0.1.1 dist\release\Confern-Setup-0.1.1.exe `
+   dist\release\Confern-Free-Setup-0.1.1.exe `
+   --title "Confern 0.1.1" --notes-file dist\release\RELEASE-NOTES.md
+```
+
+### 兩個實際踩到的坑
+
+**1. 輕量標籤不會被 `--follow-tags` 推上去。**
+`git tag v0.1.1` 建的是**輕量**標籤；`git push --follow-tags` 只推 annotated 標籤，所以遠端
+只有 `main` 沒有標籤，接著 `gh release create` 找不到 tag 就失敗。要嘛用 `git tag -a`，
+要嘛明講 `git push origin refs/tags/v0.1.1`。
+
+**2. 驗收套件裡不要硬寫版本號。**
+`tools\verify-cli.ps1` 的 S7.3 原本寫死「`--version` 印出 `0.1.0`」，版本一升就變紅——而且
+**「升版本」與「產品真的壞掉」在總表上長得一模一樣**，很容易誤判成自己改壞了。現在改成從
+`src\Sidecar\Sidecar.csproj` 讀 `<Version>` 當單一真相來源，訊息會同時印出實際值與期望值。
+
+### 發完之後怎麼確認（三個都要看）
+
+```powershell
+# (a) 清單在網路上是新的
+curl.exe -s https://raw.githubusercontent.com/bboyjokerd-max/Confern/main/update-paid.json
+
+# (b) 安裝檔下載得到（HEAD 200，大小對得上清單的 size）
+# (c) 產品自己說沒有更新了（state=current，latest 等於本機版本）
+Confern.exe --check-updates --update-url https://raw.githubusercontent.com/bboyjokerd-max/Confern/main/update-paid.json
+```
+
+`--check-updates` 若在**開發機**上跑，會說「no url configured」——那是對的：網址是安裝檔
+種進使用者設定檔的，開發機的 `settings.json` 沒有那兩行，所以要自己帶 `--update-url`。
+
