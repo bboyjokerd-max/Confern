@@ -4828,3 +4828,43 @@ zh-Hant -> PASS progress '轉檔逾時'               hash 45DFFE7932
 另一個同類現象：沙箱下 `$env:TEMP` 是每個 job 各自的路徑，所以「寫在 TEMP 的設定檔」跨 job 不一定存在。
 有一批英文截圖因此是用中文設定渲出來的（中文圖被寫進 `docs/images/en/`），是用視覺模型讀圖時
 看到「旋轉」而不是 ROTATE 才抓到。設定檔已改放 `dist\_lang\`（在 repo 內，工作區可寫）。
+
+---
+
+## 2026-11-06 · 發佈 v0.1.1（使用者：「全部都更新」）
+
+上一則記的是旋轉圖示定案。使用者接著說「全部都更新」⇒ 把所有未發佈的東西一次推出去：
+新圖示 ＋ 介面語言修正（`abeb99b` 的 `svc.timeout`）。
+
+### 這次出去的兩個改動
+
+1. **旋轉圖示**：實心三角箭頭、弧與箭頭同向（順時針），箭頭停 1:30 指向右下。
+2. **進度提示跟著介面語言**：「轉檔逾時」原本固定用系統語言。
+
+### 版本與資產
+
+| 項目 | 值 |
+|---|---|
+| 版本 | `0.1.0` → **`0.1.1`**（`src\Sidecar\Sidecar.csproj`） |
+| 付費安裝檔 | `Confern-Setup-0.1.1.exe` 18.46 MB，sha256 `9B815F95…F07B` |
+| 免費安裝檔 | `Confern-Free-Setup-0.1.1.exe` 7.39 MB，sha256 `E349D50E…7CFE` |
+| 安裝演練 | 靜默安裝→每個檔案到位→跑 `formats`→靜默卸載→exe 消失（免費版 616 秒） |
+| 更新清單 | `update-paid.json` / `update-free.json`，兩份都指向 v0.1.1 且 sha256 對得上 |
+| Release | https://github.com/bboyjokerd-max/Confern/releases/tag/v0.1.1 |
+| 線上驗證 | 清單 HTTP 200（version 0.1.1）、兩個安裝檔 HEAD 200、產品 `--check-updates` → `state=current latest=0.1.1` |
+
+### 兩個自己踩到的坑
+
+1. **輕量標籤不會被 `--follow-tags` 帶上去**。`git tag -f v0.1.1`（非 annotated）之後 `push --follow-tags` 只推了 main，
+   遠端沒有標籤；要明講 `git push origin refs/tags/v0.1.1`。gh release 也是靠標籤存在才建得起來。
+2. **版本一升，`verify-cli.ps1` 的 S7.3 就紅了**——它硬寫 `0.1.0`。這種斷言會讓「升版本」與「產品壞掉」長得一模一樣。
+   已改成從 `src\Sidecar\Sidecar.csproj` 讀 `<Version>`（單一真相來源），訊息也印出兩邊的值。
+   順帶：腳本裡沒有 `$root` 這個變數（它只有 `$Exe`/`$Work`），第一次改寫踩了 `expected=` 空白，改用 `$PSScriptRoot`。
+
+另外修掉 `release.ps1` 的換行處理：原本每個 `\r`/`\n` 各自換成一個空格，所以空行會變成一串連續空白，
+更新提示讀起來像「Confern 0.1.1　　這一版…」。現在是 `-replace '\s+', ' '`，並手動修正了已發佈的兩份清單（只動 notes，未動版本與 sha256）。
+
+### 驗收
+
+**20 套件、688 檢查、662 通過、0 失敗、26 未定**（m1a 20 未定、m1h 6 未定，兩者都是需要真人滑鼠鍵盤的檢查，exit=3 是套件自己說「綠的但未定」）。
+素材（中英文各四張工具輪盤截圖、兩支動畫）全部是 0.1.1 的 exe 重出的。

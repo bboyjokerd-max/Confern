@@ -290,7 +290,11 @@ Check 'S7.1 --convert / --target / --quiet still exits 0' ($r.Exit -eq 0 -and @(
 Check 'S7.2 ... and stays silent on stderr with --quiet' ($r.Err.Trim().Length -eq 0) $r.Err
 
 $r = Invoke-Cli @('--version') 's7b'
-Check 'S7.3 --version exits 0 and prints 0.1.0' ($r.Exit -eq 0 -and $r.Out -match '0\.1\.0') "exit=$($r.Exit) out=$($r.Out)"
+# The expected version comes from the csproj, not from a literal in this file. It used to be a
+# hardcoded '0.1.0', so bumping the version turned a green suite red for no reason -- a product bug
+# would have looked exactly the same. Reading the single source of truth costs one line.
+$expectVersion = ([regex]::Match((Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'src\Sidecar\Sidecar.csproj') -Raw -Encoding UTF8), '<Version>([^<]+)</Version>')).Groups[1].Value.Trim()
+Check 'S7.3 --version exits 0 and prints the csproj version' ($r.Exit -eq 0 -and $expectVersion -ne '' -and $r.Out.Trim() -eq $expectVersion) "exit=$($r.Exit) out=$($r.Out.Trim()) expected=$expectVersion"
 
 $r = Invoke-Cli @('--help') 's7c'
 $helpHasCli = $false
