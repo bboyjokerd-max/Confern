@@ -1,0 +1,296 @@
+<div id="cf-demo" style="--bg:light-dark(#eef0f3,#15171b);--stage:light-dark(#f7f8fa,#1b1e24);--ink:light-dark(#14181d,#f2f3f5);--dim:light-dark(#5c6470,#98a0ac);--fill:light-dark(rgba(60,90,115,.18),rgba(150,180,205,.20));--fill2:light-dark(rgba(60,90,115,.10),rgba(70,95,118,.13));--sel:light-dark(#2f7183,#3f6b7a);--selStroke:light-dark(#b8820f,#ffc24d);--rim:light-dark(rgba(46,120,110,.55),rgba(173,249,235,.55));--cap:light-dark(rgba(255,255,255,.92),rgba(255,255,255,.85));--capFg:light-dark(#0a0f14,#0a0f14);--keyPill:light-dark(rgba(20,24,29,.88),rgba(255,255,255,.95));--keyFg:light-dark(#fff,#0a0f14);--chip:light-dark(rgba(20,24,29,.08),rgba(255,255,255,.07));font-family:'Microsoft JhengHei',system-ui,sans-serif;background:var(--bg);color:var(--ink);border-radius:14px;padding:14px 14px 10px;box-sizing:border-box">
+
+  <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+    <div style="font-size:15px;font-weight:700;letter-spacing:.2px">Confern 輪盤｜互動演示</div>
+    <div style="font-size:12px;color:var(--dim)">幾何、配色、標籤都照產品的常數</div>
+  </div>
+
+  <div id="cf-stage" style="position:relative;height:430px;border-radius:12px;background:var(--stage);overflow:hidden;cursor:crosshair;user-select:none;-webkit-user-select:none">
+    <svg id="cf-svg" viewBox="0 0 480 470" style="position:absolute;inset:0;width:100%;height:100%">
+      <g id="cf-wheel" style="opacity:0;transform-box:fill-box;transform-origin:240px 210px">
+        <g id="cf-sectors"></g>
+        <g id="cf-center"></g>
+      </g>
+    </svg>
+
+    <div id="cf-hint" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;pointer-events:none">
+      <div id="cf-chip" style="pointer-events:auto;display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:9px;background:var(--chip);font-size:13px;transform:translateY(0);transition:transform .28s ease">
+        <span style="display:inline-block;width:14px;height:17px;border:1.6px solid currentColor;border-radius:3px"></span>
+        <span>IMG_2417.HEIC</span>
+      </div>
+      <div style="font-size:13px;color:var(--dim);max-width:330px;line-height:1.7">
+        在畫面上<b style="color:var(--ink)">按住左鍵</b>（等同拖著檔案按住 Alt）就會出現輪盤；<br>移動挑一格，放開就送出。
+      </div>
+    </div>
+
+    <div id="cf-pill" style="position:absolute;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;transition:opacity .22s ease,transform .22s ease;background:light-dark(rgba(255,255,255,.96),rgba(24,27,33,.96));border:1px solid light-dark(rgba(0,0,0,.12),rgba(255,255,255,.10));border-radius:11px;padding:10px 16px;min-width:200px;box-shadow:0 6px 24px rgba(0,0,0,.28)">
+      <div id="cf-pillText" style="font-size:13px;font-weight:600;text-align:center"></div>
+      <div style="margin-top:7px;height:4px;border-radius:2px;background:light-dark(rgba(0,0,0,.10),rgba(255,255,255,.12));overflow:hidden">
+        <div id="cf-bar" style="height:100%;width:0%;background:light-dark(#2f8a6e,#5fd3a8);border-radius:2px;transition:width .18s linear"></div>
+      </div>
+    </div>
+
+    <div style="position:absolute;left:12px;top:10px;font-size:11px;letter-spacing:.8px;color:var(--dim);text-transform:uppercase">Confern 0.1.0</div>
+    <div id="cf-mode" style="position:absolute;right:12px;top:10px;font-size:11px;color:var(--dim)">格式層</div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px">
+    <button id="cf-btn" style="appearance:none;border:1px solid light-dark(rgba(0,0,0,.16),rgba(255,255,255,.18));background:light-dark(#fff,rgba(255,255,255,.06));color:var(--ink);font:inherit;font-size:13px;font-weight:600;padding:7px 14px;border-radius:8px;cursor:pointer">按住 Alt（按住這個也可以）</button>
+    <span id="cf-layer" style="font-size:12px;color:var(--dim)">按住時按 <b style="color:var(--ink)">Shift</b> → 工具輪盤</span>
+  </div>
+
+  <div style="margin-top:9px;font-size:12px;line-height:1.75;color:var(--dim)">
+    幾何照 <code style="font-size:11.5px">WheelDesign.cs</code>／<code style="font-size:11.5px">WheelGeometry.cs</code>：直徑 220、內孔 47／110、扇區間隙 1.5°（4 扇區 2°）、7px 圓角、光暈關閉。高亮色 <code style="font-size:11.5px">#3F6B7A</code>／描邊 <code style="font-size:11.5px">#FFC24D</code> 都取自 <code style="font-size:11.5px">Palette.cs</code>。
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('cf-demo');
+  if (!root) return;
+  var stage = document.getElementById('cf-stage');
+  var svg = document.getElementById('cf-svg');
+  var wheel = document.getElementById('cf-wheel');
+  var gSectors = document.getElementById('cf-sectors');
+  var gCenter = document.getElementById('cf-center');
+  var hint = document.getElementById('cf-hint');
+  var pill = document.getElementById('cf-pill');
+  var pillText = document.getElementById('cf-pillText');
+  var bar = document.getElementById('cf-bar');
+  var modeTag = document.getElementById('cf-mode');
+  var layerTag = document.getElementById('cf-layer');
+  var btn = document.getElementById('cf-btn');
+
+  var CX = 240, CY = 210, ROUT = 132, RIN = 56, GAP = 4;
+  var FORMATS = ['PNG', 'JPG', 'BMP', 'TIF', 'PDF'];
+  var TOOLS = ['旋轉', '清除', '壓縮', '裁切', '讀 QR', '去背'];
+
+  var state = { holding: false, layer: 'format', index: 0, busy: false };
+
+  function items() { return state.layer === 'format' ? FORMATS : TOOLS; }
+  function gapFor(n) { return n === 4 ? 2 : (n === 3 ? 3 : GAP); }
+  function sweepFor(n) { return 360 / n - gapFor(n); }
+
+  function pol(cx, cy, r, deg) {
+    var a = (deg - 90) * Math.PI / 180;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  }
+  function sectorPath(a0, a1) {
+    var o0 = pol(CX, CY, ROUT, a0), o1 = pol(CX, CY, ROUT, a1);
+    var i1 = pol(CX, CY, RIN, a1), i0 = pol(CX, CY, RIN, a0);
+    var large = (a1 - a0) > 180 ? 1 : 0;
+    return 'M' + o0[0].toFixed(2) + ' ' + o0[1].toFixed(2) +
+      ' A' + ROUT + ' ' + ROUT + ' 0 ' + large + ' 1 ' + o1[0].toFixed(2) + ' ' + o1[1].toFixed(2) +
+      ' L' + i1[0].toFixed(2) + ' ' + i1[1].toFixed(2) +
+      ' A' + RIN + ' ' + RIN + ' 0 ' + large + ' 0 ' + i0[0].toFixed(2) + ' ' + i0[1].toFixed(2) + ' Z';
+  }
+
+  function build() {
+    var list = items(), n = list.length, sweep = sweepFor(n), gap = gapFor(n);
+    gSectors.innerHTML = '';
+    gCenter.innerHTML = '';
+    var ns = 'http://www.w3.org/2000/svg';
+    for (var i = 0; i < n; i++) {
+      var a0 = i * (360 / n) + gap / 2;
+      var a1 = a0 + sweep;
+      var p = document.createElementNS(ns, 'path');
+      p.setAttribute('d', sectorPath(a0, a1));
+      p.setAttribute('class', 'cf-sector');
+      p.setAttribute('data-i', String(i));
+      p.style.fill = (state.layer === 'format' && i % 2 === 0) ? 'var(--fill)' : 'var(--fill2)';
+      p.style.stroke = 'var(--rim)';
+      p.style.strokeWidth = '1';
+      p.style.transition = 'fill .12s ease, stroke .12s ease';
+      gSectors.appendChild(p);
+
+      var mid = (a0 + a1) / 2;
+      var lp = pol(CX, CY, ROUT * 0.72, mid);
+      var t = document.createElementNS(ns, 'text');
+      t.setAttribute('x', lp[0].toFixed(2));
+      t.setAttribute('y', lp[1].toFixed(2));
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('dominant-baseline', 'middle');
+      t.setAttribute('font-size', n >= 6 ? '12' : '13.5');
+      t.setAttribute('font-weight', '600');
+      t.setAttribute('fill', '#fff');
+      t.style.transition = 'opacity .12s ease';
+      t.textContent = list[i];
+      gSectors.appendChild(t);
+    }
+
+    // 內孔（跟外環同色底，做出「挖空」）
+    var hole = document.createElementNS(ns, 'circle');
+    hole.setAttribute('cx', CX); hole.setAttribute('cy', CY); hole.setAttribute('r', RIN - 1);
+    hole.style.fill = 'light-dark(#f7f8fa,#1b1e24)';
+    hole.style.stroke = 'var(--rim)';
+    hole.style.strokeWidth = '0.8';
+    gSectors.insertBefore(hole, gSectors.firstChild);
+
+    // 中央結果膠囊
+    var label = state.layer === 'format' ? ('HEIC→' + list[state.index]) : list[state.index];
+    var w = Math.max(74, label.length * (state.layer === 'format' ? 15 : 15) + 22);
+    var rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('x', CX - w / 2); rect.setAttribute('y', CY - 14);
+    rect.setAttribute('width', w); rect.setAttribute('height', 28); rect.setAttribute('rx', 14);
+    rect.style.fill = 'var(--cap)';
+    gCenter.appendChild(rect);
+    var ct = document.createElementNS(ns, 'text');
+    ct.setAttribute('x', CX); ct.setAttribute('y', CY + 1);
+    ct.setAttribute('text-anchor', 'middle');
+    ct.setAttribute('dominant-baseline', 'middle');
+    ct.setAttribute('font-size', '13.5');
+    ct.setAttribute('font-weight', '700');
+    ct.style.fill = 'var(--capFg)';
+    ct.textContent = label;
+    gCenter.appendChild(ct);
+
+    // 鍵帽 + 說明
+    var capY = CY + ROUT + 16;
+    var capW = 40;
+    var cap = document.createElementNS(ns, 'rect');
+    cap.setAttribute('x', CX - capW / 2 + 52); cap.setAttribute('y', capY);
+    cap.setAttribute('width', capW); cap.setAttribute('height', 20); cap.setAttribute('rx', 5);
+    cap.style.fill = 'var(--keyPill)';
+    gCenter.appendChild(cap);
+    var kt = document.createElementNS(ns, 'text');
+    kt.setAttribute('x', CX + 52); kt.setAttribute('y', capY + 11);
+    kt.setAttribute('text-anchor', 'middle');
+    kt.setAttribute('dominant-baseline', 'middle');
+    kt.setAttribute('font-size', '11');
+    kt.setAttribute('font-weight', '700');
+    kt.style.fill = 'var(--keyFg)';
+    kt.textContent = 'alt';
+    gCenter.appendChild(kt);
+    var cpt = document.createElementNS(ns, 'text');
+    cpt.setAttribute('x', CX - 18); cpt.setAttribute('y', capY + 11);
+    cpt.setAttribute('text-anchor', 'middle');
+    cpt.setAttribute('dominant-baseline', 'middle');
+    cpt.setAttribute('font-size', '11.5');
+    cpt.style.fill = 'var(--dim)';
+    cpt.textContent = '按住觸發鍵';
+    gCenter.appendChild(cpt);
+
+    paintHighlight();
+  }
+
+  function paintHighlight() {
+    var paths = gSectors.querySelectorAll('.cf-sector');
+    var texts = gSectors.querySelectorAll('text');
+    for (var i = 0; i < paths.length; i++) {
+      var on = (i === state.index) && state.holding;
+      paths[i].style.fill = on ? 'var(--sel)' : ((state.layer === 'format' && i % 2 === 0) ? 'var(--fill)' : 'var(--fill2)');
+      paths[i].style.stroke = on ? 'var(--selStroke)' : 'var(--rim)';
+      paths[i].style.strokeWidth = on ? '2' : '1';
+      if (texts[i]) texts[i].style.opacity = on ? '1' : (state.holding ? '0.55' : '0.9');
+    }
+  }
+
+  function showWheel() {
+    if (state.busy) return;
+    state.holding = true;
+    hint.style.opacity = '0';
+    hint.style.transition = 'opacity .16s ease';
+    build();
+    wheel.style.transition = 'opacity .16s ease, transform .26s cubic-bezier(.2,.9,.25,1)';
+    wheel.style.opacity = '1';
+    wheel.style.transform = 'scale(1)';
+    modeTag.textContent = state.layer === 'format' ? '格式層' : '工具層';
+  }
+  function hideWheel() {
+    state.holding = false;
+    wheel.style.transition = 'opacity .18s ease, transform .22s cubic-bezier(.4,0,.6,1)';
+    wheel.style.opacity = '0';
+    wheel.style.transform = 'scale(.88)';
+    hint.style.transition = 'opacity .2s ease';
+    hint.style.opacity = '1';
+  }
+
+  function angleOf(ev) {
+    var r = svg.getBoundingClientRect();
+    var x = (ev.clientX - r.left) / r.width * 480;
+    var y = (ev.clientY - r.top) / r.height * 470;
+    var dx = x - CX, dy = y - CY;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    if (d < RIN) return -1;
+    var deg = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+    if (deg < 0) deg += 360;
+    return deg;
+  }
+  function pickAt(ev) {
+    var deg = angleOf(ev);
+    if (deg < 0) { return; }
+    var n = items().length, gap = gapFor(n), step = 360 / n;
+    var idx = Math.floor(deg / step) % n;
+    var within = deg - idx * step;
+    if (within < gap / 2 || within > step - gap / 2) return;
+    if (idx !== state.index) { state.index = idx; build(); }
+  }
+
+  function runProgress() {
+    var target = items()[state.index];
+    var name = state.layer === 'format' ? ('IMG_2417.' + target.toLowerCase()) : ('IMG_2417' + '（' + target + '）');
+    state.busy = true;
+    pillText.textContent = '轉檔中… 0%';
+    pill.style.opacity = '1';
+    pill.style.transform = 'translate(-50%,0)';
+    bar.style.width = '0%';
+    var pct = 0;
+    var timer = setInterval(function () {
+      pct += 7 + Math.random() * 9;
+      if (pct >= 100) {
+        pct = 100;
+        clearInterval(timer);
+        bar.style.width = '100%';
+        pillText.textContent = '✓ 完成・' + name;
+        setTimeout(function () {
+          pill.style.opacity = '0';
+          pill.style.transform = 'translate(-50%,10px)';
+          setTimeout(function () { state.busy = false; }, 260);
+        }, 1500);
+      } else {
+        bar.style.width = Math.round(pct) + '%';
+        pillText.textContent = '轉檔中… ' + Math.round(pct) + '%';
+      }
+    }, 150);
+  }
+
+  function release() {
+    if (!state.holding) return;
+    hideWheel();
+    runProgress();
+  }
+
+  stage.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();
+    state.index = state.layer === 'format' ? 0 : 0;
+    showWheel();
+    pickAt(ev);
+  });
+  stage.addEventListener('pointermove', function (ev) {
+    if (state.holding) pickAt(ev);
+  });
+  window.addEventListener('pointerup', function () { if (state.holding) release(); });
+
+  btn.addEventListener('pointerdown', function (ev) { ev.preventDefault(); showWheel(); });
+  btn.addEventListener('pointerup', function () { if (state.holding) release(); });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Shift' && state.holding) {
+      state.layer = state.layer === 'format' ? 'tool' : 'format';
+      state.index = 0;
+      build();
+      modeTag.textContent = state.layer === 'format' ? '格式層' : '工具層';
+      layerTag.innerHTML = state.layer === 'format'
+        ? '按住時按 <b style="color:var(--ink)">Shift</b> → 工具輪盤'
+        : '工具層：按 <b style="color:var(--ink)">Shift</b> 回格式層';
+    }
+  });
+  document.addEventListener('keyup', function (ev) {
+    if (ev.altKey === false && state.holding) { /* Alt 放開時收尾 */ }
+  });
+
+  wheel.style.transform = 'scale(.2)';
+  build();
+  wheel.style.opacity = '0';
+})();
+</script>
